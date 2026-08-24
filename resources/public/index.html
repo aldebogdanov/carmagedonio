@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <title>carmagedonio</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #8fb7d9; }
+      #game { display: block; width: 100vw; height: 100vh; }
+      #hud, #help {
+        position: fixed; left: 12px;
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6);
+        pointer-events: none; user-select: none;
+      }
+      #hud  { top: 12px; font-size: 15px; }
+      #help { bottom: 12px; opacity: .75; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="hud">loading physics&hellip;</div>
+    <div id="help">WASD / arrows drive &middot; space handbrake &middot; R reset</div>
+    <!-- shared holds the code the page and the chunk worker both use -->
+    <script src="/js/shared.js"></script>
+    <script src="/js/main.js"></script>
+  </body>
+</html>

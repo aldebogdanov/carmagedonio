@@ -1,0 +1,17 @@
+{
+  "name": "carmagedonio",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "shadow-cljs watch client",
+    "release": "shadow-cljs release client",
+    "server": "clojure -M:server"
+  },
+  "devDependencies": {
+    "shadow-cljs": "^2.28.20"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "three": "^0.169.0"
+  }
+}

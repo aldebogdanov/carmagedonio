@@ -1,0 +1,10 @@
+/node_modules/
+/target/
+/resources/public/js/
+/.shadow-cljs/
+/.cpcache/
+/data/          # server's default EDN store: runtime state, not source
+/.nrepl-port
+/.lsp/
+/.clj-kondo/.cache/
+.DS_Store

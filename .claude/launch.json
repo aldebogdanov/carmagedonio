@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "client",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["shadow-cljs", "watch", "client"],
+      "port": 8080
+    },
+    {
+      "name": "server",
+      "runtimeExecutable": "clojure",
+      "runtimeArgs": ["-M:server"],
+      "port": 3000
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{:deps     {:aliases [:dev]}
+ :dev-http {8080 ["resources/public" "target/public"]}
+ :nrepl    {:port 7002}
+
+ :builds
+ {:client
+  {:target     :browser
+   :output-dir "resources/public/js"
+   :asset-path "/js"
+   ;; `:shared` holds cljs.core and the .cljc worldgen code that both the page
+   ;; and the worker need, so it is compiled once rather than duplicated.
+   :modules    {:shared {:entries []}
+                :main   {:init-fn    carmageddon.client.main/init!
+                         :depends-on #{:shared}}
+                :worker {:init-fn    carmageddon.client.worker/init!
+                         :depends-on #{:shared}
+                         :web-worker true}}
+   :devtools   {:after-load carmageddon.client.main/after-load!}
+   :compiler-options {:output-feature-set :es2020
+                      :infer-externs      :auto}
+   :release    {:compiler-options {:optimizations :advanced}}}
+
+  :testbed
+  {:target    :node-script
+   :output-to "target/testbed.js"
+   :main      carmageddon.client.testbed/-main}
+
+  :test
+  {:target    :node-test
+   :output-to "target/test/shared.js"
+   :ns-regexp "-test$"}}}

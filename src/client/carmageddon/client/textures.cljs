@@ -1,0 +1,171 @@
+(ns carmageddon.client.textures
+  "Procedurally drawn textures.
+
+  Browser-only and asset-free on purpose: everything is painted onto a canvas at
+  boot, so there are no files to fetch, nothing to cache-bust, and no binary
+  blobs in the repo. Generation runs off the shared seeded PRNG, so a given seed
+  paints the same world every time -- the same property the chunk generator will
+  rely on in M2.
+
+  The ground texture is not decoration. On an untextured plane there is no
+  optical flow, so speed is invisible and the vehicle cannot be tuned by feel."
+  (:require ["three" :as three]
+            [carmageddon.shared.prng :as prng]))
+
+(defn- canvas ^js [size]
+  (let [c (js/document.createElement "canvas")]
+    (set! (.-width c) size)
+    (set! (.-height c) size)
+    c))
+
+(defn- fill! [^js ctx color x y w h]
+  (set! (.-fillStyle ctx) color)
+  (.fillRect ctx x y w h))
+
+(defn- rgb [r g b]
+  (str "rgb(" (js/Math.round r) "," (js/Math.round g) "," (js/Math.round b) ")"))
+
+(defn- jitter
+  "Sprinkle `n` translucent specks. This is what actually reads as motion when
+  the ground is scrolling past at 100 km/h."
+  [^js ctx rng size n [r g b] spread max-px]
+  (dotimes [_ n]
+    (let [x (* size (prng/next-double! rng))
+          y (* size (prng/next-double! rng))
+          d (* spread (- (prng/next-double! rng) 0.5))
+          s (+ 1.0 (* max-px (prng/next-double! rng)))]
+      (fill! ctx (rgb (+ r d) (+ g d) (+ b d)) x y s s))))
+
+;; --- individual textures ----------------------------------------------------
+
+(defn- ground-canvas
+  "Near-field grain only. Macro variation is carried by vertex colours on the
+  ground mesh, so nothing in here is allowed to be large enough to recognise --
+  that is what keeps a 400-tile repeat from reading as a grid."
+  [seed size]
+  (let [c   (canvas size)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)]
+    (fill! ctx (rgb 74 92 66) 0 0 size size)
+    (jitter ctx rng size  1100 [66 82 58] 30 26.0)  ; soil patches, ~40 cm
+    (jitter ctx rng size  2400 [84 100 70] 26 12.0) ; growth clumps, ~18 cm
+    (jitter ctx rng size  9000 [72 90 64] 34  5.0)  ; coarse grain
+    (jitter ctx rng size 18000 [74 92 66] 22  2.0)  ; fine grain
+    c))
+
+(defn- road-canvas [seed size]
+  (let [c   (canvas size)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)]
+    (fill! ctx (rgb 58 58 62) 0 0 size size)
+    (jitter ctx rng size 14000 [58 58 62] 30 2.0)
+    (jitter ctx rng size 900 [40 40 44] 26 4.0)
+    c))
+
+(defn- body-canvas [seed size base-rgb]
+  (let [c   (canvas size)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)
+        [r g b] base-rgb]
+    (fill! ctx (rgb r g b) 0 0 size size)
+    (jitter ctx rng size 2600 base-rgb 16 2.0)
+    ;; Panel seams: cheap, but they give the body a scale reference so the car
+    ;; does not read as an untextured slab.
+    (set! (.-strokeStyle ctx) "rgba(0,0,0,0.30)")
+    (set! (.-lineWidth ctx) 2)
+    (doseq [f [0.18 0.5 0.82]]
+      (.beginPath ctx)
+      (.moveTo ctx 0 (* size f))
+      (.lineTo ctx size (* size f))
+      (.stroke ctx))
+    ;; A single off-centre stripe -- makes yaw and roll legible at a glance.
+    (fill! ctx "rgba(255,255,255,0.16)" 0 (* size 0.40) size (* size 0.06))
+    c))
+
+(defn- crate-canvas [seed size]
+  (let [c   (canvas size)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)]
+    (fill! ctx (rgb 165 132 82) 0 0 size size)
+    (dotimes [i 6]
+      (let [y (* size (/ i 6.0))
+            d (* 22 (- (prng/next-double! rng) 0.5))]
+        (fill! ctx (rgb (+ 165 d) (+ 132 d) (+ 82 d)) 0 y size (/ size 6.2))))
+    (jitter ctx rng size 4000 [165 132 82] 26 2.0)
+    (set! (.-strokeStyle ctx) "rgba(60,40,20,0.55)")
+    (set! (.-lineWidth ctx) 3)
+    (.strokeRect ctx 2 2 (- size 4) (- size 4))
+    c))
+
+(defn- facade-canvas
+  "A wall with a grid of windows. Reading building scale at a glance is what
+  makes a city feel like a city rather than a field of boxes -- and lit windows
+  give the eye something to track speed against."
+  [seed size tint]
+  (let [c   (canvas size)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)
+        [r g b] tint]
+    (fill! ctx (rgb r g b) 0 0 size size)
+    (jitter ctx rng size 3000 tint 18 3.0)
+    (let [cols 8, rows 10
+          cw (/ size cols), ch (/ size rows)]
+      (dotimes [row rows]
+        (dotimes [col cols]
+          (let [lit (prng/next-double! rng)
+                wx (+ (* col cw) (* cw 0.22))
+                wy (+ (* row ch) (* ch 0.18))
+                ww (* cw 0.56), wh (* ch 0.5)]
+            (fill! ctx
+                   (cond (> lit 0.82) "rgba(255,232,170,0.92)"
+                         (> lit 0.55) "rgba(120,140,160,0.75)"
+                         :else        "rgba(30,36,44,0.85)")
+                   wx wy ww wh)))))
+    c))
+
+(defn- tyre-canvas [seed size]
+  (let [c   (canvas size)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)]
+    (fill! ctx (rgb 26 26 30) 0 0 size size)
+    ;; Vertical bars become tread blocks once wrapped around the cylinder, so
+    ;; wheel spin is actually visible.
+    (dotimes [i 18]
+      (fill! ctx (rgb 14 14 17) (* size (/ i 18.0)) 0 (/ size 42.0) size))
+    (jitter ctx rng size 2200 [26 26 30] 14 2.0)
+    c))
+
+;; --- three.js wrapping ------------------------------------------------------
+
+(defn- ->texture ^js [^js canvas ^js renderer {:keys [repeat]}]
+  (let [t (three/CanvasTexture. canvas)]
+    (set! (.-wrapS t) three/RepeatWrapping)
+    (set! (.-wrapT t) three/RepeatWrapping)
+    (set! (.-colorSpace t) three/SRGBColorSpace)
+    ;; Without anisotropy a ground plane viewed at a grazing angle blurs to mush
+    ;; a few metres out, which is exactly where the speed cue needs to be.
+    (set! (.-anisotropy t) (.getMaxAnisotropy (.-capabilities renderer)))
+    (when repeat (.set (.-repeat t) (first repeat) (second repeat)))
+    t))
+
+(defn build!
+  "Paint every texture once. `seed` makes the result reproducible."
+  [^js renderer seed]
+  {:ground (->texture (ground-canvas (prng/hash-coords seed 1 0) 512) renderer
+                      ;; repeat stays 1: chunk meshes carry world-derived UVs (metres / tile size),
+   ;; which is what keeps the grain continuous across chunk seams. Setting a
+   ;; repeat here as well would multiply with those and tile ~25x per metre.
+   {:repeat [1 1]})
+   :road   (->texture (road-canvas (prng/hash-coords seed 2 0) 512) renderer
+                      {:repeat [40 40]})
+   :body   (->texture (body-canvas (prng/hash-coords seed 3 0) 256 [176 46 34]) renderer nil)
+   :crate  (->texture (crate-canvas (prng/hash-coords seed 4 0) 256) renderer nil)
+   :tyre   (->texture (tyre-canvas (prng/hash-coords seed 5 0) 128) renderer nil)
+   ;; One facade per building kind. UVs come from a shared unit cube scaled to
+   ;; each building, so windows stretch with the box -- accepted deliberately:
+   ;; per-building geometry would mean per-building disposal, and this is
+   ;; scenery.
+   :facades (mapv (fn [[i tint]]
+                    (->texture (facade-canvas (prng/hash-coords seed 6 i) 256 tint)
+                               renderer nil))
+                  (map-indexed vector [[92 96 104] [116 104 92] [80 90 96] [104 100 88]]))})
