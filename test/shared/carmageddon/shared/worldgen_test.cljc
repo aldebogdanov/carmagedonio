@@ -680,17 +680,23 @@
                 (str "only " (- deck under) " m of clearance -- the valley got "
                      "filled in"))))))))
 
-(deftest a-deck-meets-the-road-at-both-ends
+(deftest a-deck-ends-where-the-road-does
   (testing "the approach is flattened terrain and the span is not, and they have
-            to agree at the node or the car launches off a step"
+            to agree at the node or the car launches off a step.
+
+            With expressways the agreement is at the node's *grade*: a river
+            crossing has no lift and touches down, an elevated span sits exactly
+            its own lift above the road it rides over. Asserting the deck always
+            meets the ground stopped being true the moment roads could fly."
     (let [[cx cz] (bridge-chunk)
           field (w/road-field seed cx cz)]
-      (doseq [{:keys [points ya yb]} (filter :bridge? (w/chunk-lines seed cx cz))]
+      (doseq [{:keys [points ya yb lift-a lift-b]}
+              (filter :bridge? (w/chunk-lines seed cx cz))]
         (let [[ax az] (first points)
               [bx bz] (peek points)]
-          (is (< (abs (- ya (first (w/surface seed field ax az)))) 0.05)
+          (is (< (abs (- ya (+ lift-a (first (w/surface seed field ax az))))) 0.05)
               "near end")
-          (is (< (abs (- yb (first (w/surface seed field bx bz)))) 0.05)
+          (is (< (abs (- yb (+ lift-b (first (w/surface seed field bx bz))))) 0.05)
               "far end"))))))
 
 (deftest bridge-parts-are-well-formed
@@ -786,3 +792,95 @@
       (testing "and the deck is pitched at all, rather than a stack of steps"
         (is (some (fn [i] (> (abs (at i 4)) 0.005)) (range n))
             "no deck part had any pitch")))))
+
+;; --- elevated expressways ---------------------------------------------------
+
+(defn- lifted-node
+  "A lattice node where an expressway rides over the surface grid. Searched for
+  rather than hardcoded, for the same reason `wet-point` is."
+  []
+  (first (for [gx (range -600 600 8), gz (range -600 600 8)
+               :when (or (zero? (mod gx 32)) (zero? (mod gz 32)))
+               :let [lx (w/node-lift seed gx gz true)
+                     lz (w/node-lift seed gx gz false)]
+               :when (> (max lx lz) 6.0)]
+           [gx gz])))
+
+(defn- around-lifted
+  "Every street in the chunks around a lifted node."
+  []
+  (let [[gx gz] (lifted-node)
+        [x z] (w/node seed gx gz)
+        [cx cz] (w/chunk-of x z)]
+    {:node [gx gz] :at [x z] :chunk [cx cz]
+     :streets (vec (for [dx (range -2 3), dz (range -2 3)
+                         s (w/chunk-lines seed (+ cx dx) (+ cz dz))]
+                     s))}))
+
+(deftest an-expressway-leaves-the-ground
+  (let [{:keys [streets]} (around-lifted)
+        lifted (filter #(or (pos? (:lift-a %)) (pos? (:lift-b %))) streets)]
+    (is (seq lifted) "expected an elevated expressway nearby")
+    (testing "a lifted street is a bridge, so it is excluded from the terrain cut
+              and the street underneath stays a street"
+      (is (every? :bridge? lifted)))))
+
+(deftest a-flyover-passes-over-the-road-below
+  (testing "the thing W5 could not do: at a node the expressway rides through,
+            there is still a road on the ground and the deck is well above it"
+    (let [{:keys [node at]} (around-lifted)
+          [gx gz] node
+          [x z] at
+          [cx cz] (w/chunk-of x z)
+          field (w/road-field seed cx cz)
+          ;; The crossing street at this node is at grade, so the ground here
+          ;; is still flattened to road level by it.
+          under (w/surface seed field x z)
+          lift (max (w/node-lift seed gx gz true) (w/node-lift seed gx gz false))]
+      (is (> (second under) 0.5)
+          (str "no road on the ground under the viaduct (roadness "
+               (second under) ")"))
+      (is (> lift 4.0) "and the deck is a storey or more above it"))))
+
+(deftest no-signals-hang-in-mid-air
+  (testing "a node an expressway rides over is not a crossroads: the traffic
+            below passes under it and must not be signalled"
+    (let [[gx gz] (lifted-node)]
+      (when-let [j (w/junction seed gx gz)]
+        (is (every? #(zero? (:lift %)) (:arms j))
+            "a junction counted an elevated arm")))
+    (testing "and the arms that are counted are the ones on the ground"
+      (let [{:keys [streets]} (around-lifted)]
+        (is (seq (filter #(and (pos? (:lift-a %)) (pos? (:lift-b %))) streets))
+            "expected a fully elevated span")))))
+
+(deftest ramps-are-driveable
+  (testing "the lift follows density rather than switching on, so the climb is
+            spread over however many blocks the edge of the city takes. Ramping
+            over a narrow band of `urbanness` -- which is itself already a
+            steepened remap -- put the whole climb on one street at 15%."
+    (let [grades (for [{:keys [points ya yb lift-a lift-b]}
+                       (:streets (around-lifted))
+                       :when (or (pos? lift-a) (pos? lift-b))
+                       :let [[ax az] (first points)
+                             [bx bz] (peek points)
+                             len (Math/hypot (- bx ax) (- bz az))]]
+                   (* 100.0 (/ (abs (- yb ya)) len)))
+          sorted (vec (sort grades))]
+      (is (seq grades))
+      (is (< (nth sorted (quot (count sorted) 2)) 5.0)
+          (str "median grade " (nth sorted (quot (count sorted) 2)) "%"))
+      (is (< (/ (count (filter #(> % 10.0) grades)) (double (count grades))) 0.10)
+          "more than a tenth of the expressway is steeper than 1 in 10"))))
+
+(deftest the-two-axes-ride-at-different-heights
+  (testing "so that where two expressways cross you get a stack rather than two
+            decks fighting over the same piece of air"
+    (let [[gx gz] (lifted-node)]
+      ;; Same node, both axes: whichever are non-zero must not be equal.
+      (doseq [g [gx (+ gx 32)], h [gz (+ gz 32)]]
+        (let [a (w/node-lift seed g h true)
+              b (w/node-lift seed g h false)]
+          (when (and (pos? a) (pos? b))
+            (is (> (abs (- a b)) 3.0)
+                "two expressways crossing at the same height")))))))

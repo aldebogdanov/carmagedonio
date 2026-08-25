@@ -242,6 +242,45 @@
     [(+ bx (prng/next-range! r (- ax) ax))
      (+ bz (prng/next-range! r (- az) az))]))
 
+(def ^:private expressway-every 32)   ; lattice lines, so ~2 km apart
+(def ^:private expressway-lift
+  "How high an expressway rides over the surface grid. The two axes ride at
+  different heights so that where two of them cross you get a stack rather than
+  two decks fighting over the same piece of air."
+  {:x 8.5 :z 15.0})
+(def ^:private expressway-floor 1.0)   ; below this a deck is not worth building
+
+(defn- expressway-line?
+  "Is lattice line `i` an expressway? Every thirty-second line, which is a
+  multiple of eight and therefore already an arterial -- an expressway is a
+  main road that has been taken off the ground, not a new kind of road."
+  [i]
+  (zero? (mod i expressway-every)))
+
+(defn node-lift
+  "How far above the terrain an expressway sits at lattice node (gx, gz), for a
+  street running along the given axis. Zero everywhere else.
+
+  The lift follows density rather than switching on: an expressway climbs as it
+  approaches a city and comes back down as it leaves, so the ramps are simply
+  the streets where the lift happens to be part way up. That keeps the whole
+  thing local -- every node works out its own height from the urbanness under
+  it, and consecutive nodes agree without consulting each other -- and it
+  spreads the climb over however many blocks the city edge takes, instead of
+  putting a 13% gradient on one 64 m street."
+  [seed gx gz along-x?]
+  (let [line (if along-x? gz gx)]
+    (if-not (expressway-line? line)
+      0.0
+      (let [[x z] (node seed gx gz)
+            ;; Spread across nearly the whole of `urbanness`, not a narrow band
+            ;; inside it. That field is already a steepened remap of the noise
+            ;; and swings 0 to 1 in a couple of blocks; ramping over a slice of
+            ;; it as well put the entire 8.5 m climb on one 64 m street, at 15%.
+            t (smootherstep-clamped (/ (- (urbanness seed x z) 0.12) 0.70))
+            l (* t (if along-x? (:x expressway-lift) (:z expressway-lift)))]
+        (if (< l expressway-floor) 0.0 l)))))
+
 (defn- edge-class
   "An edge running along X belongs to the horizontal line `gz`; one running
   along Z belongs to the vertical line `gx`."
@@ -336,18 +375,24 @@
                 (* (- 1.0 (/ u bend-threshold))
                    (prng/next-range! r -15.0 15.0)))
               0.0)]
-    (let [ya (base-height seed (nth a 0) (nth a 1))
-          yb (base-height seed (nth b 0) (nth b 1))]
+    (let [lift-a (node-lift seed gx gz along-x?)
+          lift-b (node-lift seed hx hz along-x?)
+          ya (+ (base-height seed (nth a 0) (nth a 1)) lift-a)
+          yb (+ (base-height seed (nth b 0) (nth b 1)) lift-b)]
       {:points   (if (zero? bow) [a b] (bezier a b bow bend-samples))
        :half     (:half (road-profile cls))
        :shoulder (verge cls u)
        :class    cls
        :ya       ya
        :yb       yb
-       ;; A bridge is a street that has stopped touching the ground. It is
-       ;; excluded from the terrain cut, so the valley stays a valley, and gets
-       ;; a deck of its own instead.
-       :bridge?  (spans-a-gap? seed a b ya yb)})))
+       :lift-a   lift-a
+       :lift-b   lift-b
+       ;; A bridge is a street that has stopped touching the ground, whether
+       ;; because the ground fell away under it or because it was lifted off.
+       ;; Either way it is excluded from the terrain cut -- so the valley stays
+       ;; a valley and the street below stays a street -- and gets a deck.
+       :bridge?  (or (pos? lift-a) (pos? lift-b)
+                     (spans-a-gap? seed a b ya yb))})))
 
 (defn streets-in-bounds
   "Every street that could reach the box [x0,x1] x [z0,z1].
@@ -1209,7 +1254,8 @@
                           dx (- ox nx) dz (- oz nz)
                           len (max 1e-6 (hypot dx dz))]
                       {:dir [(/ dx len) (/ dz len)]
-                       :class (edge-class ogx ogz along-x?)}))))
+                       :class (edge-class ogx ogz along-x?)
+                       :lift (node-lift seed gx gz along-x?)}))))
           [[-1 0 true (dec gx) gz]
            [1  0 true gx gz]
            [0 -1 false gx (dec gz)]
@@ -1224,7 +1270,10 @@
   residential crossroads where every arm is the same class gets nothing at all,
   which is both cheaper and what such a junction actually looks like."
   [seed gx gz]
-  (let [arms (node-arms seed gx gz)
+  ;; Only the arms on the ground make a junction. Where an expressway is
+  ;; overhead the traffic below simply passes under it, and signalling a
+  ;; crossing that does not exist would hang lights in mid-air.
+  (let [arms (filterv #(zero? (:lift %)) (node-arms seed gx gz))
         n    (count arms)]
     (when (>= n 3)
       (let [[x z] (node seed gx gz)
