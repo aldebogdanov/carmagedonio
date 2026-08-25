@@ -53,6 +53,7 @@
      :buildings (unchecked-get r "buildings")
      :building-parts (unchecked-get r "parts")
      :bridges (unchecked-get r "bridges")
+     :flora (unchecked-get r "flora")
      :peds (unchecked-get r "peds")
      :furniture (unchecked-get r "furniture")}))
 

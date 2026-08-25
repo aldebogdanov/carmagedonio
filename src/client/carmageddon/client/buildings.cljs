@@ -51,7 +51,10 @@
    ;; puts the corners on the unit box, so scaling behaves like every other part.
    :pyramid  (doto (three/ConeGeometry. (/ (js/Math.sqrt 2) 2) 1 4)
                (.rotateY (/ js/Math.PI 4)))
-   :cylinder (three/CylinderGeometry. 0.5 0.5 1 12)})
+   :cylinder (three/CylinderGeometry. 0.5 0.5 1 12)
+   ;; Twenty faces, which is all a tree canopy needs at the distance one is
+   ;; ever looked at.
+   :blob     (three/IcosahedronGeometry. 0.5 0)})
 
 (defn create [world scene textures]
   (atom {:world world :scene scene

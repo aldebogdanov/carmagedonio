@@ -23,7 +23,7 @@
         cx   (unchecked-get d "cx")
         cz   (unchecked-get d "cz")
         {:keys [heights colors props buildings building-parts peds furniture
-                bridges verts size origin]}
+                bridges flora verts size origin]}
         (worldgen/chunk-data seed cx cz)
         [x0 z0] origin]
     (.postMessage js/self
@@ -31,11 +31,11 @@
                        :heights heights :colors colors
                        :props props :buildings buildings :peds peds
                        :furniture furniture :parts building-parts
-                       :bridges bridges}
+                       :bridges bridges :flora flora}
                   #js [(.-buffer heights) (.-buffer colors)
                        (.-buffer props) (.-buffer buildings) (.-buffer peds)
                        (.-buffer furniture) (.-buffer building-parts)
-                       (.-buffer bridges)])))
+                       (.-buffer bridges) (.-buffer flora)])))
 
 (defn init! []
   (set! (.-onmessage js/self) handle))

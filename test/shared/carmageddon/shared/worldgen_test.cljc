@@ -95,7 +95,11 @@
     (let [cx 2 cz 1
           field (w/road-field seed cx cz)
           segs  (:segs field)
-          n     (long (/ (dlen* segs) 8))
+          ;; The layout is spelled out here on purpose -- this is meant to be an
+          ;; independent implementation, so a change to the segment array has to
+          ;; be made deliberately in both places. Stride 9:
+          ;; x1 z1 y1 x2 z2 y2 half shoulder paved.
+          n     (long (/ (dlen* segs) 9))
           ;; An independent, deliberately naive implementation of the same
           ;; question the uniform grid answers. If the grid ever drops a bucket
           ;; the two diverge, and the symptom in the game would be a strip of
@@ -104,7 +108,7 @@
                   (loop [i 0, best 0.0, wsum 0.0, wy 0.0]
                     (if (>= i n)
                       (if (pos? wsum) [best (/ wy wsum)] [0.0 0.0])
-                      (let [o (* i 8)
+                      (let [o (* i 9)
                             x1 (dget* segs o) z1 (dget* segs (+ o 1)) y1 (dget* segs (+ o 2))
                             x2 (dget* segs (+ o 3)) z2 (dget* segs (+ o 4)) y2 (dget* segs (+ o 5))
                             half (dget* segs (+ o 6)) sh (dget* segs (+ o 7))
@@ -702,25 +706,25 @@
 (deftest bridge-parts-are-well-formed
   (let [[cx cz] (bridge-chunk)
         a (w/chunk-bridges seed cx cz)
-        n (/ (alen* a) w/bridge-part-stride)
+        n (/ (alen* a) w/part-stride)
         ;; Coerced: on the JVM a float-array element boxes to Float, and
         ;; (contains? #{0.0 1.0} (float 1.0)) is false. In ClojureScript every
         ;; number is a double and the same test passes, so this only shows up
         ;; on one of the two platforms the generator has to run on.
-        at (fn [i o] (double (aget* a (+ o (* i w/bridge-part-stride)))))]
+        at (fn [i o] (double (aget* a (+ o (* i w/part-stride)))))]
     (is (pos? n))
     (testing "shapes and colours are in range"
       ;; Offsets 8/9/10, not 7/8/9: the stride grew by a pitch field when decks
       ;; stopped being flat slabs, and this is the test that noticed.
-      (is (every? (fn [i] (and (<= 0 (at i 8)) (< (at i 8) (count w/bridge-prims))
+      (is (every? (fn [i] (and (<= 0 (at i 8)) (< (at i 8) (count w/part-prims))
                                (<= 0 (at i 9) 0xffffff)
                                (contains? #{0.0 1.0} (at i 10))
                                (> (at i 5) 0.0) (> (at i 6) 0.0) (> (at i 7) 0.0)))
                   (range n))))
     (testing "the deck carries the collider and the piers do not: a pier stands
               underneath where nothing can reach it"
-      (let [box (part-index-of w/bridge-prims :box)
-            cyl (part-index-of w/bridge-prims :cylinder)]
+      (let [box (part-index-of w/part-prims :box)
+            cyl (part-index-of w/part-prims :cylinder)]
         (is (every? (fn [i] (or (not= (double cyl) (at i 8)) (zero? (at i 10))))
                     (range n))
             "a pier was marked solid")
@@ -771,10 +775,10 @@
             leading edge into the river"
     (let [[cx cz] (bridge-chunk)
           a (w/chunk-bridges seed cx cz)
-          st w/bridge-part-stride
+          st w/part-stride
           n (/ (alen* a) st)
           at (fn [i o] (double (aget* a (+ o (* i st)))))
-          box (part-index-of w/bridge-prims :box)
+          box (part-index-of w/part-prims :box)
           deck 0x3c3c40
           tops (for [i (range n)
                      :when (and (= (double box) (at i 8)) (= (double deck) (at i 9)))
@@ -884,3 +888,106 @@
           (when (and (pos? a) (pos? b))
             (is (> (abs (- a b)) 3.0)
                 "two expressways crossing at the same height")))))))
+
+;; --- farmland and flora -----------------------------------------------------
+
+(deftest a-field-grows-one-thing
+  (testing "the crop matches the cell the hedgerows are drawn around. Splitting
+            cells into sub-parcels gave more variety and read as noise, because
+            the colour changed in the middle of a hedged field."
+    (doseq [gx [-9 0 4 21], gz [-3 0 8 17]]
+      (let [x0 (* gx w/street-spacing) z0 (* gz w/street-spacing)
+            inside (set (for [fx [0.1 0.4 0.6 0.9], fz [0.1 0.4 0.6 0.9]]
+                          (w/crop-at seed (+ x0 (* fx w/street-spacing))
+                                     (+ z0 (* fz w/street-spacing)))))]
+        (is (= 1 (count inside))
+            (str "cell " [gx gz] " grew " inside)))))
+  (testing "and neighbouring fields are not all the same"
+    (let [row (map #(w/crop-at seed (* % w/street-spacing) 0.0) (range 40))]
+      (is (> (count (set row)) 3)))))
+
+(deftest every-crop-is-planted-somewhere
+  (let [mix (frequencies (for [i (range 45), j (range 45)]
+                           (w/crop-at seed (* i 97.0) (* j 97.0))))]
+    (is (= (set w/crop-names) (set (keys mix)))
+        (str "missing from the world: "
+             (remove mix w/crop-names)))
+    (testing "and none of them takes over"
+      (is (< (/ (apply max (vals mix)) (double (reduce + (vals mix)))) 0.35)))))
+
+(defn- flora-of [cx cz]
+  (w/chunk-flora seed cx cz (w/road-field seed cx cz)))
+
+(deftest flora-parts-are-well-formed
+  (let [[cx cz] (densest-chunk (fn [u _] (< u 0.08)))
+        a (flora-of cx cz)
+        n (/ (alen* a) w/part-stride)
+        at (fn [i o] (double (aget* a (+ o (* i w/part-stride)))))]
+    (is (> n 50) "open country should be growing something")
+    (testing "shapes, colours and scales are in range"
+      (is (every? (fn [i] (and (<= 0 (at i 8)) (< (at i 8) (count w/part-prims))
+                               (<= 0 (at i 9) 0xffffff)
+                               (contains? #{0.0 1.0} (at i 10))
+                               (> (at i 5) 0.0) (> (at i 6) 0.0) (> (at i 7) 0.0)))
+                  (range n))))
+    (testing "a trunk stops a car and its branches do not"
+      (let [cyl (part-index-of w/part-prims :cylinder)]
+        (is (every? (fn [i] (= (= (double cyl) (at i 8)) (pos? (at i 10))))
+                    (range n))
+            "something other than a trunk was solid, or a trunk was not")))))
+
+(deftest nothing-grows-on-the-road
+  (let [[cx cz] (densest-chunk (fn [u _] (< u 0.10)))
+        field (w/road-field seed cx cz)
+        a (flora-of cx cz)
+        n (/ (alen* a) w/part-stride)
+        on-road (count (for [i (range n)
+                             :let [o (* i w/part-stride)]
+                             :when (>= (second (w/surface seed field (aget* a o)
+                                                          (aget* a (+ o 2))))
+                                       0.9999)]
+                         1))]
+    (is (pos? n))
+    (is (zero? on-road) (str on-road " of " n " plants were in the carriageway"))))
+
+(deftest a-tree-belongs-to-exactly-one-chunk
+  (testing "candidate positions come from a global grid, so the grid gets walked
+            from both sides of every border"
+    (let [[bx bz] (densest-chunk (fn [u _] (< u 0.10)))
+          cyl (part-index-of w/part-prims :cylinder)
+          trunks (for [cx [bx (inc bx)], cz [bz (inc bz)]
+                       :let [a (flora-of cx cz)]
+                       i (range (/ (alen* a) w/part-stride))
+                       :let [o (* i w/part-stride)]
+                       :when (= (double cyl) (double (aget* a (+ o 8))))]
+                   [(Math/round (* 100.0 (aget* a o)))
+                    (Math/round (* 100.0 (aget* a (+ o 2))))])
+          dupes (->> trunks frequencies (filter (fn [[_ c]] (> c 1))) (map first))]
+      (is (> (count trunks) 50))
+      (is (empty? (take 3 dupes))
+          (str (count dupes) " trees were planted twice, e.g. " (first dupes))))))
+
+(deftest the-city-is-not-a-forest
+  (let [[cx cz] (densest-chunk (fn [u _] (> u 0.85)))]
+    (is (zero? (alen* (flora-of cx cz)))
+        "trees and hedgerows in the middle of downtown")))
+
+(deftest woodland-is-denser-than-a-wheat-field
+  (testing "tree cover follows the parcel rather than a density field, which is
+            what keeps a tree line on a field boundary the way a real one is"
+    (let [cyl (part-index-of w/part-prims :cylinder)
+          count-in (fn [crop]
+                     (let [pts (for [cx (range -34 -20), cz (range -24 -10)
+                                     :let [a (flora-of cx cz)]
+                                     i (range (/ (alen* a) w/part-stride))
+                                     :let [o (* i w/part-stride)]
+                                     :when (= (double cyl) (double (aget* a (+ o 8))))
+                                     :when (= crop (w/crop-at seed (aget* a o)
+                                                              (aget* a (+ o 2))))]
+                                 1)]
+                       (count pts)))
+          wood (count-in :woodland)
+          wheat (count-in :wheat)]
+      (is (pos? wood) "expected woods")
+      (is (> wood (* 4 wheat))
+          (str "woodland " wood " trees vs wheat " wheat)))))

@@ -4,16 +4,16 @@
   (:require [carmageddon.client.ai :as ai]
             [carmageddon.client.api :as api]
             [carmageddon.client.buildings :as buildings]
-            [carmageddon.client.bridges :as bridges]
             [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
+            [carmageddon.client.clock :as clock]
             [carmageddon.client.furniture :as furniture]
             [carmageddon.client.game :as game]
-            [carmageddon.client.peds :as peds]
-            [carmageddon.client.props :as props]
-            [carmageddon.client.clock :as clock]
             [carmageddon.client.input :as input]
             [carmageddon.client.net :as net]
+            [carmageddon.client.parts :as parts]
+            [carmageddon.client.peds :as peds]
+            [carmageddon.client.props :as props]
             [carmageddon.client.remote :as remote]
             [carmageddon.client.render :as render]
             [carmageddon.client.sim :as sim]
@@ -187,7 +187,8 @@
         ps        (props/create (:world @s) (:scene rs))
         bs        (buildings/create (:world @s) (:scene rs) (:textures rs))
         fu        (furniture/create (:world @s) (:scene rs))
-        br        (bridges/create (:world @s) (:scene rs))
+        br        (parts/create (:world @s) (:scene rs))
+        fl        (parts/create (:world @s) (:scene rs))
         pd        (peds/create (:world @s) (:scene rs))
         gm        (game/create)
         ctls      (vec (repeatedly opponent-count ai/controller))
@@ -201,13 +202,15 @@
                                      (props/add-chunk! ps key (:props data))
                                      (buildings/add-chunk! bs key (:buildings data) (:building-parts data))
                                      (furniture/add-chunk! fu key (:furniture data))
-                                     (bridges/add-chunk! br key (:bridges data))
+                                     (parts/add-chunk! br key (:bridges data))
+                                     (parts/add-chunk! fl key (:flora data))
                                      (peds/add-chunk! pd key (:peds data)))
                     :on-physics-remove (fn [key]
                                      (props/remove-chunk! ps key)
                                      (buildings/remove-chunk! bs key)
                                      (furniture/remove-chunk! fu key)
-                                     (bridges/remove-chunk! br key)
+                                     (parts/remove-chunk! br key)
+                                     (parts/remove-chunk! fl key)
                                      (peds/remove-chunk! pd key))})
         ;; One seam, two implementations. Nothing below this line knows
         ;; whether it is single player.
@@ -278,7 +281,7 @@
                                                  :controllers ctls :wrecked wrecked
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
-                                 :props ps :buildings bs :furniture fu :bridges br :peds pd :game gm
+                                 :props ps :buildings bs :furniture fu :bridges br :flora fl :peds pd :game gm
                                  :controllers ctls :wrecked wrecked :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"

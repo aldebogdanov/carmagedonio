@@ -415,17 +415,23 @@
 
 ;; --- road field: the streets near one chunk, indexed for lookup -------------
 
-(def ^:private seg-stride 8)   ; x1 z1 y1 x2 z2 y2 half shoulder
+(def ^:private seg-stride 9)   ; x1 z1 y1 x2 z2 y2 half shoulder paved
 
 (defn- segments-of
-  "Flatten streets into [x1 z1 y1 x2 z2 y2 half shoulder ...].
+  "Flatten streets into [x1 z1 y1 x2 z2 y2 half shoulder paved ...].
+
+  `paved` is 0 for a lane and 1 for an arterial. It rides along in the segment
+  array because the ground needs it: out in the country a local street is a dirt
+  track and a main road is still tarmac, and the only thing that knows which is
+  which by the time the colour is chosen is the segment that won.
 
   Flat and typed because `road-at` runs about a thousand times per chunk against
   this array; boxed vector access shows up plainly in a profile."
   [streets]
   (let [out (transient [])]
-    (doseq [{:keys [points half shoulder ya yb]} streets]
-      (let [n (count points)]
+    (doseq [{:keys [points half shoulder ya yb class]} streets]
+      (let [n (count points)
+            paved (case class :arterial 1.0 :collector 0.65 0.0)]
         (dotimes [i (dec n)]
           (let [[x1 z1] (nth points i)
                 [x2 z2] (nth points (inc i))
@@ -435,7 +441,8 @@
             (conj! out (+ ya (* (- yb ya) t1)))
             (conj! out (double x2)) (conj! out (double z2))
             (conj! out (+ ya (* (- yb ya) t2)))
-            (conj! out (double half)) (conj! out (double shoulder))))))
+            (conj! out (double half)) (conj! out (double shoulder))
+            (conj! out paved)))))
     (let [v (persistent! out)
           a (darray (count v))]
       (dotimes [i (count v)] (dput! a i (nth v i)))
@@ -507,7 +514,7 @@
     (assoc (index-segments segs x0 z0 x1 z1) :segs segs)))
 
 (defn- road-at
-  "How road-like a point is, in [0,1], and the road surface height there.
+  "How road-like a point is, the road surface height there, and how paved it is.
 
   Roads are combined rather than picked between: `roadness` is the strongest
   single influence, but the height is a weighted blend of every road nearby.
@@ -519,13 +526,14 @@
         iz (max 0 (min (dec nz) (long (floor (/ (- z z0) cell)))))
         c  (+ (* ix nz) iz)
         e  (iget starts (inc c))]
-    (loop [i (iget starts c), best 0.0, wsum 0.0, wy 0.0]
+    (loop [i (iget starts c), best 0.0, wsum 0.0, wy 0.0, wp 0.0]
       (if (>= i e)
-        (if (pos? wsum) [best (/ wy wsum)] [0.0 0.0])
+        (if (pos? wsum) [best (/ wy wsum) (/ wp wsum)] [0.0 0.0 0.0])
         (let [o  (* seg-stride (iget items i))
               x1 (dget segs o)       z1 (dget segs (+ o 1)) y1 (dget segs (+ o 2))
               x2 (dget segs (+ o 3)) z2 (dget segs (+ o 4)) y2 (dget segs (+ o 5))
               half (dget segs (+ o 6)) shoulder (dget segs (+ o 7))
+              paved (dget segs (+ o 8))
               dx (- x2 x1) dz (- z2 z1)
               len2 (+ (* dx dx) (* dz dz))
               t (if (< len2 1e-9)
@@ -538,23 +546,75 @@
                        :else (- 1.0 (smoothstep (/ (- d half) shoulder))))]
           (if (pos? r)
             (recur (inc i) (max best r) (+ wsum r)
-                   (+ wy (* r (+ y1 (* t (- y2 y1))))))
-            (recur (inc i) best wsum wy)))))))
+                   (+ wy (* r (+ y1 (* t (- y2 y1)))))
+                   (+ wp (* r paved)))
+            (recur (inc i) best wsum wy wp)))))))
 
-(defn surface
-  "Final height at a point plus how road-like it is, in [0,1].
+(defn surface-detail
+  "Final height at a point, how road-like it is in [0,1], and how paved that
+  road is -- 0 for a country lane, 1 for an arterial.
 
   `field` comes from `road-field`; it is passed in rather than rebuilt because a
   chunk evaluates this about a thousand times. `rv` is an already-computed river
   amount, for callers that need the water anyway."
-  ([seed field x z] (surface seed field x z nil))
-  ([seed field x z rv]
-   (let [[road ry] (road-at field x z)]
-     (cond
-       (>= road 1.0) [ry 1.0]
-       (<= road 0.0) [(if rv (base-height seed x z rv) (base-height seed x z)) 0.0]
-       :else (let [b (if rv (base-height seed x z rv) (base-height seed x z))]
-               [(+ ry (* (- b ry) (- 1.0 road))) road])))))
+  [seed field x z rv]
+  (let [[road ry paved] (road-at field x z)]
+    (cond
+      (>= road 1.0) [ry 1.0 paved]
+      (<= road 0.0) [(if rv (base-height seed x z rv) (base-height seed x z)) 0.0 0.0]
+      :else (let [b (if rv (base-height seed x z rv) (base-height seed x z))]
+              [(+ ry (* (- b ry) (- 1.0 road))) road paved]))))
+
+(defn surface
+  "Height and road-ness at a point. The common case; `surface-detail` also
+  reports the surfacing, which only the ground colour cares about."
+  ([seed field x z] (surface-detail seed field x z nil))
+  ([seed field x z rv] (surface-detail seed field x z rv)))
+
+;; --- farmland ---------------------------------------------------------------
+
+(def crop-names
+  [:pasture :wheat :plough :rape :fallow :scrub :orchard :woodland])
+
+(def ^:private crop-tints
+  "Multipliers over the ground texture, which is green. Ploughed earth and rape
+  have to lift red hard to get anywhere near brown and yellow."
+  [[0.82 1.14 0.68]    ; pasture
+   [1.42 1.14 0.44]    ; wheat
+   [1.30 0.72 0.50]    ; plough
+   [1.52 1.28 0.28]    ; rape
+   [1.20 1.06 0.74]    ; fallow
+   [0.92 0.94 0.64]    ; scrub
+   [0.76 1.02 0.64]    ; orchard
+   [0.50 0.76 0.50]])  ; woodland
+
+(def ^:private crop-weights [26 18 14 8 10 10 6 8])
+(def ^:private crop-cumulative
+  (vec (reductions + crop-weights)))
+(def ^:private crop-total (peek crop-cumulative))
+
+(defn field-index
+  "Which crop is growing at a point.
+
+  One crop per lattice cell -- the same cell the hedgerows are drawn around, so
+  a field is a field: bounded by hedge and lane, and one thing growing in it.
+  Splitting cells into sub-parcels gave more variety and read as noise, because
+  the colour changed in the middle of a hedged field with nothing to mark it.
+
+  Derived straight from `hash-coords` rather than by making a generator: this
+  runs for every terrain vertex in the world, and allocating a PRNG per vertex
+  is not affordable."
+  [seed x z]
+  (let [gx (grid-floor x street-spacing)
+        gz (grid-floor z street-spacing)
+        k  (bit-and (prng/hash-coords (+ seed 6151) gx gz) 0x7fffffff)
+        r  (mod k crop-total)]
+    (loop [i 0]
+      (if (or (= i (dec (count crop-cumulative))) (< r (nth crop-cumulative i)))
+        i
+        (recur (inc i))))))
+
+(defn crop-at [seed x z] (nth crop-names (field-index seed x z)))
 
 (defn chunk-of [x z]
   [(grid-floor x k/chunk-size) (grid-floor z k/chunk-size)])
@@ -585,20 +645,22 @@
 
 ;; --- extruded shapes --------------------------------------------------------
 ;;
-;; Both the building masses and the bridge decks are built from the same four
-;; volumes, and both send them to the client in the same layout. Shared here
-;; rather than under buildings because the bridges are generated first and a
-;; forward reference in a .cljc file is a compile error, not a subtlety.
+;; Building masses, bridge decks and trees are all built from the same handful
+;; of volumes. Shared here rather than under buildings because the bridges are
+;; generated first and a forward reference in a .cljc file is a compile error,
+;; not a subtlety.
 
 (def building-part-stride 10)   ; x y z yaw sx sy sz prim mat tint
-(def building-prims [:box :gable :pyramid :cylinder])
+(def building-prims [:box :gable :pyramid :cylinder :blob])
+(def part-prims building-prims)
+
+;; The generic parts layout: anything the client draws as an instanced volume
+;; with an optional collider. Bridges were the first user, flora the second.
+(def part-stride 11)            ; x y z yaw pitch sx sy sz prim tint solid
 
 (def ^:private prim-index (zipmap building-prims (range)))
 
 ;; --- bridges ----------------------------------------------------------------
-
-(def bridge-part-stride 11)  ; x y z yaw pitch sx sy sz prim tint solid
-(def bridge-prims building-prims)
 
 (def ^:private deck-thickness 0.55)
 (def ^:private deck-margin 1.1)     ; deck overhangs the carriageway either side
@@ -677,6 +739,120 @@
               (when (> h pier-min)
                 (emit px (+ ground (* 0.5 h)) pz 0.0 0.0
                       2.0 h 2.0 :cylinder (:pier bridge-tint) 0.0)))))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a)))
+
+;; --- flora ------------------------------------------------------------------
+
+(def ^:private tree-grid 11.0)      ; metres between candidate positions
+(def ^:private tree-urban 0.45)     ; above this there is no room for a wood
+(def ^:private hedge-urban 0.35)
+
+(def ^:private flora-tint
+  {:trunk   0x5a4432
+   :hedge   0x3d5f33
+   :conifer 0x2c4f2e})
+
+(def ^:private leaf-tints [0x3f6b32 0x4a7a38 0x35602c 0x54803c])
+
+;; How likely a candidate position is to actually grow something, by crop. A
+;; wood is a wood because the parcel says so, not because a density field
+;; happened to peak there -- which is what keeps the tree line following the
+;; field boundary the way a real one does.
+(def ^:private crop-tree-odds
+  {:woodland 0.88 :orchard 0.80 :scrub 0.17 :pasture 0.05
+   :fallow 0.07 :wheat 0.012 :plough 0.008 :rape 0.010})
+
+(defn- tree-parts!
+  "A trunk and a canopy at (x, y, z). The trunk is solid and the canopy is not:
+  a tree stops a car, and its branches are for driving through."
+  [emit seed x y z h]
+  (let [k (prng/hash-coords (+ seed 3313) (long (* x 4.0)) (long (* z 4.0)))
+        conifer? (zero? (bit-and (prng/shr32 k 5) 3))
+        r (* h (if conifer? 0.20 0.30))
+        trunk (* h (if conifer? 0.30 0.45))
+        leaf (nth leaf-tints (bit-and (prng/shr32 k 9) 3))]
+    (emit x (+ y (* 0.5 trunk)) z 0.0 0.0
+          (* 0.28 h 0.5) trunk (* 0.28 h 0.5) :cylinder (:trunk flora-tint) 1.0)
+    (if conifer?
+      (emit x (+ y trunk (* 0.5 (- h trunk))) z 0.0 0.0
+            (* 2.0 r) (- h trunk) (* 2.0 r) :pyramid (:conifer flora-tint) 0.0)
+      (emit x (+ y trunk (* 0.5 (- h trunk))) z 0.0 0.0
+            (* 2.0 r) (- h trunk) (* 2.2 r) :blob leaf 0.0))))
+
+(defn chunk-flora
+  "Trees, orchards and hedgerows for one chunk, in the generic parts layout.
+
+  Candidate tree positions come from a global grid, jittered per point, and a
+  tree belongs to whichever chunk its jittered position lands in -- so the grid
+  can be walked from either side of a border without a tree being planted twice
+  or missed. An orchard is the same grid left unjittered, which is all it takes
+  to read as planted rather than grown."
+  [seed cx cz field]
+  (let [out (transient [])
+        emit (fn [x y z yaw pitch sx sy sz prim tint solid]
+               (conj! out x) (conj! out y) (conj! out z)
+               (conj! out yaw) (conj! out pitch)
+               (conj! out sx) (conj! out sy) (conj! out sz)
+               (conj! out (double (prim-index prim)))
+               (conj! out (double tint)) (conj! out (double solid)))
+        x0 (* cx k/chunk-size) z0 (* cz k/chunk-size)
+        x1 (+ x0 k/chunk-size) z1 (+ z0 k/chunk-size)
+        i0 (dec (grid-floor x0 tree-grid)) i1 (inc (grid-floor x1 tree-grid))
+        j0 (dec (grid-floor z0 tree-grid)) j1 (inc (grid-floor z1 tree-grid))]
+    ;; Trees.
+    (doseq [gi (range i0 (inc i1)), gj (range j0 (inc j1))]
+      (let [h (prng/hash-coords (+ seed 5107) gi gj)
+            bx (* gi tree-grid) bz (* gj tree-grid)
+            crop (crop-at seed bx bz)
+            orchard? (= :orchard crop)
+            jx (if orchard? 0.0 (* tree-grid 0.42 (- (/ (bit-and h 0xff) 127.5) 1.0)))
+            jz (if orchard? 0.0 (* tree-grid 0.42
+                                   (- (/ (bit-and (prng/shr32 h 8) 0xff) 127.5) 1.0)))
+            x (+ bx jx) z (+ bz jz)]
+        (when (and (<= x0 x) (< x x1) (<= z0 z) (< z z1))
+          (let [odds (get crop-tree-odds crop 0.0)
+                roll (/ (bit-and (prng/shr32 h 16) 0x3ff) 1024.0)]
+            (when (< roll odds)
+              (let [u (urbanness seed x z)
+                    [y road] (surface seed field x z)]
+                ;; Nothing grows downtown, in the river, or on the verge where
+                ;; the lamp posts are.
+                (when (and (< u tree-urban) (< (river seed x z) 0.3) (< road 0.12))
+                  (let [hh (+ 5.0 (* 6.0 (/ (bit-and (prng/shr32 h 26) 0x3f) 63.0)))]
+                    (tree-parts! emit seed x y z hh)))))))))
+    ;; Hedgerows along the field boundaries the streets have not already taken.
+    (doseq [gx (range (dec (grid-floor x0 street-spacing))
+                      (inc (inc (grid-floor x1 street-spacing))))
+            gz (range (dec (grid-floor z0 street-spacing))
+                      (inc (inc (grid-floor z1 street-spacing))))]
+      (let [[ax az] (node seed gx gz)
+            [bx bz] (node seed (inc gx) gz)
+            [dx dz] (node seed gx (inc gz))]
+        (doseq [[side ex ez fx fz along-x?] [[:north ax az bx bz true]
+                                             [:west ax az dx dz false]]]
+          ;; Only where no street runs along it -- a lane is already a boundary.
+          (when-not (edge-exists? seed gx gz along-x?)
+            (let [mx (* 0.5 (+ ex fx)) mz (* 0.5 (+ ez fz))]
+              (when (and (<= x0 mx) (< mx x1) (<= z0 mz) (< mz z1)
+                         (< (urbanness seed mx mz) hedge-urban)
+                         (< (river seed mx mz) 0.25))
+                (let [ddx (- fx ex) ddz (- fz ez)
+                      len (max 1.0 (hypot ddx ddz))
+                      yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) ddx ddz)
+                      hh (prng/hash-coords (+ seed 7919) gx gz)
+                      ;; Two runs with a gateway between them, rather than one
+                      ;; unbroken wall across the field.
+                      gap (+ 0.16 (* 0.12 (/ (bit-and hh 0xff) 255.0)))]
+                  (doseq [[t0 t1] [[0.03 (- 0.5 (* 0.5 gap))]
+                                   [(+ 0.5 (* 0.5 gap)) 0.97]]]
+                    (let [tm (* 0.5 (+ t0 t1))
+                          px (+ ex (* ddx tm)) pz (+ ez (* ddz tm))
+                          [y _] (surface seed field px pz)]
+                      (emit px (+ y 0.75) pz yaw 0.0
+                            1.3 1.6 (* len (- t1 t0)) :box (:hedge flora-tint) 0.0))))))))))
     (let [v (persistent! out)
           a (farray (count v))]
       (dotimes [i (count v)] (fput! a i (nth v i)))
@@ -1483,6 +1659,11 @@
 (def ^:private road-colour-g 0.27)
 (def ^:private road-colour-b 0.52)
 
+;; An unmade lane: pale, dry and brown rather than dark and neutral.
+(def ^:private track-colour-r 1.05)
+(def ^:private track-colour-g 0.80)
+(def ^:private track-colour-b 0.58)
+
 (defn chunk-data
   "Everything needed to build one chunk's mesh and collider.
 
@@ -1508,6 +1689,7 @@
         peds  (chunk-peds seed cx cz field)
         furniture (chunk-furniture seed cx cz field)
         bridges (chunk-bridges seed cx cz)
+        flora (chunk-flora seed cx cz field)
         heights (farray (* n n))
         colors  (farray (* n n 3))]
     (dotimes [j n]                       ; j indexes z
@@ -1515,7 +1697,7 @@
         (let [x (+ x0 (* i step))
               z (+ z0 (* j step))
               rv (river seed x z)
-              [y road] (surface seed field x z rv)
+              [y road paved] (surface-detail seed field x z rv)
               idx (+ (* i n) j)
               dirt (noise/fbm2d (+ seed 977) (/ x 26.0) (/ z 26.0) 3)
               d    (* 0.55 (max 0.0 (- dirt 0.45)))
@@ -1540,11 +1722,25 @@
               tr   (+ tr (* rv (- (* gr 0.34) tr)))
               tg   (+ tg (* rv (- (* gr 0.58) tg)))
               tb   (+ tb (* rv (- (* gr 1.30) tb)))
+              ;; Farmland. Fields fade out as the ground builds up, so the
+              ;; patchwork stops at the edge of town rather than running under
+              ;; it, and dry land only -- a river does not grow wheat.
+              farm (* (- 1.0 u) (- 1.0 rv))
+              [cr cg cb] (nth crop-tints (field-index seed x z))
+              tr   (* tr (+ 1.0 (* farm (- cr 1.0))))
+              tg   (* tg (+ 1.0 (* farm (- cg 1.0))))
+              tb   (* tb (+ 1.0 (* farm (- cb 1.0))))
+              ;; Out in the country a lane is a dirt track and a main road is
+              ;; still tarmac, which is what `paved` in the segment array is for.
+              dirt (* (- 1.0 u) (- 1.0 paved))
+              rr   (+ road-colour-r (* dirt (- track-colour-r road-colour-r)))
+              rg   (+ road-colour-g (* dirt (- track-colour-g road-colour-g)))
+              rb   (+ road-colour-b (* dirt (- track-colour-b road-colour-b)))
               o    (* idx 3)]
           (fput! heights idx y)
-          (fput! colors (+ o 0) (+ tr (* road (- road-colour-r tr))))
-          (fput! colors (+ o 1) (+ tg (* road (- road-colour-g tg))))
-          (fput! colors (+ o 2) (+ tb (* road (- road-colour-b tb)))))))
+          (fput! colors (+ o 0) (+ tr (* road (- rr tr))))
+          (fput! colors (+ o 1) (+ tg (* road (- rg tg))))
+          (fput! colors (+ o 2) (+ tb (* road (- rb tb)))))))
     {:cx cx :cz cz :verts n :size k/chunk-size
      :origin [x0 z0]
      :heights heights
@@ -1555,6 +1751,7 @@
      :peds peds
      :furniture furniture
      :bridges bridges
+     :flora flora
      :biome (biome seed cx cz)}))
 
 (defn spawn-point

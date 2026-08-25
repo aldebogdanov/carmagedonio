@@ -1,15 +1,18 @@
-(ns carmageddon.client.bridges
-  "Bridge decks, parapets and piers.
+(ns carmageddon.client.parts
+  "Instanced world volumes with optional colliders.
 
-  A bridge is the one piece of road that is not terrain. Everywhere else the
-  ground is flattened to meet the carriageway and the heightfield collider is
-  what the car drives on; over a span the valley is left alone, so the deck has
-  to carry its own collider or the car falls into the river.
+  One `InstancedMesh` per shape per chunk, a flat colour carried per instance,
+  and a cuboid collider for every part the generator marked `solid`. That last
+  flag is the whole reason this is one module rather than several: a bridge deck
+  is solid and its piers are not, a tree trunk is solid and its canopy is not,
+  and the distinction is per part, not per kind of thing.
 
-  `solid` in the generated data says which parts do that. The deck and its
-  parapets are collidable and the piers are not: a pier stands underneath where
-  nothing can reach it, and a collider apiece would buy a broad-phase entry for
-  nothing."
+  Bridges were the first user. A bridge is the one piece of road that is not
+  terrain: everywhere else the ground is flattened to meet the carriageway and
+  the heightfield collider is what the car drives on, but over a span the valley
+  is left alone, so the deck has to carry its own collider or the car falls into
+  the river. Trees and hedges arrived with the same shape of problem and the
+  same answer."
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
             [carmageddon.client.buildings :as buildings]
@@ -25,14 +28,14 @@
          :chunks {}}))
 
 (defn- read-parts [arr]
-  (let [st worldgen/bridge-part-stride
+  (let [st worldgen/part-stride
         n  (/ (.-length arr) st)]
     (mapv (fn [i]
             (let [o (* i st)]
               {:x (aget arr (+ o 0)) :y (aget arr (+ o 1)) :z (aget arr (+ o 2))
                :yaw (aget arr (+ o 3)) :pitch (aget arr (+ o 4))
                :sx (aget arr (+ o 5)) :sy (aget arr (+ o 6)) :sz (aget arr (+ o 7))
-               :prim (nth worldgen/bridge-prims (int (aget arr (+ o 8))))
+               :prim (nth worldgen/part-prims (int (aget arr (+ o 8))))
                :tint (int (aget arr (+ o 9)))
                :solid? (pos? (aget arr (+ o 10)))}))
           (range n))))
@@ -83,7 +86,7 @@
       (swap! bs assoc-in [:chunks key]
              {:meshes meshes
               :colliders (add-colliders! bs parts)
-              :spans (count (filter :solid? parts))})
+              :solid (count (filter :solid? parts))})
       meshes)))
 
 (defn remove-chunk! [bs key]
@@ -99,4 +102,4 @@
   {:parts (reduce + (for [{:keys [meshes]} (vals (:chunks @bs))
                           [_ ^js m] meshes]
                       (.-count m)))
-   :spans (reduce + (map :spans (vals (:chunks @bs))))})
+   :solid (reduce + (map :solid (vals (:chunks @bs))))})
