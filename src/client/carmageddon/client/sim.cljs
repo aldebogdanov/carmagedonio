@@ -266,6 +266,20 @@
 
 (defn chassis-body ^js [sim] (aget (:bodies @sim) (:player @sim)))
 
+(defn cast-ray
+  "Distance to the first solid thing along a ray, or nil.
+
+  `dx dy dz` must be a unit vector: Rapier reports a time of impact, which is
+  only a distance when the direction has unit length. The player's own body is
+  excluded, so a camera using this does not collide with the car it follows."
+  [sim ox oy oz dx dy dz max-dist]
+  (let [^js world (:world @sim)
+        ^js body  (chassis-body sim)
+        ray       (RAPIER/Ray. #js {:x ox :y oy :z oz} #js {:x dx :y dy :z dz})
+        ^js hit   (.castRay world ray max-dist true
+                            js/undefined js/undefined js/undefined body)]
+    (when hit (.-timeOfImpact hit))))
+
 (defn- v3 [^js v] [(.-x v) (.-y v) (.-z v)])
 
 (defn forward-vector

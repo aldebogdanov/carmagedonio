@@ -223,7 +223,7 @@
         _    (chunks/add-collider! world data (dec n))
         ;; castRay reads the query pipeline, which world.step populates.
         _    (.step world)
-        segs (worldgen/road-segments seed cx cz)
+        field (worldgen/road-field seed cx cz)
         ;; Asymmetric sample points -- a symmetric grid would pass even
         ;; when transposed.
         pts  (for [fx [0.13 0.37 0.62 0.88], fz [0.21 0.55 0.79]]
@@ -233,7 +233,7 @@
                (let [ray (RAPIER/Ray. #js {:x x :y 400.0 :z z} #js {:x 0 :y -1 :z 0})
                      hit (.castRay world ray 800.0 true)
                      y   (when hit (- 400.0 (or (.-timeOfImpact hit) (.-toi hit))))
-                     expected (first (worldgen/surface seed segs x z))]
+                     expected (first (worldgen/surface seed field x z))]
                  (if y (js/Math.abs (- y expected)) ##Inf)))]
     {:max-error-m (round 3 (apply max errs))
      :mean-error-m (round 3 (mean errs))}))

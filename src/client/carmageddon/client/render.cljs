@@ -12,6 +12,7 @@
 
   Visuals stay cheap: flat shading, procedurally painted textures, no shadows."
   (:require ["three" :as three]
+            [carmageddon.client.camera :as camera]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.textures :as textures]
             [carmageddon.shared.constants :as k]))
@@ -147,12 +148,17 @@
   (let [^js renderer (three/WebGLRenderer. #js {:canvas canvas :antialias true})
         tex          (textures/build! renderer seed)
         scene        (build-scene!)
-        meshes       (build-meshes! scene sim tex)]
+        meshes       (build-meshes! scene sim tex)
+        ^js cam      (three/PerspectiveCamera. 70 1 0.3 2000)]
     {:renderer       renderer
      :textures       tex
      :chunk-material (mat (:ground tex) true)
      :scene        scene
-     :camera       (three/PerspectiveCamera. 70 1 0.3 2000)
+     :camera       cam
+     :camera-state (camera/create! cam)
+     ;; Closed over here so the camera can query the world for occluders
+     ;; without `camera` having to know that a simulation exists.
+     :cast         (fn [ox oy oz dx dy dz d] (sim/cast-ray sim ox oy oz dx dy dz d))
      :meshes       meshes
      ;; One set of wheels per vehicle, parented to that vehicle's chassis.
      :wheel-meshes (mapv (fn [i] (build-wheels! (aget meshes i) tex))
@@ -163,10 +169,11 @@
      :qo      (three/Quaternion.)
      :qa      (three/Quaternion.)
      :qb      (three/Quaternion.)
+     ;; The player's interpolated rotation, kept aside as the entity loop passes
+     ;; it: the camera needs it after the loop, and `qo` is reused per entity.
+     :qp      (three/Quaternion.)
      :axis-x  (three/Vector3. 1 0 0)
      :axis-y  (three/Vector3. 0 1 0)
-     :cam-pos (three/Vector3. 0 12 24)
-     :look    (three/Vector3.)
      :size    (volatile! nil)}))
 
 (defn resize!
@@ -182,18 +189,6 @@
       (.setSize renderer w h false)
       (set! (.-aspect camera) (/ w h))
       (.updateProjectionMatrix camera))))
-
-(defn- follow!
-  "Fixed-orientation chase camera. A yaw-locked cam is less nauseating than a
-  behind-the-car one while the vehicle model is still being tuned."
-  [{:keys [^js camera ^js cam-pos ^js look]} px py pz]
-  (.set cam-pos
-        (lerp (.-x cam-pos) px 0.08)
-        (lerp (.-y cam-pos) (+ py 9.0) 0.08)
-        (lerp (.-z cam-pos) (+ pz 18.0) 0.08))
-  (.copy (.-position camera) cam-pos)
-  (.set look px py pz)
-  (.lookAt camera look))
 
 (defn- draw-wheels! [{:keys [wheel-meshes ^js qa ^js qb ^js axis-x ^js axis-y]} sim]
   (let [wheels (:wheels @sim)]
@@ -212,8 +207,13 @@
             (.multiplyQuaternions (.-quaternion w) qa qb)))))))
 
 (defn draw!
-  "Interpolate every entity by `alpha` in [0,1] and present the frame."
-  [{:keys [^js renderer scene ^js camera meshes ^js q0 ^js q1 ^js qo] :as rs} sim alpha]
+  "Interpolate every entity by `alpha` in [0,1] and present the frame.
+
+  `dt` is the real elapsed frame time, used only by the camera. Everything else
+  here is a function of the fixed timestep and `alpha`."
+  [{:keys [^js renderer scene ^js camera meshes camera-state cast
+           ^js q0 ^js q1 ^js qo ^js qp] :as rs}
+   sim alpha dt]
   (let [{:keys [prev curr halves player]} @sim
         n (count halves)]
     (dotimes [i n]
@@ -228,11 +228,16 @@
         (.set q1 (aget curr (+ o 3)) (aget curr (+ o 4))
                  (aget curr (+ o 5)) (aget curr (+ o 6)))
         (.slerpQuaternions qo q0 q1 alpha)
-        (.copy (.-quaternion m) qo)))
+        (.copy (.-quaternion m) qo)
+        (when (= i player) (.copy qp qo))))
     (draw-wheels! rs sim)
     (let [o (* player sim/stride)]
-      (follow! rs
-               (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)
-               (lerp (aget prev (+ o 1)) (aget curr (+ o 1)) alpha)
-               (lerp (aget prev (+ o 2)) (aget curr (+ o 2)) alpha)))
+      (camera/update! camera-state
+                      (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)
+                      (lerp (aget prev (+ o 1)) (aget curr (+ o 1)) alpha)
+                      (lerp (aget prev (+ o 2)) (aget curr (+ o 2)) alpha)
+                      (.-x qp) (.-y qp) (.-z qp) (.-w qp)
+                      (sim/player-speed sim)
+                      dt
+                      cast))
     (.render renderer scene camera)))

@@ -9,8 +9,13 @@
   (:require [carmageddon.shared.constants :as k]))
 
 (defn start!
-  "Run the loop. `on-tick` gets (tick dt), `on-frame` gets alpha in [0,1).
+  "Run the loop. `on-tick` gets (tick dt), `on-frame` gets (alpha elapsed) where
+  alpha is in [0,1) and elapsed is the real, capped frame time in seconds.
   Returns a stop fn.
+
+  Presentation is allowed the real frame time -- camera smoothing has to be
+  frame-rate independent to feel the same at 30 and 144 fps -- while the
+  simulation only ever sees `k/dt`.
 
   `schedule`/`cancel` default to requestAnimationFrame but are injectable: a
   headless test (or a browser tab that has been backgrounded, where rAF is
@@ -47,7 +52,7 @@
                   ;; briefly in slow motion, which is survivable; a spiral is not.
                   (when (>= @acc k/dt)
                     (vreset! acc 0.0))
-                  (on-frame (/ @acc k/dt))
+                  (on-frame (/ @acc k/dt) elapsed)
                   (when on-stats
                     (vswap! frames inc)
                     ;; Start the stats window on the first frame, not at zero --

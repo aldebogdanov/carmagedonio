@@ -4,6 +4,7 @@
   (:require [carmageddon.client.ai :as ai]
             [carmageddon.client.api :as api]
             [carmageddon.client.buildings :as buildings]
+            [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
             [carmageddon.client.game :as game]
             [carmageddon.client.peds :as peds]
@@ -128,7 +129,7 @@
           (apply-inbound! transport remotes props-state peds-state (js/Date.now))))
 
       :on-frame
-      (fn [alpha]
+      (fn [alpha dt]
         (render/resize! rs canvas)
         ;; Streaming is driven from the frame, not the tick: it is presentation
         ;; work with a per-frame budget, and tying it to the fixed timestep
@@ -140,7 +141,7 @@
         (props/sync! props-state)
         (peds/sync! peds-state)
         (remote/sync! remotes (js/Date.now))
-        (render/draw! rs sim alpha))
+        (render/draw! rs sim alpha dt))
 
       ;; HUD is updated twice a second, not per frame. UI state and sim state
       ;; are kept apart on purpose -- when re-frame arrives for menus it
@@ -165,6 +166,7 @@
                      "   rivals " (- (count controllers) (count @wrecked))
                      (let [n (remote/count-players remotes)]
                        (if (pos? n) (str "   online " n) ""))
+                     "   cam " (camera/labels (camera/mode (:camera-state rs)))
                      "   " (.toFixed (:fps s) 0) " fps"
                      "   chunks " (:loaded cs) "/" (:colliders cs)
                      (when (pos? (:pending cs)) (str " (+" (:pending cs) ")"))))))})))
@@ -206,7 +208,12 @@
                      {:on-open  #(js/console.log "multiplayer: connected")
                       :on-close #(js/console.log "multiplayer: disconnected")})
                     (net/loopback))
-        detach    (input/attach!)
+        ;; Driving input and camera input are attached separately on purpose:
+        ;; only the first becomes a `Command`, and a Command has to mean the
+        ;; same thing whether a human, the AI or the network produced it.
+        detach    (let [d-input (input/attach!)
+                        d-cam   (camera/attach! (:camera-state rs) canvas)]
+                    (fn [] (d-input) (d-cam)))
         [sx _ sz] (:spawn @s)
         chassis   (sim/chassis-collider-handle s)]
            ;; The one place physics impacts become gameplay.
