@@ -525,3 +525,83 @@
       (is (> (count claimed) 100) "expected plenty of plots across four chunks")
       (is (empty? (take 3 dupes))
           (str (count dupes) " plots were claimed twice, e.g. " (first dupes))))))
+
+;; --- building masses --------------------------------------------------------
+
+(deftest building-parts-are-well-formed
+  (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
+        {:keys [buildings parts]} (w/chunk-structures seed cx cz (w/road-field seed cx cz))
+        nb (/ (alen* buildings) w/building-stride)
+        np (/ (alen* parts) w/building-part-stride)]
+    (is (pos? nb))
+    (is (> (/ np (double nb)) 3.0)
+        (str "only " (/ np (double nb)) " volumes per building -- these are
+              still boxes"))
+    (testing "every part names a real shape and a real material"
+      (is (every? (fn [i]
+                    (let [o (* i w/building-part-stride)
+                          prim (aget* parts (+ o 7))
+                          mat  (aget* parts (+ o 8))
+                          tint (aget* parts (+ o 9))]
+                      (and (<= 0 prim) (< prim (count w/building-prims))
+                           (or (= mat w/plain-mat)
+                               (and (<= 0 mat) (< mat (count w/building-zones))))
+                           (<= 0 tint 0xffffff)
+                           ;; A float32 holds integers exactly only up to 2^24;
+                           ;; a packed 24-bit colour is the largest that fits.
+                           (= tint (Math/floor tint)))))
+                  (range np))))
+    (testing "no part is inside out or of zero size"
+      (is (every? (fn [i]
+                    (let [o (* i w/building-part-stride)]
+                      (and (> (aget* parts (+ o 4)) 0.0)
+                           (> (aget* parts (+ o 5)) 0.0)
+                           (> (aget* parts (+ o 6)) 0.0))))
+                  (range np))))))
+
+(deftest a-shop-awning-hangs-over-the-street
+  (testing "the local-to-world transform. A part placed toward local -Z has to
+            come out on the street side of the building; rotating the wrong way
+            puts every awning, porch and loading bay in the back yard, which is
+            invisible in a screenshot of a city block."
+    (let [awning 0xb2452f
+          samples (for [cx (range 0 8), cz (range 0 8)
+                        :let [field (w/road-field seed cx cz)
+                              {:keys [buildings parts]} (w/chunk-structures seed cx cz field)]
+                        i (range (/ (alen* parts) w/building-part-stride))
+                        :let [o (* i w/building-part-stride)]
+                        :when (= (double awning) (double (aget* parts (+ o 9))))
+                        :let [px (aget* parts o) pz (aget* parts (+ o 2))
+                              ;; Nearest building centre, which the awning belongs to.
+                              nb (apply min-key
+                                        (fn [j]
+                                          (let [b (* j w/building-stride)]
+                                            (+ (Math/pow (- (aget* buildings b) px) 2)
+                                               (Math/pow (- (aget* buildings (+ b 2)) pz) 2))))
+                                        (range (/ (alen* buildings) w/building-stride)))
+                              b (* nb w/building-stride)]]
+                    [(second (w/surface seed field px pz))
+                     (second (w/surface seed field (aget* buildings b)
+                                        (aget* buildings (+ b 2))))])
+          total (count samples)
+          nearer (count (filter (fn [[a b]] (>= a b)) samples))]
+      (is (> total 30) "expected a decent number of shops")
+      (is (> (/ nearer (double total)) 0.95)
+          (str "only " nearer " of " total " awnings were on the street side")))))
+
+(deftest silhouettes-differ-by-zone
+  (testing "a house is not an office with a different texture"
+    (let [prims-of (fn [pred]
+                     (let [[cx cz] (densest-chunk pred)
+                           {:keys [parts]} (w/chunk-structures seed cx cz
+                                                               (w/road-field seed cx cz))]
+                       (frequencies
+                        (for [i (range (/ (alen* parts) w/building-part-stride))]
+                          (nth w/building-prims
+                               (int (aget* parts (+ 7 (* i w/building-part-stride)))))))))
+          downtown (prims-of (fn [u _] (> u 0.88)))
+          works    (prims-of (fn [u ind] (and (> ind 0.74) (< 0.3 u 0.7))))
+          rural    (prims-of (fn [u _] (< 0.16 u 0.30)))]
+      (is (pos? (:cylinder downtown 0)) "office masts")
+      (is (pos? (:gable works 0)) "sawtooth and shed roofs")
+      (is (pos? (:gable rural 0)) "pitched roofs on houses and barns"))))

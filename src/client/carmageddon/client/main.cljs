@@ -197,7 +197,7 @@
                     :on-remove (fn [mesh] (render/remove-chunk! rs mesh))
                     :on-physics-add    (fn [key data]
                                      (props/add-chunk! ps key (:props data))
-                                     (buildings/add-chunk! bs key (:buildings data))
+                                     (buildings/add-chunk! bs key (:buildings data) (:building-parts data))
                                      (furniture/add-chunk! fu key (:furniture data))
                                      (peds/add-chunk! pd key (:peds data)))
                     :on-physics-remove (fn [key]

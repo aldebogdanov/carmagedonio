@@ -732,22 +732,178 @@
 
 (def building-stride 8)      ; x y z hx hz height zone yaw
 
-(defn chunk-buildings
-  "One building per built plot, as [x y z hx hz height zone yaw ...].
+;; --- building masses --------------------------------------------------------
+;;
+;; A building is a handful of extruded volumes rather than one box. That is the
+;; whole difference between "a box with a shop texture on it" and something that
+;; reads as a shop at 90 km/h: the awning, the sign band and the parapet are
+;; what the eye picks up, not the wall behind them.
+;;
+;; Parts are emitted in the building's own frame and transformed here, so the
+;; client only has to place them. Local -Z is the street side.
 
-  Buildings are no longer thrown at the chunk and rejected when they land on a
-  road. They stand on plots cut from the block, square to the street, pushed up
-  against their frontage with the yard behind -- which is what turns a field of
-  boxes into a street.
+(def building-part-stride 10)   ; x y z yaw sx sy sz prim mat tint
+(def building-prims [:box :gable :pyramid :cylinder])
 
-  Ground height is the *lowest* of the four corners, so a building on a slope
-  cuts into the hill instead of floating over the downhill side."
+(def ^:private prim-index (zipmap building-prims (range)))
+
+(def plain-mat
+  "Value in a part's `mat` slot meaning 'flat colour from `tint`'. Anything
+  else is an index into the zone facades, i.e. a wall with windows in it."
+  -1.0)
+
+(def ^:private palette
+  {:roof-dark  0x39383a
+   :roof-tile  0x7d4636
+   :roof-metal 0x8f959b
+   :concrete   0xa5a29a
+   :stone      0xbdb6a4
+   :brick      0x8a5a48
+   :wood       0x6d4b34
+   :glass      0x7f96a8
+   :awning     0xb2452f
+   :sign       0xd8b23c
+   :steel      0x7c8288
+   :door       0x44444a})
+
+(defn- part
+  "One extruded volume, in the building's local frame."
+  ([lx ly lz sx sy sz prim tint] (part lx ly lz 0.0 sx sy sz prim tint))
+  ([lx ly lz lyaw sx sy sz prim tint]
+   {:lx lx :ly ly :lz lz :lyaw lyaw :sx sx :sy sy :sz sz
+    :prim prim :tint tint}))
+
+(defn- wall
+  "A part painted with the building's own facade rather than a flat colour."
+  [lx ly lz sx sy sz]
+  (assoc (part lx ly lz sx sy sz :box 0) :facade? true))
+
+(defn- ridged-roof
+  "A gable whose ridge runs along the building's longer horizontal axis.
+
+  The primitive extrudes its triangle along Z, so a building that is wider than
+  it is deep needs the roof turning a quarter turn and its extents swapped --
+  otherwise every wide house gets a roof running the wrong way."
+  [hx hz rise ly tint overhang]
+  (let [ox (* hx overhang) oz (* hz overhang)]
+    (if (> hx hz)
+      (part 0.0 (+ ly (* 0.5 rise)) 0.0 (/ #?(:clj Math/PI :cljs js/Math.PI) 2)
+            (* 2 oz) rise (* 2 ox) :gable tint)
+      (part 0.0 (+ ly (* 0.5 rise)) 0.0
+            (* 2 ox) rise (* 2 oz) :gable tint))))
+
+(defn- mass-parts
+  "The volumes that make up one building, in its local frame.
+
+  Every zone gets a silhouette of its own -- a gable and a chimney, a slab with
+  balcony bands, a shed with a sawtooth roof and a stack -- because silhouette
+  is what survives at speed and at distance."
+  [r zone hx hz h]
+  (let [c   palette
+        pick (fn [& ks] (nth (vec ks) (prng/next-int! r (count ks))))
+        base (wall 0.0 (* 0.5 h) 0.0 (* 2 hx) h (* 2 hz))]
+    (case zone
+      :house
+      (let [rise (max 1.4 (* 1.05 (min hx hz)))]
+        [base
+         (ridged-roof hx hz rise h (pick (:roof-tile c) (:roof-dark c)) 1.10)
+         ;; Porch out toward the street, chimney up through the roof.
+         (part 0.0 1.1 (- (+ hz 0.7)) (* hx 1.0) 2.2 1.4 :box (:wood c))
+         (part (* hx 0.55) (+ h (* rise 0.75)) (* hz 0.25)
+               0.6 (+ 1.4 rise) 0.6 :box (:brick c))])
+
+      :townhouse
+      [base
+       ;; Parapet and a string course: terraces read by their horizontal lines.
+       (part 0.0 (+ h 0.35) 0.0 (* 2 hx 1.04) 0.7 (* 2 hz 1.04) :box (:stone c))
+       (part 0.0 (* h 0.46) (- (+ hz 0.06)) (* 2 hx) 0.35 0.16 :box (:stone c))
+       (part 0.0 1.05 (- (+ hz 0.12)) 1.0 2.1 0.3 :box (:door c))]
+
+      :apartment
+      (let [bands (+ 2 (prng/next-int! r 3))]
+        (into [base
+               (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.03) 0.6 (* 2 hz 1.03) :box (:concrete c))
+               ;; Lift plant on the roof.
+               (part (* hx 0.3) (+ h 1.6) (* hz 0.2) (* hx 0.7) 2.2 (* hz 0.6)
+                     :box (:concrete c))]
+              (for [i (range bands)]
+                (let [y (* h (/ (+ i 1.0) (+ bands 1.0)))]
+                  (part 0.0 y (- (+ hz 0.35)) (* 2 hx 0.9) 0.28 0.7
+                        :box (:concrete c))))))
+
+      :shop
+      [base
+       ;; Awning, fascia sign and parapet -- the three things that say "shop".
+       (part 0.0 3.4 (- (+ hz 0.85)) (* 2 hx 0.94) 0.22 1.7 :box (:awning c))
+       (part 0.0 4.15 (- (+ hz 0.12)) (* 2 hx 0.9) 0.9 0.28 :box (:sign c))
+       (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.05) 0.7 (* 2 hz 1.05) :box (:stone c))]
+
+      :office
+      (let [pod (min (* h 0.22) 7.0)
+            tw  (* hx 0.82) td (* hz 0.82)]
+        [(wall 0.0 (* 0.5 pod) 0.0 (* 2 hx 1.06) pod (* 2 hz 1.06))
+         (wall 0.0 (+ pod (* 0.5 (- h pod))) 0.0 (* 2 tw) (- h pod) (* 2 td))
+         (part 0.0 (+ h 0.9) 0.0 (* 2 tw 1.05) 1.8 (* 2 td 1.05) :box (:glass c))
+         (part 0.0 (+ h 5.0) 0.0 0.35 8.0 0.35 :cylinder (:steel c))])
+
+      :factory
+      (let [teeth (+ 3 (prng/next-int! r 3))
+            tw    (/ (* 2 hx) teeth)]
+        (into [base
+               (part (* hx 0.72) (+ h 6.0) (* hz 0.55) 1.5 14.0 1.5
+                     :cylinder (:brick c))]
+              (for [i (range teeth)]
+                (part (+ (- hx) (* tw (+ i 0.5))) (+ h 0.9) 0.0
+                      (* tw 0.96) 1.9 (* 2 hz) :gable (:roof-metal c)))))
+
+      :warehouse
+      (let [doors (+ 2 (prng/next-int! r 2))]
+        (into [base
+               (ridged-roof hx hz 1.8 h (:roof-metal c) 1.04)]
+              (for [i (range doors)]
+                (part (* hx (- (/ (* 2.0 (+ i 0.5)) doors) 1.0)) 2.0 (- (+ hz 0.1))
+                      (* hx (/ 1.3 doors)) 4.0 0.3 :box (:door c)))))
+
+      :civic
+      (into [base
+             (part 0.0 (+ h (* 0.45 hx)) 0.0 (* 2 hx 1.02) (* 0.9 hx) (* 2 hz 1.02)
+                   :pyramid (:roof-metal c))
+             ;; Portico: a slab out front on four columns.
+             (part 0.0 (- h 0.5) (- (+ hz 1.3)) (* 2 hx 0.7) 1.0 2.8 :box (:stone c))]
+            (for [i (range 4)]
+              (part (* hx 0.7 (- (/ (* 2.0 i) 3.0) 1.0)) (* 0.5 (- h 1.0)) (- (+ hz 1.9))
+                    0.55 (- h 1.0) 0.55 :cylinder (:stone c))))
+
+      :barn
+      (let [rise (max 2.2 (* 1.35 (min hx hz)))]
+        [base
+         (ridged-roof hx hz rise h (:roof-tile c) 1.12)
+         (part (+ hx 2.2) 4.0 0.0 3.0 8.0 3.0 :cylinder (:concrete c))
+         (part (+ hx 2.2) 9.0 0.0 3.2 2.0 3.2 :pyramid (:roof-metal c))])
+
+      [base])))
+
+(defn chunk-structures
+  "Every building in one chunk, as two flat arrays.
+
+  `:buildings` is the coarse footprint -- [x y z hx hz height zone yaw ...] --
+  and is what the physics collider is built from: one box per building rather
+  than one per part, because a porch is not worth a broad-phase entry.
+
+  `:parts` is what actually gets drawn: [x y z yaw sx sy sz prim mat tint ...],
+  already transformed out of the building's own frame. `mat` is either the
+  zone's facade or a flat colour in `tint`.
+
+  Both come out of the same pass over the chunk's plots, so the mass a player
+  can see and the box they collide with cannot drift apart."
   [seed cx cz field]
-  (let [r   (prng/chunk-rng seed cx cz (+ 17 (:blocks k/salt)))
-        out (transient [])]
+  (let [r     (prng/chunk-rng seed cx cz (+ 17 (:blocks k/salt)))
+        boxes (transient [])
+        parts (transient [])]
     (doseq [{:keys [x z hx hz yaw zone]} (chunk-lots seed cx cz)
             :when (not= :open zone)]
-      (let [{:keys [cover height]} (nth building-zones (zone-index zone))
+      (let [zi (zone-index zone)
+            {:keys [cover height]} (nth building-zones zi)
             u  (urbanness seed x z)
             [h0 h1] height
             ;; Density drives height within the zone's range: the same kind of
@@ -758,20 +914,44 @@
             ;; Sit against the frontage rather than in the middle of the plot;
             ;; the leftover depth becomes the yard behind.
             back (* 0.55 (- hz bhz))
-            [sx sz] [(js-sin yaw) (js-cos yaw)]
-            bx (- x (* sx back))
-            bz (- z (* sz back))
+            sy (js-sin yaw) cy (js-cos yaw)
+            bx (- x (* sy back))
+            bz (- z (* cy back))
             corners [[bx bz]
                      [(- bx bhx) (- bz bhz)] [(+ bx bhx) (- bz bhz)]
                      [(- bx bhx) (+ bz bhz)] [(+ bx bhx) (+ bz bhz)]]
-            y (reduce min (map (fn [[px pz]] (first (surface seed field px pz))) corners))]
-        (conj! out bx) (conj! out y) (conj! out bz)
-        (conj! out bhx) (conj! out bhz) (conj! out hgt)
-        (conj! out (double (zone-index zone))) (conj! out yaw)))
-    (let [v (persistent! out)
-          a (farray (count v))]
-      (dotimes [i (count v)] (fput! a i (nth v i)))
-      a)))
+            gy (reduce min (map (fn [[px pz]] (first (surface seed field px pz))) corners))]
+        (conj! boxes bx) (conj! boxes gy) (conj! boxes bz)
+        (conj! boxes bhx) (conj! boxes bhz) (conj! boxes hgt)
+        (conj! boxes (double zi)) (conj! boxes yaw)
+        (doseq [pt (mass-parts r zone bhx bhz hgt)]
+          ;; Local -> world: rotate the part about +Y by the building's yaw.
+          ;; `ly` is measured from the building's own base, which is sunk 0.6 m
+          ;; so a building on a slope meets the ground on every side rather
+          ;; than showing daylight under the downhill corner.
+          (let [wx (+ bx (* (:lx pt) cy) (* (:lz pt) sy))
+                wz (+ bz (- (* (:lx pt) sy)) (* (:lz pt) cy))]
+            (conj! parts wx)
+            (conj! parts (+ gy -0.6 (:ly pt)))
+            (conj! parts wz)
+            (conj! parts (+ yaw (:lyaw pt)))
+            (conj! parts (:sx pt)) (conj! parts (:sy pt)) (conj! parts (:sz pt))
+            (conj! parts (double (prim-index (:prim pt))))
+            (conj! parts (if (:facade? pt) (double zi) plain-mat))
+            (conj! parts (double (:tint pt)))))))
+    (let [bv (persistent! boxes)
+          pv (persistent! parts)
+          ba (farray (count bv))
+          pa (farray (count pv))]
+      (dotimes [i (count bv)] (fput! ba i (nth bv i)))
+      (dotimes [i (count pv)] (fput! pa i (nth pv i)))
+      {:buildings ba :parts pa})))
+
+(defn chunk-buildings
+  "Coarse footprints only. Kept as its own name because the physics side and
+  the tests care about the box, not about the porch."
+  [seed cx cz field]
+  (:buildings (chunk-structures seed cx cz field)))
 
 ;; --- pedestrians ------------------------------------------------------------
 
@@ -1084,7 +1264,7 @@
         z0    (* cz k/chunk-size)
         field (road-field seed cx cz)
         props (chunk-props seed cx cz field)
-        buildings (chunk-buildings seed cx cz field)
+        {:keys [buildings parts]} (chunk-structures seed cx cz field)
         peds  (chunk-peds seed cx cz field)
         furniture (chunk-furniture seed cx cz field)
         heights (farray (* n n))
@@ -1124,6 +1304,7 @@
      :colors colors
      :props props
      :buildings buildings
+     :building-parts parts
      :peds peds
      :furniture furniture
      :biome (biome seed cx cz)}))
