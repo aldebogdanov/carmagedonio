@@ -196,26 +196,126 @@
       (is (pos? (:city mix 0)))
       (is (pos? (:country mix 0))))))
 
-(deftest buildings-only-in-cities-and-clear-of-streets
-  (let [[ccx ccz] (first-chunk-of :country)]
-    (is (zero? (alen* (w/chunk-buildings seed ccx ccz (w/road-field seed ccx ccz))))
-        "country chunks have no buildings"))
-  (let [[cx cz] (first-chunk-of :city)
+(defn- densest-chunk
+  "A chunk whose centre satisfies `pred` on (urbanness, industrialness)."
+  [pred]
+  (first (for [cx (range -30 40), cz (range -20 20)
+               :let [x (* (+ cx 0.5) k/chunk-size)
+                     z (* (+ cz 0.5) k/chunk-size)]
+               :when (pred (w/urbanness seed x z) (w/industrialness seed x z))]
+           [cx cz])))
+
+(deftest lots-are-cut-from-blocks-not-scattered
+  (let [[cx cz] (densest-chunk (fn [u _] (> u 0.85)))
+        field (w/road-field seed cx cz)
+        lots (w/chunk-lots seed cx cz)]
+    (is (> (count lots) 40) "a downtown chunk should be full of plots")
+
+    (testing "no plot sits on a carriageway"
+      (let [on-road (count (filter (fn [{:keys [x z]}]
+                                     (>= (second (w/surface seed field x z)) 0.9999))
+                                   lots))]
+        (is (zero? on-road) (str on-road " plots straddled a road"))))
+
+    (testing "plots do not overlap: a shared boundary is drawn once, so
+              neighbours meet exactly rather than fighting over the ground"
+      (let [rs (mapv (fn [{:keys [x z hx hz]}]
+                       [(- x hx) (- z hz) (+ x hx) (+ z hz)])
+                     lots)
+            clash (for [i (range (count rs)), j (range (inc i) (count rs))
+                        :let [[ax0 az0 ax1 az1] (nth rs i)
+                              [bx0 bz0 bx1 bz1] (nth rs j)]
+                        ;; A hair of tolerance: shared edges touch by design.
+                        :when (and (> (min ax1 bx1) (+ 0.01 (max ax0 bx0)))
+                                   (> (min az1 bz1) (+ 0.01 (max az0 bz0))))]
+                    [i j])]
+        (is (empty? (take 5 clash))
+            (str (count clash) " overlapping pairs, e.g. " (first clash)))))
+
+    (testing "plots face the street rather than away from it"
+      (let [fronts (for [{:keys [x z hx hz yaw]} lots
+                         ;; local -Z is the frontage, local +Z the back yard
+                         :let [sx (abs (Math/sin yaw)) ; 1 for east/west sides
+                               dx (* (Math/sin yaw) (+ (if (> sx 0.5) hx hz) 6.0))
+                               dz (* (Math/cos yaw) (+ (if (> sx 0.5) hx hz) 6.0))]]
+                     [(second (w/surface seed field (- x dx) (- z dz)))
+                      (second (w/surface seed field (+ x dx) (+ z dz)))])
+            better (count (filter (fn [[front back]] (> front back)) fronts))]
+        (is (> (/ better (double (count fronts))) 0.8)
+            (str "only " better " of " (count fronts)
+                 " plots had more road in front than behind"))))))
+
+(deftest zoning-follows-density
+  (let [zones-at (fn [pred]
+                   (let [[cx cz] (densest-chunk pred)]
+                     (set (map :zone (w/chunk-lots seed cx cz)))))
+        downtown (zones-at (fn [u _] (> u 0.88)))
+        country  (zones-at (fn [u _] (< u 0.10)))
+        works    (zones-at (fn [u ind] (and (> ind 0.74) (< 0.3 u 0.7))))]
+    (testing "downtown builds up, not out"
+      (is (contains? downtown :office))
+      (is (not (contains? downtown :barn)))
+      (is (not (contains? downtown :factory)) "works belong at the edge of town"))
+    (testing "open country is farmland with the odd barn"
+      (is (contains? country :open))
+      (is (not (contains? country :office)))
+      (is (not (contains? country :apartment))))
+    (testing "the industrial field actually places industry"
+      (is (some works #{:factory :warehouse})))))
+
+(deftest buildings-stand-on-their-plots
+  (let [[cx cz] (densest-chunk (fn [u _] (> u 0.85)))
         field (w/road-field seed cx cz)
         b (w/chunk-buildings seed cx cz field)
         n (/ (alen* b) w/building-stride)]
-    (is (pos? n) "city chunks should have buildings")
-    (testing "no building sits on a street"
+    (is (pos? n) "a downtown chunk should have buildings")
+
+    (testing "same seed, same street"
+      (is (= (vec (map #(aget* b %) (range (alen* b))))
+             (vec (map #(aget* (w/chunk-buildings seed cx cz field) %)
+                       (range (alen* b)))))))
+
+    (testing "no building stands in a road"
       (is (every? (fn [i]
                     (let [o (* i w/building-stride)]
-                      (< (second (w/surface seed field (aget* b o) (aget* b (+ o 2)))) 0.2)))
+                      (< (second (w/surface seed field (aget* b o) (aget* b (+ o 2))))
+                         0.35)))
                   (range n))))
-    (testing "footprints and heights are sane"
+
+    (testing "every zone index names a real zone, and yaw is square to a street"
       (is (every? (fn [i]
-                    (let [o (* i w/building-stride)]
-                      (and (< 3.0 (aget* b (+ o 3)) 11.0)
-                           (< 3.0 (aget* b (+ o 4)) 11.0)
-                           (< 8.0 (aget* b (+ o 5)) 43.0))))
+                    (let [o (* i w/building-stride)
+                          zi (aget* b (+ o 6))
+                          yaw (aget* b (+ o 7))]
+                      (and (<= 0 zi) (< zi (count w/building-zones))
+                           ;; Yaw is one of the four side headings, so a facade
+                           ;; is always parallel to the street it fronts.
+                           (< (abs (- (abs (Math/sin yaw))
+                                      (Math/round (abs (Math/sin yaw)))))
+                              1e-6))))
+                  (range n))))
+
+    (testing "footprints and heights are within their zone's range"
+      (is (every? (fn [i]
+                    (let [o (* i w/building-stride)
+                          {:keys [height]} (nth w/building-zones (int (aget* b (+ o 6))))
+                          [h0 h1] height
+                          h (aget* b (+ o 5))]
+                      ;; Density scales height inside the range by 0.72..1.10.
+                      (and (> (aget* b (+ o 3)) 1.9)
+                           (> (aget* b (+ o 4)) 1.9)
+                           (<= (* 0.71 h0) h (* 1.11 h1)))))
+                  (range n))))
+
+    (testing "a building meets the ground on its lowest corner"
+      (is (every? (fn [i]
+                    (let [o (* i w/building-stride)
+                          x (aget* b o) z (aget* b (+ o 2))
+                          hx (aget* b (+ o 3)) hz (aget* b (+ o 4))
+                          lo (reduce min (for [px [(- x hx) x (+ x hx)]
+                                               pz [(- z hz) z (+ z hz)]]
+                                           (first (w/surface seed field px pz))))]
+                      (< (abs (- (aget* b (+ o 1)) lo)) 0.35)))
                   (range n))))))
 
 (deftest heights-stay-within-the-terrain-envelope
@@ -225,10 +325,20 @@
     (is (> (- (apply max vs) (apply min vs)) 0.5) "chunk should not be perfectly flat")))
 
 (deftest spawn-is-on-a-road
-  (let [[x _ z] (w/spawn-point seed)
+  (let [{:keys [pos dir]} (w/spawn-point seed)
+        [x _ z] pos
+        [dx dz] dir
         [cx cz] (w/chunk-of x z)
         field (w/road-field seed cx cz)]
-    (is (= 1.0 (second (w/surface seed field x z))))))
+    (is (= 1.0 (second (w/surface seed field x z))) "the spawn itself")
+    (is (< (abs (- 1.0 (Math/sqrt (+ (* dx dx) (* dz dz))))) 1e-9)
+        "the street direction is a unit vector")
+    (testing "and so is the road behind it, where the opponents queue up"
+      (doseq [d [8.0 16.0 24.0]]
+        (let [ox (- x (* dx d)) oz (- z (* dz d))
+              [ocx ocz] (w/chunk-of ox oz)]
+          (is (= 1.0 (second (w/surface seed (w/road-field seed ocx ocz) ox oz)))
+              (str d " m back was not on the carriageway")))))))
 
 ;; --- clutter ----------------------------------------------------------------
 
@@ -402,3 +512,16 @@
       (is (> total 500) "expected a decent sample of poles")
       (is (< (/ blocking (double total)) 0.01)
           (str blocking " of " total " poles stood in the carriageway")))))
+
+(deftest a-plot-belongs-to-exactly-one-chunk
+  (testing "cells straddle chunk borders, so both neighbours cut the same plots
+            out of them -- ownership by centre is what stops the building being
+            put up twice"
+    (let [[bx bz] (densest-chunk (fn [u _] (> u 0.80)))
+          claimed (for [cx [bx (inc bx)], cz [bz (inc bz)]
+                        {:keys [x z]} (w/chunk-lots seed cx cz)]
+                    [(Math/round (* 100.0 x)) (Math/round (* 100.0 z))])
+          dupes (->> claimed frequencies (filter (fn [[_ n]] (> n 1))) (map first))]
+      (is (> (count claimed) 100) "expected plenty of plots across four chunks")
+      (is (empty? (take 3 dupes))
+          (str (count dupes) " plots were claimed twice, e.g. " (first dupes))))))

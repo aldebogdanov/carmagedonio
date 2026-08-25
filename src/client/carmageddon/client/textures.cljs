@@ -100,28 +100,53 @@
 (defn- facade-canvas
   "A wall with a grid of windows. Reading building scale at a glance is what
   makes a city feel like a city rather than a field of boxes -- and lit windows
-  give the eye something to track speed against."
-  [seed size tint]
+  give the eye something to track speed against.
+
+  `cols`/`rows` are per face, not per storey: the texture is stretched over a
+  box scaled to the building, so a tall office needs many rows and a bungalow
+  needs three. That works out because the window grid is chosen per zone, and
+  zone already correlates with size."
+  [seed size tint {:keys [cols rows lit shopfront?]
+                   :or {cols 8 rows 10 lit 0.18 shopfront? false}}]
   (let [c   (canvas size)
         ctx (.getContext c "2d")
         rng (prng/make seed)
         [r g b] tint]
     (fill! ctx (rgb r g b) 0 0 size size)
     (jitter ctx rng size 3000 tint 18 3.0)
-    (let [cols 8, rows 10
-          cw (/ size cols), ch (/ size rows)]
+    (let [cw (/ size cols), ch (/ size rows)]
       (dotimes [row rows]
         (dotimes [col cols]
-          (let [lit (prng/next-double! rng)
+          (let [roll (prng/next-double! rng)
                 wx (+ (* col cw) (* cw 0.22))
                 wy (+ (* row ch) (* ch 0.18))
                 ww (* cw 0.56), wh (* ch 0.5)]
             (fill! ctx
-                   (cond (> lit 0.82) "rgba(255,232,170,0.92)"
-                         (> lit 0.55) "rgba(120,140,160,0.75)"
-                         :else        "rgba(30,36,44,0.85)")
+                   (cond (< roll lit)        "rgba(255,232,170,0.92)"
+                         (< roll (+ lit 0.4)) "rgba(120,140,160,0.75)"
+                         :else               "rgba(30,36,44,0.85)")
                    wx wy ww wh)))))
+    ;; Shops are glass at street level and brick above, which is most of what
+    ;; tells you a building is a shop when you are driving past it at speed.
+    (when shopfront?
+      (let [gh (/ size rows)]
+        (fill! ctx "rgba(150,180,196,0.90)" (* size 0.04) (- size (* gh 1.25))
+               (* size 0.92) (* gh 1.05))
+        (fill! ctx "rgba(214,178,86,0.85)" 0 (- size (* gh 1.45))
+               size (* gh 0.22))))
     c))
+
+(def ^:private zone-facades
+  "One facade per `worldgen/building-zones` entry, in that order."
+  [{:tint [122 108 92]  :cols 4 :rows 3  :lit 0.30}                     ; house
+   {:tint [134 106 96]  :cols 4 :rows 4  :lit 0.28}                     ; townhouse
+   {:tint [104 104 110] :cols 7 :rows 9  :lit 0.22}                     ; apartment
+   {:tint [126 116 104] :cols 5 :rows 4  :lit 0.34 :shopfront? true}    ; shop
+   {:tint [86 98 112]   :cols 9 :rows 13 :lit 0.16}                     ; office
+   {:tint [96 94 88]    :cols 6 :rows 3  :lit 0.10}                     ; factory
+   {:tint [104 100 94]  :cols 3 :rows 2  :lit 0.05}                     ; warehouse
+   {:tint [140 136 124] :cols 6 :rows 4  :lit 0.20}                     ; civic
+   {:tint [118 74 58]   :cols 2 :rows 2  :lit 0.06}])                   ; barn
 
 (defn- tyre-canvas [seed size]
   (let [c   (canvas size)
@@ -161,11 +186,12 @@
    :body   (->texture (body-canvas (prng/hash-coords seed 3 0) 256 [176 46 34]) renderer nil)
    :crate  (->texture (crate-canvas (prng/hash-coords seed 4 0) 256) renderer nil)
    :tyre   (->texture (tyre-canvas (prng/hash-coords seed 5 0) 128) renderer nil)
-   ;; One facade per building kind. UVs come from a shared unit cube scaled to
-   ;; each building, so windows stretch with the box -- accepted deliberately:
-   ;; per-building geometry would mean per-building disposal, and this is
-   ;; scenery.
-   :facades (mapv (fn [[i tint]]
-                    (->texture (facade-canvas (prng/hash-coords seed 6 i) 256 tint)
+   ;; One facade per building zone, in `worldgen/building-zones` order. UVs come
+   ;; from a shared unit cube scaled to each building, so windows stretch with
+   ;; the box -- accepted deliberately: per-building geometry would mean
+   ;; per-building disposal, and this is scenery.
+   :facades (vec (map-indexed
+                  (fn [i {:keys [tint] :as spec}]
+                    (->texture (facade-canvas (prng/hash-coords seed 6 i) 256 tint spec)
                                renderer nil))
-                  (map-indexed vector [[92 96 104] [116 104 92] [80 90 96] [104 100 88]]))})
+                  zone-facades))})

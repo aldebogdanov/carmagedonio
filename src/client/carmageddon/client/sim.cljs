@@ -96,15 +96,17 @@
 
 (defn spawn-box!
   "Add a dynamic box. Half-extents in metres. Returns the entity index."
-  [sim [x y z] [hx hy hz] {:keys [density friction can-sleep events?]
+  [sim [x y z] [hx hy hz] {:keys [density friction can-sleep events? yaw]
                            :or   {density 200.0 friction 0.8 can-sleep true
-                                  events? false}}]
+                                  events? false yaw 0.0}}]
   (let [{:keys [^js world bodies halves]} @sim
         i        (count halves)
         ^js body (.createRigidBody
                   world
                   (-> (.dynamic RAPIER/RigidBodyDesc)
                       (.setTranslation x y z)
+                      (.setRotation #js {:x 0.0 :y (js/Math.sin (* 0.5 yaw))
+                                         :z 0.0 :w (js/Math.cos (* 0.5 yaw))})
                       (.setCanSleep can-sleep)
                       (.setLinearDamping 0.05)
                       (.setAngularDamping 0.4)))]
@@ -149,7 +151,13 @@
   ([{:keys [flat? seed opponents] :or {seed 0 opponents 0}}]
    (let [[gx gy gz] k/gravity
          ^js world (RAPIER/World. (vec3 gx gy gz))
-         [sx sy sz] (if flat? [0.0 1.2 0.0] (worldgen/spawn-point seed))
+         spawn      (when-not flat? (worldgen/spawn-point seed))
+         [sx sy sz] (if flat? [0.0 1.2 0.0] (:pos spawn))
+         [fdx fdz]  (if flat? [0.0 -1.0] (:dir spawn))
+         ;; Local forward is -Z, so this is the yaw that points the car down the
+         ;; street. Without it the field starts broadside to the road, which
+         ;; only became obvious once there were buildings to be broadside into.
+         spawn-yaw  (js/Math.atan2 (- fdx) (- fdz))
          sim  (atom {:world  world
                      :seed   seed
                      :bodies (make-array max-entities)
@@ -172,16 +180,22 @@
                                   (.setFriction 1.0))))
      ;; Player must be entity 0.
      (spawn-box! sim [sx sy sz] chassis-half
-                 {:density chassis-density :can-sleep false :events? true})
+                 {:density chassis-density :can-sleep false :events? true
+                  :yaw spawn-yaw})
      (build-vehicle! sim 0)
-     ;; Opponents, spread along the road behind the player.
+     ;; Opponents queue up along the carriageway behind the player, two abreast.
+     ;; They used to be scattered round a 9 m circle, which was fine when the
+     ;; only scenery was the odd crate but drops half the field inside a
+     ;; building now that blocks are built out to the pavement.
      (dotimes [i opponents]
-       (let [a  (* (+ i 1) 2.3)
-             ox (+ sx (* 9.0 (js/Math.cos a)))
-             oz (+ sz (* 9.0 (js/Math.sin a)))
+       (let [back (* (+ i 1) 8.0)
+             lat  (if (even? i) 2.4 -2.4)
+             ox (+ sx (* (- fdx) back) (* (- fdz) lat))
+             oz (+ sz (* (- fdz) back) (* fdx lat))
              oy (if flat? 1.2 (+ 1.2 (worldgen/height-at seed ox oz)))]
          (spawn-box! sim [ox oy oz] chassis-half
-                     {:density chassis-density :can-sleep false :events? true})
+                     {:density chassis-density :can-sleep false :events? true
+                      :yaw spawn-yaw})
          (build-vehicle! sim (inc i))))
      sim)))
 

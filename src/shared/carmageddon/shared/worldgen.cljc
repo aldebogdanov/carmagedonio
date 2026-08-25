@@ -30,6 +30,8 @@
 (defn- sqrt  [x] #?(:clj (Math/sqrt x)  :cljs (js/Math.sqrt x)))
 (defn- floor [x] #?(:clj (Math/floor x) :cljs (js/Math.floor x)))
 (defn- hypot [x y] (sqrt (+ (* x x) (* y y))))
+(defn- js-sin [x] #?(:clj (Math/sin x) :cljs (js/Math.sin x)))
+(defn- js-cos [x] #?(:clj (Math/cos x) :cljs (js/Math.cos x)))
 
 (defn- smoothstep [t] (* t t (- 3.0 (* 2.0 t))))
 
@@ -122,18 +124,14 @@
         :else                           :local))
 
 (def road-profile
-  "Per-class carriageway half-width, verge width and lattice jitter.
-
-  `jitter` is a fraction of `street-spacing` and is deliberately tiny for
-  arterials: a node's displacement bends the line it sits on, so letting an
-  arterial node wander would kink a road that is supposed to run for kilometres.
+  "Per-class carriageway half-width and verge width.
 
   The verges are far narrower than the 18 m the hub-and-spoke generator used.
   They have to be: with streets 64 m apart, an 18 m blend on each side of each
   road would leave no unroaded ground between them at all."
-  {:arterial  {:half 7.0 :shoulder 8.0 :jitter 0.03}
-   :collector {:half 5.0 :shoulder 5.5 :jitter 0.10}
-   :local     {:half 3.8 :shoulder 4.0 :jitter 0.20}})
+  {:arterial  {:half 7.0 :shoulder 8.0}
+   :collector {:half 5.0 :shoulder 5.5}
+   :local     {:half 3.8 :shoulder 4.0}})
 
 (def signal-cycle 24.0)   ; seconds for a full traffic-light cycle
 (def signal-green   9.5)
@@ -151,20 +149,38 @@
   [cls u]
   (* (:shoulder (road-profile cls)) (+ 1.0 (* 0.9 (- 1.0 u)))))
 
+(def ^:private node-wobble 8.5)   ; metres, only in open country
+
+(defn- line-offset
+  "How far lattice line `i` sits from its nominal position.
+
+  Displacement is per *line*, not per node, which is the difference between a
+  city of straight streets on an irregular grid and a city of streets that lean.
+  Blocks come out between about 40 and 90 m instead of a uniform 64, which is
+  what an old street plan looks like; every street in it is still straight.
+
+  Arterials move least, because a main road that steps sideways at every block
+  is not a main road."
+  [seed i axis]
+  (let [amp (case (line-class i) :arterial 2.5 :collector 7.0 :local 13.0)
+        r   (prng/make (prng/hash-coords (+ seed (if (zero? axis) 3301 7717)) i 0))]
+    (prng/next-range! r (- amp) amp)))
+
 (defn node
   "World position of lattice node (gx, gz).
 
-  The displacement is anisotropic. Moving a node in X bends the vertical line it
-  sits on, so the X amplitude is governed by that line's class, and likewise for
-  Z. A node where two arterials cross barely moves at all; a purely local node
-  moves freely. Open country wobbles more than downtown does."
+  On top of the per-line offset a node may wobble, but only on an axis whose
+  line is a local street, and only out in the country. Moving a node in X bends
+  the vertical line through it, so letting an arterial node wobble would kink a
+  road meant to run for kilometres -- and letting a city node wobble would leave
+  every block a trapezoid with no square corner to put a building against."
   [seed gx gz]
-  (let [bx (* gx street-spacing)
-        bz (* gz street-spacing)
+  (let [bx (+ (* gx street-spacing) (line-offset seed gx 0))
+        bz (+ (* gz street-spacing) (line-offset seed gz 1))
         u  (urbanness seed bx bz)
-        wob (+ 0.35 (* 0.65 (- 1.0 u)))
-        ax (* street-spacing wob (:jitter (road-profile (line-class gx))))
-        az (* street-spacing wob (:jitter (road-profile (line-class gz))))
+        rural (- 1.0 u)
+        ax (if (= :local (line-class gx)) (* node-wobble rural) 0.0)
+        az (if (= :local (line-class gz)) (* node-wobble rural) 0.0)
         r  (prng/chunk-rng seed gx gz (:roads k/salt))]
     [(+ bx (prng/next-range! r (- ax) ax))
      (+ bz (prng/next-range! r (- az) az))]))
@@ -505,48 +521,257 @@
           (dotimes [i (count v)] (fput! a i (nth v i)))
           a)))))
 
+;; --- blocks, lots and zoning ------------------------------------------------
+
+(defn industrialness
+  "A second field, independent of `urbanness`, that says where the works are.
+
+  Industry is not simply 'less city': it clusters, and it clusters at the edge
+  of a town rather than in the middle of it. Giving it its own field is what
+  stops factories being scattered through the housing."
+  [seed x z]
+  (let [d (* 3.5 k/chunk-size)]
+    (noise/fbm2d (+ seed 8123) (/ x d) (/ z d) 3)))
+
+(def ^:private lot-setback 2.4)    ; pavement between kerb and plot boundary
+(def ^:private open-setback 0.8)   ; where a block side has no street at all
+(def ^:private lot-depth 16.0)     ; how far back a street-fronting plot runs
+(def ^:private min-lot 7.0)
+
+;; Which side of a cell a plot fronts, and which way that makes it face. Yaw is
+;; measured so local +Z points *away* from the street, into the block -- so a
+;; building's front is its local -Z face and always looks at the road.
+(def ^:private side-yaw
+  {:north 0.0
+   :south #?(:clj Math/PI :cljs js/Math.PI)
+   :west  #?(:clj (/ Math/PI 2) :cljs (/ js/Math.PI 2))
+   :east  #?(:clj (- (/ Math/PI 2)) :cljs (- (/ js/Math.PI 2)))})
+
+(defn- cell-side
+  "The street running along one side of lattice cell (gx, gz), or nil."
+  [seed gx gz side]
+  (let [[ex ez along-x? line] (case side
+                                :north [gx gz true (line-class gz)]
+                                :south [gx (inc gz) true (line-class (inc gz))]
+                                :west  [gx gz false (line-class gx)]
+                                :east  [(inc gx) gz false (line-class (inc gx))])]
+    (when (edge-exists? seed ex ez along-x?)
+      {:class line :half (:half (road-profile line))})))
+
+(defn cell-interior
+  "The buildable rectangle inside lattice cell (gx, gz).
+
+  Each side is pulled back from whichever of the cell's own corner nodes lies
+  further in, so the plot boundary clears the street however the lattice has
+  been displaced. A side with no street on it is barely inset at all: that is
+  where two cells have merged into one larger block, and the ground should run
+  straight through."
+  [seed gx gz]
+  (let [[ax az] (node seed gx gz)
+        [bx bz] (node seed (inc gx) gz)
+        [cx' cz'] (node seed (inc gx) (inc gz))
+        [dx dz] (node seed gx (inc gz))
+        pull (fn [side] (if-let [{:keys [half]} (cell-side seed gx gz side)]
+                          (+ half lot-setback)
+                          open-setback))
+        x0 (+ (max ax dx) (pull :west))
+        x1 (- (min bx cx') (pull :east))
+        z0 (+ (max az bz) (pull :north))
+        z1 (- (min dz cz') (pull :south))]
+    (when (and (> (- x1 x0) (* 2 min-lot)) (> (- z1 z0) (* 2 min-lot)))
+      {:x0 x0 :x1 x1 :z0 z0 :z1 z1
+       :sides (into {} (for [sd [:north :south :west :east]
+                             :let [v (cell-side seed gx gz sd)]
+                             :when v]
+                         [sd v]))})))
+
+(defn- strip-lots
+  "Cut a run of frontage into plots.
+
+  Interior boundaries are drawn once and shared by the plots on either side, so
+  neighbours meet exactly rather than overlapping or leaving a sliver."
+  [r a0 a1 frontage]
+  (let [len (- a1 a0)
+        n   (max 1 (long (+ 0.5 (/ len frontage))))
+        step (/ len n)
+        bounds (vec (concat [a0]
+                            (for [i (range 1 n)]
+                              (+ a0 (* i step) (prng/next-range! r -1.4 1.4)))
+                            [a1]))]
+    (mapv (fn [i] [(nth bounds i) (nth bounds (inc i))]) (range n))))
+
+(def building-zones
+  "What can stand on a plot. `cover` is the share of the plot the footprint
+  takes and `height` its range in metres. The index into this vector is what
+  travels in the buildings array, so appending is safe and reordering is not."
+  [{:name :house     :cover 0.50 :height [4.5 7.0]}
+   {:name :townhouse :cover 0.80 :height [7.0 11.0]}
+   {:name :apartment :cover 0.74 :height [13.0 27.0]}
+   {:name :shop      :cover 0.90 :height [5.0 9.5]}
+   {:name :office    :cover 0.84 :height [22.0 58.0]}
+   {:name :factory   :cover 0.82 :height [9.0 16.0]}
+   {:name :warehouse :cover 0.88 :height [7.0 11.0]}
+   {:name :civic     :cover 0.62 :height [10.0 19.0]}
+   {:name :barn      :cover 0.45 :height [5.0 8.5]}])
+
+(def zone-index (zipmap (map :name building-zones) (range)))
+
+(defn- pick-zone
+  "What gets built on a plot.
+
+  Frontage matters as much as density: the same block has shops on the corner
+  and on the main road and housing down the side street, which is most of what
+  makes a city read as a city rather than as one repeated building. `:open`
+  leaves the plot empty -- a yard, a car park, a gap."
+  [r u ind front-class corner?]
+  (let [main? (contains? #{:arterial :collector} front-class)
+        p (prng/next-double! r)]
+    (cond
+      ;; Works sit at the edge of a town, not in the middle of one, so this
+      ;; wants a band of density rather than a floor: without the upper bound a
+      ;; quarter of downtown came out as warehousing.
+      (and (> ind 0.68) (< 0.22 u 0.74))
+      (if (< p 0.55) :factory :warehouse)
+
+      (> u 0.80)
+      (if main?
+        (cond (< p 0.40) :office (< p 0.72) :shop (< p 0.92) :apartment
+              (< p 0.97) :civic :else :open)
+        (cond (< p 0.22) :shop (< p 0.80) :apartment (< p 0.88) :office
+              (< p 0.94) :civic :else :open))
+
+      (> u 0.58)
+      (if (or main? corner?)
+        (cond (< p 0.48) :shop (< p 0.74) :apartment (< p 0.92) :townhouse
+              (< p 0.97) :civic :else :open)
+        (cond (< p 0.12) :shop (< p 0.46) :apartment (< p 0.88) :townhouse
+              (< p 0.95) :civic :else :open))
+
+      (> u 0.34)
+      (if main?
+        (cond (< p 0.26) :shop (< p 0.60) :townhouse (< p 0.90) :house :else :open)
+        (cond (< p 0.06) :shop (< p 0.36) :townhouse (< p 0.88) :house :else :open))
+
+      (> u 0.15)
+      (cond (< p 0.52) :house
+            (< p 0.68) :barn
+            :else :open)
+
+      :else (if (< p 0.16) :barn :open))))
+
+(defn- frontage-for [u ind]
+  (cond (> ind 0.68) 28.0
+        (> u 0.72)   13.0
+        (> u 0.45)   11.5
+        :else        20.0))
+
+(defn cell-lots
+  "Plots cut from one lattice cell, as a ring around its perimeter.
+
+  A block's plots front the streets around it and back onto each other, which is
+  how a block actually works; whatever is left in the middle is a yard and gets
+  nothing. Cutting a ring is also far more robust than trying to tile the
+  interior, because it degrades gracefully when the block is a strange shape."
+  [seed gx gz]
+  (if-let [{:keys [x0 x1 z0 z1 sides]} (cell-interior seed gx gz)]
+    (let [r    (prng/chunk-rng seed gx gz (:blocks k/salt))
+          u    (urbanness seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
+          ind  (industrialness seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
+          fr   (frontage-for u ind)
+          dz   (min lot-depth (* 0.42 (- z1 z0)))
+          dx   (min lot-depth (* 0.42 (- x1 x0)))
+          ;; North and south take the full width; east and west take what is
+          ;; left between them, so the four corners are not claimed twice.
+          iz0  (+ z0 (if (:north sides) dz 0.0))
+          iz1  (- z1 (if (:south sides) dz 0.0))
+          strip (fn [side a0 a1 b0 b1 horizontal?]
+                  (when-let [{:keys [class]} (get sides side)]
+                    (when (> (- a1 a0) min-lot)
+                      (let [runs (strip-lots r a0 a1 fr)
+                            last-i (dec (count runs))]
+                        (map-indexed
+                         (fn [i [s e]]
+                           (let [[lx0 lx1 lz0 lz1] (if horizontal? [s e b0 b1] [b0 b1 s e])]
+                             {:x (* 0.5 (+ lx0 lx1)) :z (* 0.5 (+ lz0 lz1))
+                              :hx (* 0.5 (- lx1 lx0)) :hz (* 0.5 (- lz1 lz0))
+                              :yaw (side-yaw side)
+                              :front class
+                              :corner? (or (zero? i) (= i last-i))}))
+                         runs)))))]
+      (into []
+            (comp cat
+                  (filter (fn [{:keys [hx hz]}] (and (> hx 2.0) (> hz 2.0))))
+                  (map (fn [{:keys [x z corner? front] :as lot}]
+                         (assoc lot :zone (pick-zone r
+                                                     (urbanness seed x z)
+                                                     (industrialness seed x z)
+                                                     front corner?)))))
+            [(strip :north x0 x1 z0 (+ z0 dz) true)
+             (strip :south x0 x1 (- z1 dz) z1 true)
+             (strip :west iz0 iz1 x0 (+ x0 dx) false)
+             (strip :east iz0 iz1 (- x1 dx) x1 false)]))
+    []))
+
+(defn chunk-lots
+  "The plots this chunk owns -- those whose centre lands inside it."
+  [seed cx cz]
+  (let [x0 (* cx k/chunk-size) z0 (* cz k/chunk-size)
+        x1 (+ x0 k/chunk-size) z1 (+ z0 k/chunk-size)
+        gx0 (dec (grid-floor x0 street-spacing))
+        gx1 (inc (grid-floor x1 street-spacing))
+        gz0 (dec (grid-floor z0 street-spacing))
+        gz1 (inc (grid-floor z1 street-spacing))]
+    (vec (for [gx (range gx0 (inc gx1))
+               gz (range gz0 (inc gz1))
+               lot (cell-lots seed gx gz)
+               :when (and (<= x0 (:x lot)) (< (:x lot) x1)
+                          (<= z0 (:z lot)) (< (:z lot) z1))]
+           lot))))
+
 ;; --- buildings --------------------------------------------------------------
 
-(def building-stride 7)      ; x y z hx hz height kind
-(def building-kinds 4)
-(def ^:private building-attempts 48)
+(def building-stride 8)      ; x y z hx hz height zone yaw
 
 (defn chunk-buildings
-  "City blocks, as a flat array of [x y z hx hz height kind ...]. Empty outside
-  city chunks.
+  "One building per built plot, as [x y z hx hz height zone yaw ...].
 
-  A candidate is rejected if its centre or any corner is anywhere near a street,
-  which is cheaper and far more robust than computing the blocks between streets
-  analytically -- it keeps working when the road layout changes. W3 replaces
-  this with real lots cut from the faces of the street graph.
+  Buildings are no longer thrown at the chunk and rejected when they land on a
+  road. They stand on plots cut from the block, square to the street, pushed up
+  against their frontage with the yard behind -- which is what turns a field of
+  boxes into a street.
 
   Ground height is the *lowest* of the four corners, so a building on a slope
   cuts into the hill instead of floating over the downhill side."
   [seed cx cz field]
-  (if (not= :city (biome seed cx cz))
-    (farray 0)
-    (let [r   (prng/chunk-rng seed cx cz (:blocks k/salt))
-          out (transient [])]
-      (dotimes [_ building-attempts]
-        (let [x  (* (+ cx (prng/next-range! r 0.06 0.94)) k/chunk-size)
-              z  (* (+ cz (prng/next-range! r 0.06 0.94)) k/chunk-size)
-              hx (prng/next-range! r 4.0 10.0)
-              hz (prng/next-range! r 4.0 10.0)
-              h  (prng/next-range! r 9.0 42.0)
-              kind (prng/next-int! r building-kinds)
-              corners [[x z] [(- x hx) (- z hz)] [(+ x hx) (- z hz)]
-                       [(- x hx) (+ z hz)] [(+ x hx) (+ z hz)]]
-              samples (mapv (fn [[px pz]] (surface seed field px pz)) corners)
-              clear?  (every? (fn [[_ road]] (< road 0.12)) samples)]
-          (when clear?
-            (let [y (reduce min (map first samples))]
-              (conj! out x) (conj! out y) (conj! out z)
-              (conj! out hx) (conj! out hz) (conj! out h)
-              (conj! out (double kind))))))
-      (let [v (persistent! out)
-            a (farray (count v))]
-        (dotimes [i (count v)] (fput! a i (nth v i)))
-        a))))
+  (let [r   (prng/chunk-rng seed cx cz (+ 17 (:blocks k/salt)))
+        out (transient [])]
+    (doseq [{:keys [x z hx hz yaw zone]} (chunk-lots seed cx cz)
+            :when (not= :open zone)]
+      (let [{:keys [cover height]} (nth building-zones (zone-index zone))
+            u  (urbanness seed x z)
+            [h0 h1] height
+            ;; Density drives height within the zone's range: the same kind of
+            ;; block is taller downtown than on the edge of town.
+            hgt (* (prng/next-range! r h0 h1) (+ 0.72 (* 0.38 u)))
+            bhx (max 2.0 (* hx cover))
+            bhz (max 2.0 (* hz cover))
+            ;; Sit against the frontage rather than in the middle of the plot;
+            ;; the leftover depth becomes the yard behind.
+            back (* 0.55 (- hz bhz))
+            [sx sz] [(js-sin yaw) (js-cos yaw)]
+            bx (- x (* sx back))
+            bz (- z (* sz back))
+            corners [[bx bz]
+                     [(- bx bhx) (- bz bhz)] [(+ bx bhx) (- bz bhz)]
+                     [(- bx bhx) (+ bz bhz)] [(+ bx bhx) (+ bz bhz)]]
+            y (reduce min (map (fn [[px pz]] (first (surface seed field px pz))) corners))]
+        (conj! out bx) (conj! out y) (conj! out bz)
+        (conj! out bhx) (conj! out bhz) (conj! out hgt)
+        (conj! out (double (zone-index zone))) (conj! out yaw)))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a)))
 
 ;; --- pedestrians ------------------------------------------------------------
 
@@ -700,6 +925,7 @@
 (def ^:private lamp-spacing 26.0)
 (def ^:private lamp-urbanness 0.32)
 (def ^:private crossing-stripes 5)
+(def ^:private centreline-spacing 9.0)
 
 (defn signal-state
   "Colour a signal group shows at world time `t`.
@@ -782,13 +1008,26 @@
                      (part-index :sign-face) 1.0 st 0.0)))
 
           nil)))
-    ;; Lamp posts along the streets this chunk owns.
+    ;; Lamp posts and centre lines along the streets this chunk owns.
     (doseq [{:keys [points half class]} (chunk-lines seed cx cz)]
       (let [[ax az] (first points)
             [bx bz] (peek points)
             dx (- bx ax) dz (- bz az)
             len (hypot dx dz)
             u   (urbanness seed (* 0.5 (+ ax bx)) (* 0.5 (+ az bz)))]
+        ;; A painted centre line is the cheapest thing in the whole generator
+        ;; and does more for reading a road as a road than anything else here.
+        ;; Local streets get none, which is also true of most real ones.
+        (when (and (not= :local class) (> len 1.0))
+          (let [ux (/ dx len) uz (/ dz len)
+                n  (long (floor (/ len centreline-spacing)))
+                yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) ux uz)]
+            (dotimes [i n]
+              (let [t (* (+ i 0.5) centreline-spacing)
+                    px (+ ax (* ux t))
+                    pz (+ az (* uz t))]
+                (emit! out px (+ 0.02 (ground px pz)) pz yaw
+                       (part-index :marking) 1.0 0 0.0)))))
         (when (and (> u lamp-urbanness) (> len 1.0))
           (let [ux (/ dx len) uz (/ dz len)
                 rx (- uz) rz ux
@@ -890,19 +1129,29 @@
      :biome (biome seed cx cz)}))
 
 (defn spawn-point
-  "Somewhere on the street network, near the origin.
+  "Somewhere on the street network near the origin, and which way that street
+  runs: {:pos [x y z] :dir [dx dz]}.
 
-  Takes an actual street rather than a lattice node: a node can be a dead end in
-  sparse country, whereas the midpoint of a street that exists is by definition
-  on a road. Chunks are searched outward because a wilderness chunk may own no
-  street at all."
+  The direction matters as much as the point. Opponents have to line up along
+  the carriageway, because since buildings started standing on real plots a ring
+  of cars around the spawn puts most of them inside one.
+
+  Takes a street rather than a lattice node: a node can be a dead end in sparse
+  country, whereas the middle of a street that exists is by definition on a
+  road. Chunks are searched outward because a wilderness chunk may own none."
   [seed]
   (let [rings (for [d (range 0 8), cx (range (- d) (inc d)), cz (range (- d) (inc d))
                     :when (= d (max (abs cx) (abs cz)))]
                 [cx cz])
         [cx cz] (or (first (filter (fn [[cx cz]] (seq (chunk-lines seed cx cz))) rings))
                     [0 0])
-        line (first (chunk-lines seed cx cz))
-        pts  (:points line)
-        [x z] (nth pts (quot (count pts) 2))]
-    [x (+ 1.2 (height-at seed x z)) z]))
+        pts  (:points (first (chunk-lines seed cx cz)))
+        i0   (max 0 (dec (quot (count pts) 2)))
+        i1   (min (dec (count pts)) (inc i0))
+        [ax az] (nth pts i0)
+        [bx bz] (nth pts i1)
+        x  (* 0.5 (+ ax bx))
+        z  (* 0.5 (+ az bz))
+        len (max 1e-6 (hypot (- bx ax) (- bz az)))]
+    {:pos [x (+ 1.2 (height-at seed x z)) z]
+     :dir [(/ (- bx ax) len) (/ (- bz az) len)]}))
