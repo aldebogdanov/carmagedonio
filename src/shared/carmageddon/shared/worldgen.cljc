@@ -67,12 +67,69 @@
 (def ^:private terrain-octaves 4)
 (def ^:private terrain-gain 0.42)
 
-(defn base-height
-  "Terrain before roads are cut into it."
+(def river-scale 1500.0)   ; metres per meander
+(def river-depth  11.0)    ; how far a channel is cut below the land
+(def ^:private river-half  14.0)   ; metres of channel either side of the line
+(def ^:private river-bank  12.0)   ; and how far the banks slope back up
+(def ^:private river-wet   0.44)   ; wetness below which a region has no rivers
+(def ^:private river-probe  6.0)   ; finite-difference step, metres
+
+(defn river
+  "How much river is at a point, in [0,1]: 1 in the channel, 0 on dry land.
+
+  A river here is the zero-set of a noise field rather than a simulated flow.
+  Taking the contour where fbm crosses its midpoint gives long meandering
+  channels that any chunk can evaluate alone, with no upstream to consult --
+  which is the whole requirement. They close on themselves rather than reaching
+  a sea, which is the price of that and is not visible from a car.
+
+  The distance to that contour is measured in *metres*, not in noise units, by
+  dividing by the field's local gradient. Skipping that step is what makes
+  contour rivers useless: where the field happens to be flat the band spreads
+  out enormously, and a quarter of the world came out as riverbed.
+
+  Rivers are also masked by a much coarser wetness field, so they run in some
+  regions and not others rather than tiling the world with loops. The mask is
+  two octaves against the channel's three and is checked first, because most of
+  the world is dry and never pays for the rest."
   [seed x z]
-  (* terrain-amp (- (noise/fbm2d seed (/ x terrain-scale) (/ z terrain-scale)
-                                 terrain-octaves terrain-gain 2.0)
-                    0.5)))
+  (let [wet (noise/fbm2d (+ seed 9911) (/ x (* 4.0 river-scale))
+                         (/ z (* 4.0 river-scale)) 2)]
+    (if (< wet river-wet)
+      0.0
+      (let [f (fn [px pz] (noise/fbm2d (+ seed 4409) (/ px river-scale)
+                                       (/ pz river-scale) 3))
+            n (f x z)
+            d (abs (- n 0.5))]
+        ;; Far from the contour in noise units it cannot be a river whatever the
+        ;; gradient is, so the two extra samples are only paid for near water.
+        (if (> d 0.25)
+          0.0
+          (let [gx (- (f (+ x river-probe) z) n)
+                gz (- (f x (+ z river-probe)) n)
+                g  (max 1e-9 (hypot gx gz))
+                metres (* river-probe (/ d g))
+                m (smootherstep-clamped (/ (- wet river-wet) 0.10))]
+            (* m (- 1.0 (smootherstep-clamped
+                         (/ (- metres river-half) river-bank))))))))))
+
+(defn base-height
+  "Terrain before roads are cut into it, with river channels carved out of it.
+
+  The carve lives here rather than alongside the road cut on purpose: a river is
+  part of the landscape, so roads have to deal with it, and dealing with it is
+  what makes a bridge.
+
+  The three-argument form takes an already-computed river amount. A caller that
+  needs the water for its own reasons -- tinting the ground, say -- would
+  otherwise evaluate the field twice per vertex, and the river field is the
+  most expensive thing in the generator."
+  ([seed x z] (base-height seed x z (river seed x z)))
+  ([seed x z rv]
+   (- (* terrain-amp (- (noise/fbm2d seed (/ x terrain-scale) (/ z terrain-scale)
+                                     terrain-octaves terrain-gain 2.0)
+                        0.5))
+      (* river-depth rv))))
 
 ;; --- how built-up a place is ------------------------------------------------
 
@@ -235,6 +292,29 @@
 
 (def ^:private bend-threshold 0.4)   ; urbanness above which streets are straight
 
+(def ^:private bridge-clearance 3.5)   ; metres of air under the chord
+(def ^:private bridge-samples 6)
+
+(defn- spans-a-gap?
+  "Does the straight line between a street's two ends run well clear of the
+  ground somewhere in between?
+
+  This is the whole of bridge detection, and it deliberately does not mention
+  rivers: a road spans a dry ravine for exactly the same reason it spans a
+  river, and asking the terrain rather than the water field means one rule
+  covers both."
+  [seed [ax az] [bx bz] ya yb]
+  (loop [i 1]
+    (if (>= i bridge-samples)
+      false
+      (let [t (/ (double i) bridge-samples)
+            x (+ ax (* t (- bx ax)))
+            z (+ az (* t (- bz az)))
+            chord (+ ya (* t (- yb ya)))]
+        (if (> (- chord (base-height seed x z)) bridge-clearance)
+          true
+          (recur (inc i)))))))
+
 (defn- street
   "One street of the lattice, as a polyline plus its road profile.
 
@@ -256,12 +336,18 @@
                 (* (- 1.0 (/ u bend-threshold))
                    (prng/next-range! r -15.0 15.0)))
               0.0)]
-    {:points   (if (zero? bow) [a b] (bezier a b bow bend-samples))
-     :half     (:half (road-profile cls))
-     :shoulder (verge cls u)
-     :class    cls
-     :ya       (base-height seed (nth a 0) (nth a 1))
-     :yb       (base-height seed (nth b 0) (nth b 1))}))
+    (let [ya (base-height seed (nth a 0) (nth a 1))
+          yb (base-height seed (nth b 0) (nth b 1))]
+      {:points   (if (zero? bow) [a b] (bezier a b bow bend-samples))
+       :half     (:half (road-profile cls))
+       :shoulder (verge cls u)
+       :class    cls
+       :ya       ya
+       :yb       yb
+       ;; A bridge is a street that has stopped touching the ground. It is
+       ;; excluded from the terrain cut, so the valley stays a valley, and gets
+       ;; a deck of its own instead.
+       :bridge?  (spans-a-gap? seed a b ya yb)})))
 
 (defn streets-in-bounds
   "Every street that could reach the box [x0,x1] x [z0,z1].
@@ -370,7 +456,9 @@
         z0  (- (* cz k/chunk-size) pad)
         x1  (+ (* (inc cx) k/chunk-size) pad)
         z1  (+ (* (inc cz) k/chunk-size) pad)
-        segs (segments-of (streets-in-bounds seed x0 z0 x1 z1))]
+        ;; Bridges are left out: flattening the ground under one would fill in
+        ;; the valley it exists to cross.
+        segs (segments-of (remove :bridge? (streets-in-bounds seed x0 z0 x1 z1)))]
     (assoc (index-segments segs x0 z0 x1 z1) :segs segs)))
 
 (defn- road-at
@@ -412,14 +500,16 @@
   "Final height at a point plus how road-like it is, in [0,1].
 
   `field` comes from `road-field`; it is passed in rather than rebuilt because a
-  chunk evaluates this about a thousand times."
-  [seed field x z]
-  (let [[road ry] (road-at field x z)]
-    (cond
-      (>= road 1.0) [ry 1.0]
-      (<= road 0.0) [(base-height seed x z) 0.0]
-      :else (let [b (base-height seed x z)]
-              [(+ ry (* (- b ry) (- 1.0 road))) road]))))
+  chunk evaluates this about a thousand times. `rv` is an already-computed river
+  amount, for callers that need the water anyway."
+  ([seed field x z] (surface seed field x z nil))
+  ([seed field x z rv]
+   (let [[road ry] (road-at field x z)]
+     (cond
+       (>= road 1.0) [ry 1.0]
+       (<= road 0.0) [(if rv (base-height seed x z rv) (base-height seed x z)) 0.0]
+       :else (let [b (if rv (base-height seed x z rv) (base-height seed x z))]
+               [(+ ry (* (- b ry) (- 1.0 road))) road])))))
 
 (defn chunk-of [x z]
   [(grid-floor x k/chunk-size) (grid-floor z k/chunk-size)])
@@ -448,6 +538,105 @@
                  (and (<= x0 mx) (< mx x1) (<= z0 mz) (< mz z1))))
              (streets-in-bounds seed x0 z0 x1 z1))))
 
+;; --- extruded shapes --------------------------------------------------------
+;;
+;; Both the building masses and the bridge decks are built from the same four
+;; volumes, and both send them to the client in the same layout. Shared here
+;; rather than under buildings because the bridges are generated first and a
+;; forward reference in a .cljc file is a compile error, not a subtlety.
+
+(def building-part-stride 10)   ; x y z yaw sx sy sz prim mat tint
+(def building-prims [:box :gable :pyramid :cylinder])
+
+(def ^:private prim-index (zipmap building-prims (range)))
+
+;; --- bridges ----------------------------------------------------------------
+
+(def bridge-part-stride 11)  ; x y z yaw pitch sx sy sz prim tint solid
+(def bridge-prims building-prims)
+
+(def ^:private deck-thickness 0.55)
+(def ^:private deck-margin 1.1)     ; deck overhangs the carriageway either side
+(def ^:private rail-height 1.15)
+(def ^:private pier-spacing 15.0)
+(def ^:private pier-min 2.0)        ; below this a pier is a stub, not worth it
+
+(def ^:private bridge-tint
+  {:deck 0x3c3c40 :rail 0x9aa0a6 :pier 0x8c8880})
+
+(defn chunk-bridges
+  "Deck, parapets and piers for every bridge this chunk owns, as
+  [x y z yaw pitch sx sy sz prim tint solid ...].
+
+  `solid` marks the parts a car can land on. The deck and its parapets are
+  collidable and the piers are not: a pier stands under the deck where nothing
+  can reach it, and giving each one a collider would pay for a broad-phase entry
+  per pier for nothing.
+
+  The deck follows the chord the street's endpoint heights were taken from, so
+  it meets the road exactly at both ends -- the approach is flattened terrain
+  and the span is not, and they agree at the node because both are
+  `base-height` there."
+  [seed cx cz]
+  (let [out (transient [])
+        emit (fn [x y z yaw pitch sx sy sz prim tint solid]
+               (conj! out x) (conj! out y) (conj! out z)
+               (conj! out yaw) (conj! out pitch)
+               (conj! out sx) (conj! out sy) (conj! out sz)
+               (conj! out (double (prim-index prim)))
+               (conj! out (double tint)) (conj! out (double solid)))]
+    (doseq [{:keys [points half ya yb]} (filter :bridge? (chunk-lines seed cx cz))]
+      (let [n (count points)
+            chord (fn [t] (+ ya (* t (- yb ya))))
+            width (+ (* 2.0 half) (* 2.0 deck-margin))]
+        (dotimes [i (dec n)]
+          (let [[x1 z1] (nth points i)
+                [x2 z2] (nth points (inc i))
+                t1 (/ (double i) (dec n))
+                t2 (/ (double (inc i)) (dec n))
+                y1 (chord t1) y2 (chord t2)
+                mx (* 0.5 (+ x1 x2)) mz (* 0.5 (+ z1 z2))
+                my (* 0.5 (+ y1 y2))
+                dx (- x2 x1) dz (- z2 z1) dy (- y2 y1)
+                horiz (max 0.01 (hypot dx dz))
+                ;; The deck is pitched to lie along the chord. A flat slab at
+                ;; the average height instead leaves its near end floating over
+                ;; the road by half the fall of the span, and the car drives
+                ;; under the leading edge and straight into the river.
+                span (hypot horiz dy)
+                pitch (#?(:clj Math/atan2 :cljs js/Math.atan2) dy horiz)
+                ;; Local +Z runs along the span, so a unit box scaled in Z is a
+                ;; deck. Dropping the centre by half a thickness measured
+                ;; vertically leaves the top face on the chord itself.
+                yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) dx dz)
+                sink (/ (* 0.5 deck-thickness) (max 0.2 (js-cos pitch)))
+                rx (/ (- dz) horiz) rz (/ dx horiz)
+                off (- (* 0.5 width) 0.15)]
+            (emit mx (- my sink) mz yaw pitch
+                  width deck-thickness span :box (:deck bridge-tint) 1.0)
+            (doseq [sgn [1.0 -1.0]]
+              (emit (+ mx (* rx off sgn)) (+ my (* 0.5 rail-height)) (+ mz (* rz off sgn))
+                    yaw pitch 0.3 rail-height span :box (:rail bridge-tint) 1.0))))
+        ;; Piers, spaced along the whole span rather than per segment.
+        (let [[ax az] (first points)
+              [bx bz] (peek points)
+              span (hypot (- bx ax) (- bz az))
+              piers (long (floor (/ span pier-spacing)))]
+          (dotimes [i piers]
+            (let [t (/ (+ i 0.5) (double piers))
+                  px (+ ax (* t (- bx ax)))
+                  pz (+ az (* t (- bz az)))
+                  top (- (chord t) deck-thickness)
+                  ground (base-height seed px pz)
+                  h (- top ground)]
+              (when (> h pier-min)
+                (emit px (+ ground (* 0.5 h)) pz 0.0 0.0
+                      2.0 h 2.0 :cylinder (:pier bridge-tint) 0.0)))))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a)))
+
 ;; --- props ------------------------------------------------------------------
 
 (def prop-kinds
@@ -472,7 +661,9 @@
   they miss. Scattering wasted three quarters of every batch, because the
   roadside band is about 12 m wide out of 256."
   [seed cx cz field]
-  (let [lines (chunk-lines seed cx cz)]
+  ;; Bridges are skipped: `surface` under a span reports the riverbed, so a
+  ;; barrel placed along one would sit in the water forty feet below the road.
+  (let [lines (remove :bridge? (chunk-lines seed cx cz))]
     (if (empty? lines)
       (farray 0)
       (let [r   (prng/chunk-rng seed cx cz (:props k/salt))
@@ -742,11 +933,6 @@
 ;; Parts are emitted in the building's own frame and transformed here, so the
 ;; client only has to place them. Local -Z is the street side.
 
-(def building-part-stride 10)   ; x y z yaw sx sy sz prim mat tint
-(def building-prims [:box :gable :pyramid :cylinder])
-
-(def ^:private prim-index (zipmap building-prims (range)))
-
 (def plain-mat
   "Value in a part's `mat` slot meaning 'flat colour from `tint`'. Anything
   else is an index into the zone facades, i.e. a wall with windows in it."
@@ -969,7 +1155,7 @@
   draw-before-you-reject discipline as props so the stream advances identically
   regardless of what the terrain turns out to be."
   [seed cx cz field]
-  (let [lines (chunk-lines seed cx cz)]
+  (let [lines (remove :bridge? (chunk-lines seed cx cz))]
     (if (empty? lines)
       (farray 0)
       (let [r   (prng/chunk-rng seed cx cz (:peds k/salt))
@@ -1189,7 +1375,7 @@
 
           nil)))
     ;; Lamp posts and centre lines along the streets this chunk owns.
-    (doseq [{:keys [points half class]} (chunk-lines seed cx cz)]
+    (doseq [{:keys [points half class bridge? ya yb]} (chunk-lines seed cx cz)]
       (let [[ax az] (first points)
             [bx bz] (peek points)
             dx (- bx ax) dz (- bz az)
@@ -1205,10 +1391,15 @@
             (dotimes [i n]
               (let [t (* (+ i 0.5) centreline-spacing)
                     px (+ ax (* ux t))
-                    pz (+ az (* uz t))]
-                (emit! out px (+ 0.02 (ground px pz)) pz yaw
+                    pz (+ az (* uz t))
+                    ;; On a span the ground is the riverbed, so the paint has to
+                    ;; follow the deck's chord instead.
+                    y (if bridge?
+                        (+ ya (* (/ t len) (- yb ya)))
+                        (ground px pz))]
+                (emit! out px (+ 0.02 y) pz yaw
                        (part-index :marking) 1.0 0 0.0)))))
-        (when (and (> u lamp-urbanness) (> len 1.0))
+        (when (and (not bridge?) (> u lamp-urbanness) (> len 1.0))
           (let [ux (/ dx len) uz (/ dz len)
                 rx (- uz) rz ux
                 n  (max 1 (long (floor (/ len lamp-spacing))))
@@ -1267,13 +1458,15 @@
         {:keys [buildings parts]} (chunk-structures seed cx cz field)
         peds  (chunk-peds seed cx cz field)
         furniture (chunk-furniture seed cx cz field)
+        bridges (chunk-bridges seed cx cz)
         heights (farray (* n n))
         colors  (farray (* n n 3))]
     (dotimes [j n]                       ; j indexes z
       (dotimes [i n]                     ; i indexes x
         (let [x (+ x0 (* i step))
               z (+ z0 (* j step))
-              [y road] (surface seed field x z)
+              rv (river seed x z)
+              [y road] (surface seed field x z rv)
               idx (+ (* i n) j)
               dirt (noise/fbm2d (+ seed 977) (/ x 26.0) (/ z 26.0) 3)
               d    (* 0.55 (max 0.0 (- dirt 0.45)))
@@ -1293,6 +1486,11 @@
               tr   (+ tr (* u (- (* gr 1.34) tr)))
               tg   (+ tg (* u (- (* gr 0.98) tg)))
               tb   (+ tb (* u (- (* gr 1.46) tb)))
+              ;; Water. The ground texture is green, so as with the roads the
+              ;; tint has to actively cancel that hue to read as anything else.
+              tr   (+ tr (* rv (- (* gr 0.34) tr)))
+              tg   (+ tg (* rv (- (* gr 0.58) tg)))
+              tb   (+ tb (* rv (- (* gr 1.30) tb)))
               o    (* idx 3)]
           (fput! heights idx y)
           (fput! colors (+ o 0) (+ tr (* road (- road-colour-r tr))))
@@ -1307,6 +1505,7 @@
      :building-parts parts
      :peds peds
      :furniture furniture
+     :bridges bridges
      :biome (biome seed cx cz)}))
 
 (defn spawn-point
@@ -1324,9 +1523,9 @@
   (let [rings (for [d (range 0 8), cx (range (- d) (inc d)), cz (range (- d) (inc d))
                     :when (= d (max (abs cx) (abs cz)))]
                 [cx cz])
-        [cx cz] (or (first (filter (fn [[cx cz]] (seq (chunk-lines seed cx cz))) rings))
-                    [0 0])
-        pts  (:points (first (chunk-lines seed cx cz)))
+        on-land (fn [[cx cz]] (seq (remove :bridge? (chunk-lines seed cx cz))))
+        [cx cz] (or (first (filter on-land rings)) [0 0])
+        pts  (:points (first (remove :bridge? (chunk-lines seed cx cz))))
         i0   (max 0 (dec (quot (count pts) 2)))
         i1   (min (dec (count pts)) (inc i0))
         [ax az] (nth pts i0)

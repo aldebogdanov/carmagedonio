@@ -40,7 +40,10 @@
       (.setAttribute "position" (three/BufferAttribute. pos 3))
       (.computeVertexNormals))))
 
-(defn- geometries []
+(defn shapes
+  "The four extruded volumes, shared with `bridges` -- a deck is a scaled box
+  and a pier is a scaled cylinder, exactly as a wall and a chimney are."
+  []
   {:box      (three/BoxGeometry. 1 1 1)
    :gable    (gable-geometry)
    ;; A four-sided cone is a pyramid, but its square base is on the diagonal --
@@ -52,7 +55,7 @@
 
 (defn create [world scene textures]
   (atom {:world world :scene scene
-         :geometries (geometries)
+         :geometries (shapes)
          :facades (mapv (fn [t] (three/MeshPhongMaterial. #js {:map t :shininess 8}))
                         (:facades textures))
          :plain (three/MeshPhongMaterial. #js {:color 0xffffff :shininess 6

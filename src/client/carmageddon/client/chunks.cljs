@@ -52,6 +52,7 @@
      :props (unchecked-get r "props")
      :buildings (unchecked-get r "buildings")
      :building-parts (unchecked-get r "parts")
+     :bridges (unchecked-get r "bridges")
      :peds (unchecked-get r "peds")
      :furniture (unchecked-get r "furniture")}))
 

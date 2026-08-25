@@ -157,6 +157,14 @@
           (is (< (abs (- expected actual)) 1e-3)
               (str "grid/surface mismatch at " [i j])))))))
 
+(def ^:private js-two-pi (* 2.0 Math/PI))
+
+(defn- part-index-of
+  "Index of a keyword in a parts vector, by value. Not `.indexOf` on an array
+  of keywords: that compares by identity, which keywords do not guarantee."
+  [parts kw]
+  (first (keep-indexed (fn [i p] (when (= p kw) i)) parts)))
+
 (defn- part-of
   "Index of a furniture part. Not `.indexOf` on an array of keywords: that
   compares by identity, which keywords do not guarantee."
@@ -605,3 +613,176 @@
       (is (pos? (:cylinder downtown 0)) "office masts")
       (is (pos? (:gable works 0)) "sawtooth and shed roofs")
       (is (pos? (:gable rural 0)) "pitched roofs on houses and barns"))))
+
+;; --- rivers and bridges -----------------------------------------------------
+
+(defn- wet-point
+  "A point in the middle of a channel. Found rather than hardcoded: any change
+  to the generator moves the rivers, and a stale coordinate would quietly turn
+  every bridge test below into a test of an empty field."
+  []
+  (first (for [gx (range -80 80), gz (range -80 80)
+               :let [x (* gx 400.0) z (* gz 400.0)]
+               :when (> (w/river seed x z) 0.8)]
+           [x z])))
+
+(defn- bridge-chunk []
+  (let [[wx wz] (wet-point)
+        [c0x c0z] (w/chunk-of wx wz)]
+    (first (for [dx (range -4 5), dz (range -4 5)
+                 :let [cx (+ c0x dx) cz (+ c0z dz)]
+                 :when (pos? (alen* (w/chunk-bridges seed cx cz)))]
+             [cx cz]))))
+
+(deftest rivers-are-narrow-and-regional
+  (let [grid (for [i (range 120), j (range 120)]
+               (w/river seed (* i 240.0) (* j 240.0)))
+        channel (count (filter #(> % 0.5) grid))
+        any     (count (filter pos? grid))
+        n       (count grid)]
+    (testing "measuring the contour in noise units instead of metres put a
+              quarter of the world under water; the fix is dividing by the
+              field's own gradient"
+      (is (< 0.001 (/ channel (double n)) 0.10)
+          (str (* 100.0 (/ channel (double n))) "% of the world is channel")))
+    (is (< (/ any (double n)) 0.20) "and not much more is even damp")
+    (is (pos? channel) "but there are rivers somewhere")))
+
+(deftest rivers-cut-below-the-land
+  (let [[wx wz] (wet-point)]
+    (is (some? [wx wz]) "expected to find a channel")
+    (let [wet-h (w/base-height seed wx wz)
+          ;; A ring well outside the banks, at the same terrain scale.
+          dry (apply max (for [a (range 0 8)
+                               :let [th (* a (/ js-two-pi 8.0))
+                                     x (+ wx (* 90.0 (Math/cos th)))
+                                     z (+ wz (* 90.0 (Math/sin th)))]
+                               :when (zero? (w/river seed x z))]
+                           (w/base-height seed x z)))]
+      (is (> (- dry wet-h) 5.0)
+          (str "the channel is only " (- dry wet-h) " m below the bank")))))
+
+(deftest a-bridge-leaves-its-valley-alone
+  (testing "the whole structural point of W5: a span is excluded from the road
+            field, so the ground under it is not flattened up to meet the deck"
+    (let [[cx cz] (bridge-chunk)]
+      (is (some? [cx cz]) "expected a chunk with a bridge in it")
+      (let [field (w/road-field seed cx cz)
+            spans (filter :bridge? (w/chunk-lines seed cx cz))]
+        (is (seq spans))
+        (doseq [{:keys [points ya yb]} spans]
+          (let [[ax az] (first points)
+                [bx bz] (peek points)
+                mx (* 0.5 (+ ax bx)) mz (* 0.5 (+ az bz))
+                deck (* 0.5 (+ ya yb))
+                under (first (w/surface seed field mx mz))]
+            (is (> (- deck under) 2.5)
+                (str "only " (- deck under) " m of clearance -- the valley got "
+                     "filled in"))))))))
+
+(deftest a-deck-meets-the-road-at-both-ends
+  (testing "the approach is flattened terrain and the span is not, and they have
+            to agree at the node or the car launches off a step"
+    (let [[cx cz] (bridge-chunk)
+          field (w/road-field seed cx cz)]
+      (doseq [{:keys [points ya yb]} (filter :bridge? (w/chunk-lines seed cx cz))]
+        (let [[ax az] (first points)
+              [bx bz] (peek points)]
+          (is (< (abs (- ya (first (w/surface seed field ax az)))) 0.05)
+              "near end")
+          (is (< (abs (- yb (first (w/surface seed field bx bz)))) 0.05)
+              "far end"))))))
+
+(deftest bridge-parts-are-well-formed
+  (let [[cx cz] (bridge-chunk)
+        a (w/chunk-bridges seed cx cz)
+        n (/ (alen* a) w/bridge-part-stride)
+        ;; Coerced: on the JVM a float-array element boxes to Float, and
+        ;; (contains? #{0.0 1.0} (float 1.0)) is false. In ClojureScript every
+        ;; number is a double and the same test passes, so this only shows up
+        ;; on one of the two platforms the generator has to run on.
+        at (fn [i o] (double (aget* a (+ o (* i w/bridge-part-stride)))))]
+    (is (pos? n))
+    (testing "shapes and colours are in range"
+      ;; Offsets 8/9/10, not 7/8/9: the stride grew by a pitch field when decks
+      ;; stopped being flat slabs, and this is the test that noticed.
+      (is (every? (fn [i] (and (<= 0 (at i 8)) (< (at i 8) (count w/bridge-prims))
+                               (<= 0 (at i 9) 0xffffff)
+                               (contains? #{0.0 1.0} (at i 10))
+                               (> (at i 5) 0.0) (> (at i 6) 0.0) (> (at i 7) 0.0)))
+                  (range n))))
+    (testing "the deck carries the collider and the piers do not: a pier stands
+              underneath where nothing can reach it"
+      (let [box (part-index-of w/bridge-prims :box)
+            cyl (part-index-of w/bridge-prims :cylinder)]
+        (is (every? (fn [i] (or (not= (double cyl) (at i 8)) (zero? (at i 10))))
+                    (range n))
+            "a pier was marked solid")
+        (is (some (fn [i] (and (= (double box) (at i 8)) (pos? (at i 10))))
+                  (range n))
+            "nothing solid to drive on")))))
+
+(deftest nothing-is-placed-on-a-span
+  (testing "`surface` under a bridge reports the riverbed, so anything lined up
+            along one would sit in the water below the road"
+    (let [[cx cz] (bridge-chunk)
+          field (w/road-field seed cx cz)
+          spans (filter :bridge? (w/chunk-lines seed cx cz))
+          near-a-span? (fn [x z]
+                         (some (fn [{:keys [points]}]
+                                 (let [[ax az] (first points)
+                                       [bx bz] (peek points)]
+                                   (< (Math/hypot (- x (* 0.5 (+ ax bx)))
+                                                  (- z (* 0.5 (+ az bz))))
+                                      12.0)))
+                               spans))
+          arrs [[(w/chunk-props seed cx cz field) w/prop-stride 0 2]
+                [(w/chunk-peds seed cx cz field) w/ped-stride 0 2]]]
+      (doseq [[a st xi zi] arrs]
+        (doseq [i (range (/ (alen* a) st))]
+          (let [o (* i st)]
+            (is (not (near-a-span? (aget* a (+ o xi)) (aget* a (+ o zi))))
+                "something was placed on a bridge")))))))
+
+
+(defn- deck-end-tops
+  "World Y of the two ends of a deck part's top face.
+
+  Reconstructed from the part's own transform rather than from the data it was
+  built out of. Checking `ya` and `yb` proves the *heights* agree; it says
+  nothing about where the slab actually ended up, which is where the bug was."
+  [px py pz yaw pitch sy sz]
+  (for [along [-1.0 1.0]]
+    (let [ly (* 0.5 sy)
+          lz (* along 0.5 sz)
+          ;; RotX(-pitch) then RotY(yaw); only Y is needed.
+          y' (- (* ly (Math/cos pitch)) (* lz (Math/sin (- pitch))))]
+      (+ py y'))))
+
+(deftest a-deck-lies-along-its-chord
+  (testing "a flat slab at the average height floats over the road at the near
+            end by half the fall of the span, and the car drives under the
+            leading edge into the river"
+    (let [[cx cz] (bridge-chunk)
+          a (w/chunk-bridges seed cx cz)
+          st w/bridge-part-stride
+          n (/ (alen* a) st)
+          at (fn [i o] (double (aget* a (+ o (* i st)))))
+          box (part-index-of w/bridge-prims :box)
+          deck 0x3c3c40
+          tops (for [i (range n)
+                     :when (and (= (double box) (at i 8)) (= (double deck) (at i 9)))
+                     t (deck-end-tops (at i 0) (at i 1) (at i 2)
+                                      (at i 3) (at i 4) (at i 6) (at i 7))]
+                 t)
+          spans (filter :bridge? (w/chunk-lines seed cx cz))
+          lo (apply min (mapcat (juxt :ya :yb) spans))
+          hi (apply max (mapcat (juxt :ya :yb) spans))]
+      (is (seq tops) "expected deck parts")
+      (is (< (abs (- (apply min tops) lo)) 0.15)
+          (str "lowest deck end " (apply min tops) " vs lowest road end " lo))
+      (is (< (abs (- (apply max tops) hi)) 0.15)
+          (str "highest deck end " (apply max tops) " vs highest road end " hi))
+      (testing "and the deck is pitched at all, rather than a stack of steps"
+        (is (some (fn [i] (> (abs (at i 4)) 0.005)) (range n))
+            "no deck part had any pitch")))))
