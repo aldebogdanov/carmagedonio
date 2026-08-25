@@ -6,6 +6,7 @@
             [carmageddon.client.buildings :as buildings]
             [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
+            [carmageddon.client.furniture :as furniture]
             [carmageddon.client.game :as game]
             [carmageddon.client.peds :as peds]
             [carmageddon.client.props :as props]
@@ -101,8 +102,8 @@
       nil)))
 
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
-                                  buildings-state peds-state game controllers
-                                  wrecked remotes]}]
+                                  buildings-state furniture-state peds-state game
+                                  controllers wrecked remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -139,6 +140,9 @@
         ;; vectors, which is fine at HUD rate but not 60+ times a second.
         (chunks/update! chunk-mgr (sim/player-x sim) (sim/player-z sim))
         (props/sync! props-state)
+        ;; Lights are a pure function of the clock, so this only has to repaint
+        ;; instance colours -- there is no signal state to advance.
+        (furniture/sync-signals! furniture-state (js/Date.now))
         (peds/sync! peds-state)
         (remote/sync! remotes (js/Date.now))
         (render/draw! rs sim alpha dt))
@@ -181,6 +185,7 @@
         rs        (render/create! canvas s seed)
         ps        (props/create (:world @s) (:scene rs))
         bs        (buildings/create (:world @s) (:scene rs) (:textures rs))
+        fu        (furniture/create (:world @s) (:scene rs))
         pd        (peds/create (:world @s) (:scene rs))
         gm        (game/create)
         ctls      (vec (repeatedly opponent-count ai/controller))
@@ -193,10 +198,12 @@
                     :on-physics-add    (fn [key data]
                                      (props/add-chunk! ps key (:props data))
                                      (buildings/add-chunk! bs key (:buildings data))
+                                     (furniture/add-chunk! fu key (:furniture data))
                                      (peds/add-chunk! pd key (:peds data)))
                     :on-physics-remove (fn [key]
                                      (props/remove-chunk! ps key)
                                      (buildings/remove-chunk! bs key)
+                                     (furniture/remove-chunk! fu key)
                                      (peds/remove-chunk! pd key))})
         ;; One seam, two implementations. Nothing below this line knows
         ;; whether it is single player.
@@ -262,16 +269,18 @@
                   (let [stop (start-frame-loop! {:sim s :rs rs :transport transport
                                                  :canvas canvas :chunk-mgr mgr
                                                  :props-state ps :buildings-state bs
+                                                 :furniture-state fu
                                                  :peds-state pd :game gm
                                                  :controllers ctls :wrecked wrecked
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
-                                 :props ps :buildings bs :peds pd :game gm
+                                 :props ps :buildings bs :furniture fu :peds pd :game gm
                                  :controllers ctls :wrecked wrecked :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"
                                   (:live (props/stats ps)) "props,"
-                                  (:standing (buildings/stats bs)) "buildings"
+                                  (:standing (buildings/stats bs)) "buildings,"
+                                  (:pieces (furniture/stats fu)) "street furniture"
                                   (if world (str "world " (:id world)) "(offline)")))))))
 
 (defn- watch-for-end!
@@ -286,11 +295,18 @@
                (when (and (= :running (:state old))
                           (not= :running (:state new)))
                  (remove-watch game ::submit)
-                 (-> (api/submit-run! (:id world) (:id profile) (game/result game))
-                     (.then (fn [r]
-                              (js/console.log "run"
-                                              (if r (str "recorded as " (:id r))
-                                                  "not recorded (no backend)")))))))))
+                 ;; `submit-run!` returns nil rather than a promise when there
+                 ;; is no world or profile to attach the run to, which is the
+                 ;; normal offline case -- and chaining `.then` onto that threw
+                 ;; out of the watch every time a run ended without a backend.
+                 (if-let [pending (api/submit-run! (:id world) (:id profile)
+                                                   (game/result game))]
+                   (.then pending
+                          (fn [r]
+                            (js/console.log "run"
+                                            (if r (str "recorded as " (:id r))
+                                                "not recorded (rejected)"))))
+                   (js/console.log "run not recorded (offline)"))))))
 
 (defn init! []
   (-> (sim/init!)

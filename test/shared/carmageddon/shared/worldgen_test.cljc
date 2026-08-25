@@ -157,6 +157,12 @@
           (is (< (abs (- expected actual)) 1e-3)
               (str "grid/surface mismatch at " [i j])))))))
 
+(defn- part-of
+  "Index of a furniture part. Not `.indexOf` on an array of keywords: that
+  compares by identity, which keywords do not guarantee."
+  [kw]
+  (first (keep-indexed (fn [i p] (when (= p kw) i)) w/furniture-parts)))
+
 (defn- first-chunk-of [b]
   (first (for [cx (range 0 24), cz (range 0 6)
                :when (= b (w/biome seed cx cz))]
@@ -278,3 +284,121 @@
             (is (and (< (- lo-x 90) x (+ lo-x k/chunk-size 90))
                      (< (- lo-z 90) z (+ lo-z k/chunk-size 90)))
                 (str "prop " i " of chunk " [cx cz] " strayed to " [x z]))))))))
+
+;; --- junctions and street furniture ----------------------------------------
+
+(deftest signals-never-let-both-groups-move
+  (testing "green plus amber is exactly half the cycle, so the two axes cannot
+            both be moving at any instant"
+    (doseq [offset [0.0 3.7 11.2 23.9]]
+      (doseq [ms (range 0 24000 137)]
+        (let [t (/ ms 1000.0)
+              a (w/signal-state t offset 0)
+              b (w/signal-state t offset 1)]
+          (is (or (= :red a) (= :red b))
+              (str "at t=" t " offset=" offset " groups showed " a "/" b)))))))
+
+(deftest signals-do-cycle
+  (testing "a group is not stuck on one colour"
+    (let [seen (set (for [ms (range 0 24000 100)] (w/signal-state (/ ms 1000.0) 0.0 0)))]
+      (is (= #{:green :amber :red} seen)))))
+
+(deftest junctions-need-three-arms
+  (testing "a bend is not a junction and gets no furniture"
+    (doseq [gx (range -6 7), gz (range -6 7)]
+      (when-let [j (w/junction seed gx gz)]
+        (is (>= (:degree j) 3) (str "junction at " [gx gz] " had degree " (:degree j)))
+        (is (= (:pos j) (w/node seed gx gz)) "a junction stands on its own node")
+        (is (contains? #{:signals :priority :uncontrolled} (:kind j)))))))
+
+(deftest signals-only-where-a-real-road-is-crossed
+  (testing "the bug this guards: asking whether *any* arm is an arterial puts a
+            set of lights at every node along one, i.e. every 64 m"
+    (let [rank {:local 0 :collector 1 :arterial 2}
+          axis (fn [arms along-x?]
+                 (let [r (for [{:keys [dir class]} arms
+                               :let [[dx dz] dir]
+                               :when (= along-x? (> (abs dx) (abs dz)))]
+                           (rank class))]
+                   (if (seq r) (apply max r) -1)))]
+      (doseq [gx (range -10 11), gz (range -10 11)]
+        (when-let [j (w/junction seed gx gz)]
+          (when (= :signals (:kind j))
+            (let [ax (axis (:arms j) true)
+                  az (axis (:arms j) false)]
+              (is (>= (min ax az) 1)
+                  (str "signals at " [gx gz] " where the crossing road is only "
+                       "class " (min ax az))))))))))
+
+(deftest signalled-junctions-are-not-on-every-corner
+  (testing "roughly one per city chunk, not one per block"
+    (let [[cx cz] (first-chunk-of :city)
+          kinds (frequencies (map :kind (w/chunk-junctions seed cx cz)))]
+      (is (pos? (reduce + (vals kinds))) "a city chunk should have junctions")
+      (is (<= (:signals kinds 0) 3)
+          (str "too many signalled junctions in one chunk: " kinds)))))
+
+(deftest furniture-is-well-formed
+  (let [[cx cz] (first-chunk-of :city)
+        field (w/road-field seed cx cz)
+        a (w/chunk-furniture seed cx cz field)
+        n (/ (alen* a) w/furniture-stride)]
+    (is (pos? n) "a city chunk should have street furniture")
+    (testing "same seed, same street"
+      (is (= (vec (map #(aget* a %) (range (alen* a))))
+             (vec (map #(aget* (w/chunk-furniture seed cx cz field) %) (range (alen* a)))))))
+    (testing "every part index names a real part"
+      (is (every? (fn [i]
+                    (let [p (aget* a (+ 4 (* i w/furniture-stride)))]
+                      (and (<= 0 p) (< p (count w/furniture-parts)))))
+                  (range n))))
+    (testing "poles stand on the ground rather than floating or buried"
+      (is (every? (fn [i]
+                    (let [o (* i w/furniture-stride)]
+                      (or (not= 0.0 (aget* a (+ o 4)))   ; not a pole
+                          (< (abs (- (aget* a (+ o 1))
+                                     (first (w/surface seed field (aget* a o)
+                                                       (aget* a (+ o 2))))))
+                             1e-3))))
+                  (range n))))
+    (testing "nothing strays into a neighbour's interior"
+      (let [lo-x (* cx k/chunk-size) lo-z (* cz k/chunk-size)]
+        (is (every? (fn [i]
+                      (let [o (* i w/furniture-stride)]
+                        (and (< (- lo-x 70) (aget* a o) (+ lo-x k/chunk-size 70))
+                             (< (- lo-z 70) (aget* a (+ o 2)) (+ lo-z k/chunk-size 70)))))
+                    (range n)))))))
+
+(deftest crossings-lie-on-the-carriageway
+  (testing "a zebra painted on the pavement is worse than no zebra"
+    (let [marking (part-of :marking)
+          samples (for [cx (range 0 6), cz (range 0 6)
+                        :let [field (w/road-field seed cx cz)
+                              a (w/chunk-furniture seed cx cz field)]
+                        i (range (/ (alen* a) w/furniture-stride))
+                        :let [o (* i w/furniture-stride)]
+                        :when (= (double marking) (double (aget* a (+ o 4))))]
+                    (second (w/surface seed field (aget* a o) (aget* a (+ o 2)))))
+          total (count samples)]
+      (is (pos? total) "expected some crossings")
+      (is (> (/ (count (filter #(> % 0.9) samples)) (double total)) 0.9)
+          (str "only " (count (filter #(> % 0.9) samples)) " of " total
+               " crossing stripes were on a road")))))
+
+(deftest poles-stand-on-the-verge-not-in-the-road
+  (testing "roadness is 1.0 only *inside* the carriageway; anything less is the
+            verge, which is exactly where a lamp post belongs. Measuring against
+            0.9 instead flags every correctly-placed pole on a wide arterial."
+    (let [pole (part-of :pole)
+          samples (for [cx (range 0 6), cz (range 0 6)
+                        :let [field (w/road-field seed cx cz)
+                              a (w/chunk-furniture seed cx cz field)]
+                        i (range (/ (alen* a) w/furniture-stride))
+                        :let [o (* i w/furniture-stride)]
+                        :when (= (double pole) (double (aget* a (+ o 4))))]
+                    (second (w/surface seed field (aget* a o) (aget* a (+ o 2)))))
+          total (count samples)
+          blocking (count (filter #(>= % 0.9999) samples))]
+      (is (> total 500) "expected a decent sample of poles")
+      (is (< (/ blocking (double total)) 0.01)
+          (str blocking " of " total " poles stood in the carriageway")))))

@@ -135,6 +135,10 @@
    :collector {:half 5.0 :shoulder 5.5 :jitter 0.10}
    :local     {:half 3.8 :shoulder 4.0 :jitter 0.20}})
 
+(def signal-cycle 24.0)   ; seconds for a full traffic-light cycle
+(def signal-green   9.5)
+(def signal-amber   2.5)  ; green + amber is exactly half a cycle
+
 (def road-max-influence
   "Furthest a road can affect the ground, over every class and every verge
   multiplier. Chunks gather streets within this distance of their bounds, so if
@@ -592,6 +596,224 @@
           (dotimes [i (count v)] (fput! a i (nth v i)))
           a)))))
 
+
+;; --- junctions and street furniture ----------------------------------------
+
+(def ^:private class-rank {:local 0 :collector 1 :arterial 2})
+
+(defn- node-arms
+  "The streets meeting at lattice node (gx, gz), each as a unit direction away
+  from the node and the class of that street.
+
+  A node has four possible arms and every one of them is a lattice edge whose
+  existence both neighbours already agree on, so the degree of a junction is
+  computable from the node's own coordinates. That is the whole reason the
+  furniture can be placed without any global pass over the network."
+  [seed gx gz]
+  (let [[nx nz] (node seed gx gz)]
+    (into []
+          (keep (fn [[dgx dgz along-x? ogx ogz]]
+                  (when (edge-exists? seed ogx ogz along-x?)
+                    (let [[ox oz] (node seed (+ gx dgx) (+ gz dgz))
+                          dx (- ox nx) dz (- oz nz)
+                          len (max 1e-6 (hypot dx dz))]
+                      {:dir [(/ dx len) (/ dz len)]
+                       :class (edge-class ogx ogz along-x?)}))))
+          [[-1 0 true (dec gx) gz]
+           [1  0 true gx gz]
+           [0 -1 false gx (dec gz)]
+           [0  1 false gx gz]])))
+
+(defn junction
+  "What sort of junction sits at lattice node (gx, gz), or nil if it is not one.
+
+  Two arms is a bend or a continuation, not a junction, and gets nothing. Three
+  or more is controlled: with signals where a main road meets a busy grid, and
+  otherwise by priority, which means signs on the minor approaches only. A
+  residential crossroads where every arm is the same class gets nothing at all,
+  which is both cheaper and what such a junction actually looks like."
+  [seed gx gz]
+  (let [arms (node-arms seed gx gz)
+        n    (count arms)]
+    (when (>= n 3)
+      (let [[x z] (node seed gx gz)
+            u    (urbanness seed x z)
+            ranks (map (comp class-rank :class) arms)
+            top   (apply max ranks)
+            minors (filter #(< (class-rank (:class %)) top) arms)
+            ;; Signals are decided per *axis*, not per arm. Every node along an
+            ;; arterial has two arterial arms -- the road running through it --
+            ;; so asking whether any arm is arterial puts a set of lights every
+            ;; 64 m. What matters is what the road being crossed by is: an
+            ;; arterial meeting a collector is a signalled junction, an arterial
+            ;; meeting a side street is a give-way.
+            axis-rank (fn [along-x?]
+                        (let [r (for [{:keys [dir class]} arms
+                                      :let [[dx dz] dir]
+                                      :when (= along-x? (> (abs dx) (abs dz)))]
+                                  (class-rank class))]
+                          (if (seq r) (apply max r) -1)))
+            ax (axis-rank true)
+            az (axis-rank false)
+            major (max ax az)
+            cross (min ax az)
+            signals? (and (> u 0.45)
+                          (or (and (= major 2) (>= cross 1))
+                              (and (= n 4) (>= cross 1) (> u 0.7))))]
+        {:pos [x z] :arms arms :degree n :top top :minors (vec minors)
+         :half (apply max (map #(:half (road-profile (:class %))) arms))
+         ;; Cycles are offset per junction so a city does not blink in unison.
+         :offset (prng/next-range! (prng/chunk-rng seed gx gz 91) 0.0 signal-cycle)
+         :kind (cond signals?      :signals
+                     (seq minors)  :priority
+                     :else         :uncontrolled)}))))
+
+(defn chunk-junctions
+  "The junctions this chunk owns -- those whose node lands inside it."
+  [seed cx cz]
+  (let [x0 (* cx k/chunk-size) z0 (* cz k/chunk-size)
+        x1 (+ x0 k/chunk-size) z1 (+ z0 k/chunk-size)
+        gx0 (dec (grid-floor x0 street-spacing))
+        gx1 (inc (grid-floor x1 street-spacing))
+        gz0 (dec (grid-floor z0 street-spacing))
+        gz1 (inc (grid-floor z1 street-spacing))]
+    (vec (for [gx (range gx0 (inc gx1))
+               gz (range gz0 (inc gz1))
+               :let [j (junction seed gx gz)]
+               :when j
+               :let [[jx jz] (:pos j)]
+               :when (and (<= x0 jx) (< jx x1) (<= z0 jz) (< jz z1))]
+           j))))
+
+;; Furniture is emitted as *parts*, not as objects: a traffic light is a pole
+;; instance plus a head instance. The client then needs one instanced draw per
+;; part rather than one mesh per lamp post, and a signal head can take a colour
+;; of its own without every pole in the city changing with it.
+(def furniture-stride 8)     ; x y z yaw part size phase offset
+(def furniture-parts [:pole :lamp-head :signal-head :sign-face :marking])
+(def sign-types [:stop :give-way])
+
+(def ^:private lamp-height 6.4)
+(def ^:private mast-height 5.2)
+(def ^:private sign-height 2.2)
+(def ^:private signal-head-y 4.3)
+(def ^:private lamp-spacing 26.0)
+(def ^:private lamp-urbanness 0.32)
+(def ^:private crossing-stripes 5)
+
+(defn signal-state
+  "Colour a signal group shows at world time `t`.
+
+  Pure, and a function of world time rather than of anything a client owns, so
+  every machine in a session sees the same lights without a byte crossing the
+  network -- and the server can say what a light was showing at a moment it
+  never simulated. Green plus amber is exactly half the cycle, so opposite
+  groups can never both be moving."
+  [t offset phase]
+  (let [u (mod (+ t offset (* phase 0.5 signal-cycle)) signal-cycle)]
+    (cond (< u signal-green) :green
+          (< u (+ signal-green signal-amber)) :amber
+          :else :red)))
+
+(defn- emit! [out x y z yaw part size phase offset]
+  (conj! out x) (conj! out y) (conj! out z) (conj! out yaw)
+  (conj! out (double part)) (conj! out size)
+  (conj! out (double phase)) (conj! out offset))
+
+(def ^:private part-index (zipmap furniture-parts (range)))
+
+(defn chunk-furniture
+  "Street furniture for one chunk, as a flat array of
+  [x y z yaw part size phase offset ...].
+
+  Everything here is derived from the street graph rather than scattered: masts
+  stand on the corners of junctions that have signals, signs face the approaches
+  that have to give way, lamps march along streets at a fixed spacing. That is
+  what makes a road read as a road rather than as a strip of dark ground -- and
+  it costs almost nothing, because the graph already knows the topology."
+  [seed cx cz field]
+  (let [out (transient [])
+        ground (fn [x z] (first (surface seed field x z)))]
+    ;; Junction furniture.
+    (doseq [{:keys [pos arms kind half offset] :as j} (chunk-junctions seed cx cz)]
+      (let [[jx jz] pos
+            setback (+ half 3.2)]
+        (case kind
+          :signals
+          (doseq [{:keys [dir class]} arms]
+            (let [[dx dz] dir
+                  ah (:half (road-profile class))
+                  ;; Corner of the junction: back down the approach, then out to
+                  ;; the far side of that approach's carriageway.
+                  rx (- dz) rz dx
+                  px (+ jx (* dx setback) (* rx (+ ah 1.9)))
+                  pz (+ jz (* dz setback) (* rz (+ ah 1.9)))
+                  y  (ground px pz)
+                  ;; Facing back down the approach, at the driver.
+                  yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) (- dx) (- dz))
+                  ;; Opposite arms share a group, so the two axes alternate.
+                  phase (if (> (abs dx) (abs dz)) 0 1)]
+              (emit! out px y pz yaw (part-index :pole) mast-height phase offset)
+              (emit! out (- px (* rx 0.5)) (+ y signal-head-y) (- pz (* rz 0.5))
+                     yaw (part-index :signal-head) 1.0 phase offset)
+              ;; A crossing across this approach, just outside the junction.
+              (dotimes [i crossing-stripes]
+                (let [t (- (/ (double i) (dec crossing-stripes)) 0.5)
+                      sx (+ jx (* dx (+ half 1.6)) (* rx t 2.0 ah 0.86))
+                      sz (+ jz (* dz (+ half 1.6)) (* rz t 2.0 ah 0.86))]
+                  (emit! out sx (+ 0.02 (ground sx sz)) sz
+                         (#?(:clj Math/atan2 :cljs js/Math.atan2) dx dz)
+                         (part-index :marking) 1.0 0 0.0)))))
+
+          :priority
+          (doseq [{:keys [dir class]} (:minors j)]
+            (let [[dx dz] dir
+                  ah (:half (road-profile class))
+                  rx (- dz) rz dx
+                  px (+ jx (* dx (+ half 2.4)) (* rx (+ ah 1.1)))
+                  pz (+ jz (* dz (+ half 2.4)) (* rz (+ ah 1.1)))
+                  y  (ground px pz)
+                  yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) (- dx) (- dz))
+                  ;; Give way where the junction still has a through route,
+                  ;; stop where it does not.
+                  st (if (= 4 (:degree j)) 1 0)]
+              (emit! out px y pz yaw (part-index :pole) sign-height 0 0.0)
+              (emit! out px (+ y sign-height 0.1) pz yaw
+                     (part-index :sign-face) 1.0 st 0.0)))
+
+          nil)))
+    ;; Lamp posts along the streets this chunk owns.
+    (doseq [{:keys [points half class]} (chunk-lines seed cx cz)]
+      (let [[ax az] (first points)
+            [bx bz] (peek points)
+            dx (- bx ax) dz (- bz az)
+            len (hypot dx dz)
+            u   (urbanness seed (* 0.5 (+ ax bx)) (* 0.5 (+ az bz)))]
+        (when (and (> u lamp-urbanness) (> len 1.0))
+          (let [ux (/ dx len) uz (/ dz len)
+                rx (- uz) rz ux
+                n  (max 1 (long (floor (/ len lamp-spacing))))
+                off (+ half 1.9)
+                lift (if (= class :arterial) 1.0 0.85)]
+            (dotimes [i n]
+              ;; Alternate sides, and skip the very ends so lamps do not pile up
+              ;; on top of the junction furniture at either node.
+              (let [t    (/ (+ i 0.5) (double n))
+                    side (if (even? i) 1.0 -1.0)
+                    px (+ ax (* ux len t) (* rx off side))
+                    pz (+ az (* uz len t) (* rz off side))
+                    y  (ground px pz)
+                    h  (* lamp-height lift)
+                    yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) (* rx (- side)) (* rz (- side)))]
+                (emit! out px y pz yaw (part-index :pole) h 0 0.0)
+                ;; The luminaire hangs out over the carriageway.
+                (emit! out (- px (* rx side 0.9)) (+ y h -0.15) (- pz (* rz side 0.9))
+                       yaw (part-index :lamp-head) 1.0 0 0.0)))))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a)))
+
 ;; --- chunk assembly ---------------------------------------------------------
 
 ;; Vertex colour multiplies the tiled ground texture, which is green. Simply
@@ -625,6 +847,7 @@
         props (chunk-props seed cx cz field)
         buildings (chunk-buildings seed cx cz field)
         peds  (chunk-peds seed cx cz field)
+        furniture (chunk-furniture seed cx cz field)
         heights (farray (* n n))
         colors  (farray (* n n 3))]
     (dotimes [j n]                       ; j indexes z
@@ -663,6 +886,7 @@
      :props props
      :buildings buildings
      :peds peds
+     :furniture furniture
      :biome (biome seed cx cz)}))
 
 (defn spawn-point

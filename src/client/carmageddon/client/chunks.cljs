@@ -51,7 +51,8 @@
      :heights (unchecked-get r "heights") :colors (unchecked-get r "colors")
      :props (unchecked-get r "props")
      :buildings (unchecked-get r "buildings")
-     :peds (unchecked-get r "peds")}))
+     :peds (unchecked-get r "peds")
+     :furniture (unchecked-get r "furniture")}))
 
 (defn worker-generator
   "Generate chunks in a Web Worker. Requests are keyed by chunk coordinate so
