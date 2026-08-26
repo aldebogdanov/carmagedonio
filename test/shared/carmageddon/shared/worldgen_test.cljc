@@ -991,3 +991,164 @@
       (is (pos? wood) "expected woods")
       (is (> wood (* 4 wheat))
           (str "woodland " wood " trees vs wheat " wheat)))))
+
+;; --- traffic, people and animals --------------------------------------------
+
+(deftest a-street-can-be-driven-in-either-direction
+  (testing "`street` is defined from the lower node outward, so a driver going
+            the other way needs its polyline and chord reversed"
+    (doseq [[a b] [[[0 0] [1 0]] [[3 -2] [3 -1]] [[-4 5] [-5 5]]]]
+      (let [f (w/street-between seed a b)
+            r (w/street-between seed b a)]
+        (is (= (first (:points f)) (peek (:points r))) "ends swap")
+        (is (= (peek (:points f)) (first (:points r))))
+        (is (< (abs (- (:ya f) (:yb r))) 1e-9) "and so do the chord heights")
+        (is (< (abs (- (:yb f) (:ya r))) 1e-9))))))
+
+(deftest a-street-knows-where-it-is-in-the-lattice
+  (testing "recovering this from the polyline does not work -- a node is
+            displaced by up to 13 m, so an endpoint can sit in the next cell"
+    (doseq [cx [-3 0 7], cz [-2 0 5]]
+      (doseq [{:keys [gx gz along-x? points]} (w/chunk-lines seed cx cz)]
+        (let [a (w/node seed gx gz)
+              b (w/node seed (if along-x? (inc gx) gx) (if along-x? gz (inc gz)))]
+          (is (= a (first points)))
+          (is (= b (peek points))))))))
+
+(deftest traffic-starts-on-a-real-street
+  (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
+        a (w/chunk-traffic seed cx cz)
+        n (/ (alen* a) w/traffic-stride)]
+    (is (> n 10) "a city chunk should have traffic on it")
+    (testing "every car's two nodes are lattice neighbours with a street between"
+      (is (every? (fn [i]
+                    (let [o (* i w/traffic-stride)
+                          f [(int (aget* a o)) (int (aget* a (+ o 1)))]
+                          t [(int (aget* a (+ o 2))) (int (aget* a (+ o 3)))]
+                          d (+ (abs (- (nth t 0) (nth f 0)))
+                               (abs (- (nth t 1) (nth f 1))))]
+                      (and (= 1 d)
+                           (some #(= t (:to %)) (w/node-arms seed (nth f 0) (nth f 1))))))
+                  (range n))))
+    (testing "and starts somewhere along it at a sane speed"
+      (is (every? (fn [i]
+                    (let [o (* i w/traffic-stride)]
+                      (and (<= 0.0 (aget* a (+ o 4)) 1.0)
+                           (< 5.0 (aget* a (+ o 5)) 20.0))))
+                  (range n))))))
+
+(deftest traffic-density-follows-the-city
+  (let [count-at (fn [pred]
+                   (let [cs (take 4 (for [cx (range -30 40), cz (range -20 20)
+                                          :let [x (* (+ cx 0.5) k/chunk-size)
+                                                z (* (+ cz 0.5) k/chunk-size)]
+                                          :when (pred (w/urbanness seed x z))]
+                                      [cx cz]))]
+                     (/ (reduce + (map (fn [[cx cz]]
+                                         (/ (alen* (w/chunk-traffic seed cx cz))
+                                            w/traffic-stride))
+                                       cs))
+                        (double (count cs)))))
+        city (count-at #(> % 0.85))
+        country (count-at #(< % 0.10))]
+    (is (> city (* 4.0 country))
+        (str "city " city " cars/chunk vs country " country))))
+
+(deftest node-arms-name-their-neighbours
+  (doseq [gx [-5 0 3], gz [-2 0 6]]
+    (doseq [{:keys [to dir]} (w/node-arms seed gx gz)]
+      (is (= 1 (+ (abs (- (nth to 0) gx)) (abs (- (nth to 1) gz))))
+          "an arm goes to an orthogonal neighbour")
+      (testing "and its direction points that way"
+        (let [[nx nz] (w/node seed gx gz)
+              [ox oz] (w/node seed (nth to 0) (nth to 1))
+              [dx dz] dir]
+          (is (pos? (+ (* dx (- ox nx)) (* dz (- oz nz))))
+              "the unit direction faces the far node"))))))
+
+(deftest people-walk-along-the-street-they-stand-on
+  (testing "a crowd on arbitrary bearings reads as a scattering; walking the
+            pavement is most of what makes it a crowd"
+    (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
+          field (w/road-field seed cx cz)
+          a (w/chunk-peds seed cx cz field)
+          n (/ (alen* a) w/ped-stride)
+          lines (remove :bridge? (w/chunk-lines seed cx cz))
+          ;; For each person, the direction of the nearest street.
+          aligned (for [i (range n)
+                        :let [o (* i w/ped-stride)]
+                        :when (zero? (int (aget* a (+ o 5))))
+                        :let [x (aget* a o) z (aget* a (+ o 2))
+                              h (aget* a (+ o 3))
+                              best (apply min-key
+                                          (fn [{:keys [points]}]
+                                            (let [[ax az] (first points)
+                                                  [bx bz] (peek points)]
+                                              (Math/hypot (- x (* 0.5 (+ ax bx)))
+                                                          (- z (* 0.5 (+ az bz))))))
+                                          lines)
+                              [ax az] (first (:points best))
+                              [bx bz] (peek (:points best))
+                              len (Math/hypot (- bx ax) (- bz az))]]
+                    ;; |cos| of the angle between the walk and the street.
+                    (abs (+ (* (Math/cos h) (/ (- bx ax) len))
+                            (* (Math/sin h) (/ (- bz az) len)))))]
+      (is (seq aligned))
+      (is (> (/ (count (filter #(> % 0.9) aligned)) (double (count aligned))) 0.85)
+          "most people should be walking roughly along a street"))))
+
+(deftest animals-belong-to-the-land-they-stand-on
+  (let [kind-of (fn [i a] (nth w/ped-kinds (int (aget* a (+ 5 (* i w/ped-stride))))))
+        gather (fn [pred]
+                 (let [cs (take 6 (for [cx (range -34 -18), cz (range -24 -8)
+                                        :let [x (* (+ cx 0.5) k/chunk-size)
+                                              z (* (+ cz 0.5) k/chunk-size)]
+                                        :when (pred (w/urbanness seed x z))]
+                                    [cx cz]))]
+                   (frequencies
+                    (for [[cx cz] cs
+                          :let [a (w/chunk-peds seed cx cz (w/road-field seed cx cz))]
+                          i (range (/ (alen* a) w/ped-stride))]
+                      (kind-of i a)))))
+        farm (gather #(< % 0.10))
+        city (gather #(> % 0.85))]
+    (testing "livestock in the fields"
+      (is (some farm [:sheep :cow]) (str "nothing grazing: " farm)))
+    (testing "and none downtown"
+      (is (nil? (:sheep city)))
+      (is (nil? (:cow city)))
+      (is (pos? (:person city 0))))))
+
+(deftest a-herd-is-a-herd
+  (testing "one sheep in a field is a mistake and six is a flock"
+    (let [[cx cz] (densest-chunk (fn [u _] (< u 0.08)))
+          a (w/chunk-peds seed cx cz (w/road-field seed cx cz))
+          n (/ (alen* a) w/ped-stride)
+          beasts (for [i (range n)
+                       :let [o (* i w/ped-stride)]
+                       :when (pos? (int (aget* a (+ o 5))))]
+                   [(aget* a o) (aget* a (+ o 2))])]
+      (when (seq beasts)
+        ;; Every animal should have another within a herd's width of it.
+        (is (every? (fn [[x z]]
+                      (some (fn [[ox oz]]
+                              (and (not= [x z] [ox oz])
+                                   (< (Math/hypot (- x ox) (- z oz)) 24.0)))
+                            beasts))
+                    beasts)
+            "an animal was standing on its own")))))
+
+(deftest ped-kinds-and-traffic-are-deterministic
+  (let [[cx cz] (densest-chunk (fn [u _] (< 0.2 u 0.5)))
+        field (w/road-field seed cx cz)
+        same? (fn [f] (let [a (f) b (f)]
+                        (= (vec (map #(aget* a %) (range (alen* a))))
+                           (vec (map #(aget* b %) (range (alen* b)))))))]
+    (is (same? #(w/chunk-peds seed cx cz field)))
+    (is (same? #(w/chunk-traffic seed cx cz)))
+    (testing "every kind index names a real kind"
+      (let [a (w/chunk-peds seed cx cz field)]
+        (is (every? (fn [i]
+                      (let [kk (aget* a (+ 5 (* i w/ped-stride)))]
+                        (and (<= 0 kk) (< kk (count w/ped-kinds)))))
+                    (range (/ (alen* a) w/ped-stride))))))))

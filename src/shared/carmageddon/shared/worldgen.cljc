@@ -380,6 +380,12 @@
           ya (+ (base-height seed (nth a 0) (nth a 1)) lift-a)
           yb (+ (base-height seed (nth b 0) (nth b 1)) lift-b)]
       {:points   (if (zero? bow) [a b] (bezier a b bow bend-samples))
+       ;; Its own identity in the lattice. Recovering this from the polyline
+       ;; does not work: a node is displaced by up to 13 m, so an endpoint can
+       ;; sit in the neighbouring cell entirely.
+       :gx       gx
+       :gz       gz
+       :along-x? along-x?
        :half     (:half (road-profile cls))
        :shoulder (verge cls u)
        :class    cls
@@ -684,7 +690,8 @@
   it meets the road exactly at both ends -- the approach is flattened terrain
   and the span is not, and they agree at the node because both are
   `base-height` there."
-  [seed cx cz]
+  ([seed cx cz] (chunk-bridges seed cx cz (chunk-lines seed cx cz)))
+  ([seed cx cz owned]
   (let [out (transient [])
         emit (fn [x y z yaw pitch sx sy sz prim tint solid]
                (conj! out x) (conj! out y) (conj! out z)
@@ -692,7 +699,7 @@
                (conj! out sx) (conj! out sy) (conj! out sz)
                (conj! out (double (prim-index prim)))
                (conj! out (double tint)) (conj! out (double solid)))]
-    (doseq [{:keys [points half ya yb]} (filter :bridge? (chunk-lines seed cx cz))]
+    (doseq [{:keys [points half ya yb]} (filter :bridge? owned)]
       (let [n (count points)
             chord (fn [t] (+ ya (* t (- yb ya))))
             width (+ (* 2.0 half) (* 2.0 deck-margin))]
@@ -742,7 +749,69 @@
     (let [v (persistent! out)
           a (farray (count v))]
       (dotimes [i (count v)] (fput! a i (nth v i)))
-      a)))
+      a))))
+
+(defn street-between
+  "The street joining two adjacent lattice nodes, in the order asked for.
+
+  `street` is defined from the lower node outward, so a driver travelling the
+  other way needs its polyline and chord reversed. Doing that here saves every
+  caller from knowing which way round the lattice stores things."
+  [seed [ax az] [bx bz]]
+  (let [forward? (or (< ax bx) (< az bz))
+        along-x? (not= ax bx)
+        [gx gz] (if forward? [ax az] [bx bz])
+        st (street seed gx gz along-x?)]
+    (if forward?
+      st
+      (assoc st :points (vec (reverse (:points st)))
+                :ya (:yb st) :yb (:ya st)))))
+
+;; --- traffic ----------------------------------------------------------------
+
+(def traffic-stride 6)   ; from-gx from-gz to-gx to-gz t0 speed
+
+(def ^:private traffic-speed {:arterial 16.0 :collector 12.0 :local 8.0})
+
+(defn- traffic-odds [u cls]
+  (case cls
+    :arterial  (+ 0.30 (* 0.75 u))
+    :collector (+ 0.18 (* 0.65 u))
+    (max 0.0 (- (* 0.55 u) 0.10))))
+
+(defn chunk-traffic
+  "Civilian cars for one chunk, as [from-gx from-gz to-gx to-gz t0 speed ...].
+
+  A car is placed on a street this chunk owns and drives away from there; where
+  it goes after that is decided at each node it reaches, so the spawn only has
+  to say where it starts. Ownership is by street, exactly as with props, so no
+  two chunks put a car on the same road.
+
+  Two rolls per street: one car per street leaves a city grid looking
+  abandoned, and two is enough to read as traffic."
+  ([seed cx cz] (chunk-traffic seed cx cz (chunk-lines seed cx cz)))
+  ([seed cx cz owned]
+  (let [r   (prng/chunk-rng seed cx cz 1237)
+        out (transient [])]
+    (doseq [{:keys [points class gx gz along-x?]} owned]
+      (let [[ax az] (first points)
+            [bx bz] (peek points)
+            u (urbanness seed (* 0.5 (+ ax bx)) (* 0.5 (+ az bz)))]
+        (dotimes [_ 2]
+          (when (< (prng/next-double! r) (traffic-odds u class))
+            (let [back? (prng/next-bool! r)
+                  [fx fz tx tz] (if along-x?
+                                  (if back? [(inc gx) gz gx gz] [gx gz (inc gx) gz])
+                                  (if back? [gx (inc gz) gx gz] [gx gz gx (inc gz)]))]
+              (conj! out (double fx)) (conj! out (double fz))
+              (conj! out (double tx)) (conj! out (double tz))
+              (conj! out (prng/next-double! r))
+              (conj! out (* (traffic-speed class 8.0)
+                            (prng/next-range! r 0.82 1.12))))))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a))))
 
 ;; --- flora ------------------------------------------------------------------
 
@@ -881,10 +950,11 @@
   of the carriageway, rather than scattered over the chunk and rejected when
   they miss. Scattering wasted three quarters of every batch, because the
   roadside band is about 12 m wide out of 256."
-  [seed cx cz field]
+  ([seed cx cz field] (chunk-props seed cx cz field (chunk-lines seed cx cz)))
+  ([seed cx cz field owned]
   ;; Bridges are skipped: `surface` under a span reports the riverbed, so a
   ;; barrel placed along one would sit in the water forty feet below the road.
-  (let [lines (remove :bridge? (chunk-lines seed cx cz))]
+  (let [lines (remove :bridge? owned)]
     (if (empty? lines)
       (farray 0)
       (let [r   (prng/chunk-rng seed cx cz (:props k/salt))
@@ -931,7 +1001,7 @@
         (let [v (persistent! out)
               a (farray (count v))]
           (dotimes [i (count v)] (fput! a i (nth v i)))
-          a)))))
+          a))))))
 
 ;; --- blocks, lots and zoning ------------------------------------------------
 
@@ -1362,60 +1432,113 @@
 
 ;; --- pedestrians ------------------------------------------------------------
 
-(def ped-stride 5)           ; x y z heading speed
+(def ped-stride 6)           ; x y z heading speed kind
+
+(def ped-kinds
+  "What is walking about. People line the streets; the rest belong to whatever
+  land they are standing on."
+  [:person :sheep :cow :deer :dog])
+
+(def ^:private kind-index (zipmap ped-kinds (range)))
 
 (defn peds-per-chunk
   "Cities are busy, countryside is not."
   [seed cx cz]
   (if (= :city (biome seed cx cz)) 18 5))
 
+(def ^:private herds-per-chunk 3)
+(def ^:private herd-size 6)
+
+(defn- grazer-for
+  "What, if anything, is grazing at a point. Livestock follow the crop, deer the
+  woods, dogs the suburbs -- so an animal is where the land says it should be
+  rather than scattered at random over it."
+  [seed x z]
+  (let [u (urbanness seed x z)
+        crop (crop-at seed x z)]
+    (cond
+      (> u 0.55) nil
+      (> u 0.28) :dog
+      (= crop :woodland) :deer
+      (contains? #{:pasture :fallow} crop) (if (> u 0.12) :cow :sheep)
+      (= crop :scrub) :sheep
+      :else nil)))
+
 (defn chunk-peds
-  "Deterministic pedestrian spawns, as [x y z heading speed ...].
+  "Deterministic pedestrian and animal spawns, as
+  [x y z heading speed kind ...].
 
-  Placed close to the carriageway -- they are meant to be in the way. Same
-  draw-before-you-reject discipline as props so the stream advances identically
-  regardless of what the terrain turns out to be."
-  [seed cx cz field]
-  (let [lines (remove :bridge? (chunk-lines seed cx cz))]
-    (if (empty? lines)
-      (farray 0)
-      (let [r   (prng/chunk-rng seed cx cz (:peds k/salt))
-            n   (peds-per-chunk seed cx cz)
-            out (transient [])]
-        (dotimes [_ n]
-          (let [line  (nth lines (prng/next-int! r (count lines)))
-                pts   (:points line)
-                cnt   (count pts)
-                i     (prng/next-int! r (dec cnt))
-                t     (prng/next-double! r)
-                side  (if (prng/next-bool! r) 1.0 -1.0)
-                off   (prng/next-range! r 1.0 (+ (:half line) 3.0))
-                head  (prng/next-range! r 0.0 6.2831853)
-                speed (prng/next-range! r 0.7 1.9)
-                [ax az] (nth pts i)
-                [bx bz] (nth pts (inc i))
-                px (+ ax (* t (- bx ax)))
-                pz (+ az (* t (- bz az)))
-                dx (- bx ax) dz (- bz az)
-                len (max 1e-6 (hypot dx dz))
-                x (+ px (* side (* (- dz) (/ off len))))
-                z (+ pz (* side (* dx (/ off len))))
-                [y _] (surface seed field x z)]
-            (conj! out x) (conj! out y) (conj! out z)
-            (conj! out head) (conj! out speed)))
-        (let [v (persistent! out)
-              a (farray (count v))]
-          (dotimes [i (count v)] (fput! a i (nth v i)))
-          a)))))
+  People are placed close to the carriageway -- they are meant to be in the way
+  -- and set walking *along* the street rather than on an arbitrary bearing,
+  which is most of the difference between a crowd and a scattering.
 
+  Animals come in herds, because one sheep in a field is a mistake and six is a
+  flock. Same draw-before-you-reject discipline as props, so the random stream
+  advances by the same amount on every machine regardless of what the ground
+  turns out to be."
+  ([seed cx cz field] (chunk-peds seed cx cz field (chunk-lines seed cx cz)))
+  ([seed cx cz field owned]
+  (let [lines (remove :bridge? owned)
+        r     (prng/chunk-rng seed cx cz (:peds k/salt))
+        out   (transient [])
+        emit  (fn [x z head speed kind]
+                (let [[y _] (surface seed field x z)]
+                  (conj! out x) (conj! out y) (conj! out z)
+                  (conj! out head) (conj! out speed)
+                  (conj! out (double (kind-index kind)))))]
+    (when (seq lines)
+      (dotimes [_ (peds-per-chunk seed cx cz)]
+        (let [line  (nth lines (prng/next-int! r (count lines)))
+              pts   (:points line)
+              cnt   (count pts)
+              i     (prng/next-int! r (dec cnt))
+              t     (prng/next-double! r)
+              side  (if (prng/next-bool! r) 1.0 -1.0)
+              off   (prng/next-range! r 1.0 (+ (:half line) 3.0))
+              back? (prng/next-bool! r)
+              speed (prng/next-range! r 0.7 1.9)
+              [ax az] (nth pts i)
+              [bx bz] (nth pts (inc i))
+              px (+ ax (* t (- bx ax)))
+              pz (+ az (* t (- bz az)))
+              dx (- bx ax) dz (- bz az)
+              len (max 1e-6 (hypot dx dz))
+              sgn (if back? -1.0 1.0)
+              ;; Along the pavement, one way or the other. `walk!` reads this as
+              ;; (cos h, sin h), so it is atan2 of dz over dx.
+              head (#?(:clj Math/atan2 :cljs js/Math.atan2)
+                    (* sgn (/ dz len)) (* sgn (/ dx len)))]
+          (emit (+ px (* side (* (- dz) (/ off len))))
+                (+ pz (* side (* dx (/ off len))))
+                head speed :person))))
+    (dotimes [_ herds-per-chunk]
+      (let [hx (* (+ cx (prng/next-range! r 0.1 0.9)) k/chunk-size)
+            hz (* (+ cz (prng/next-range! r 0.1 0.9)) k/chunk-size)
+            kind (grazer-for seed hx hz)]
+        (dotimes [_ herd-size]
+          (let [ox (+ hx (prng/next-range! r -11.0 11.0))
+                oz (+ hz (prng/next-range! r -11.0 11.0))
+                head (prng/next-range! r 0.0 6.2831853)
+                speed (prng/next-range! r 0.15 0.55)]
+            (when (and kind (< (second (surface seed field ox oz)) 0.4))
+              (emit ox oz head speed kind))))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a))))
 
 ;; --- junctions and street furniture ----------------------------------------
 
 (def ^:private class-rank {:local 0 :collector 1 :arterial 2})
 
-(defn- node-arms
-  "The streets meeting at lattice node (gx, gz), each as a unit direction away
-  from the node and the class of that street.
+(defn node-arms
+  "The streets meeting at lattice node (gx, gz): a unit direction away from the
+  node, the class of that street, how far off the ground it is, and the lattice
+  node at its far end.
+
+  Public because traffic routes on it. A driver arriving at a node asks what
+  leaves it and picks one, which is all the navigation an infinite world can
+  support -- there is no destination to plan a route to.
 
   A node has four possible arms and every one of them is a lattice edge whose
   existence both neighbours already agree on, so the degree of a junction is
@@ -1431,7 +1554,9 @@
                           len (max 1e-6 (hypot dx dz))]
                       {:dir [(/ dx len) (/ dz len)]
                        :class (edge-class ogx ogz along-x?)
-                       :lift (node-lift seed gx gz along-x?)}))))
+                       :lift (node-lift seed gx gz along-x?)
+                       :to [(+ gx dgx) (+ gz dgz)]
+                       :along-x? along-x?}))))
           [[-1 0 true (dec gx) gz]
            [1  0 true gx gz]
            [0 -1 false gx (dec gz)]
@@ -1548,7 +1673,8 @@
   that have to give way, lamps march along streets at a fixed spacing. That is
   what makes a road read as a road rather than as a strip of dark ground -- and
   it costs almost nothing, because the graph already knows the topology."
-  [seed cx cz field]
+  ([seed cx cz field] (chunk-furniture seed cx cz field (chunk-lines seed cx cz)))
+  ([seed cx cz field owned]
   (let [out (transient [])
         ground (fn [x z] (first (surface seed field x z)))]
     ;; Junction furniture.
@@ -1600,7 +1726,7 @@
 
           nil)))
     ;; Lamp posts and centre lines along the streets this chunk owns.
-    (doseq [{:keys [points half class bridge? ya yb]} (chunk-lines seed cx cz)]
+    (doseq [{:keys [points half class bridge? ya yb]} owned]
       (let [[ax az] (first points)
             [bx bz] (peek points)
             dx (- bx ax) dz (- bz az)
@@ -1647,7 +1773,7 @@
     (let [v (persistent! out)
           a (farray (count v))]
       (dotimes [i (count v)] (fput! a i (nth v i)))
-      a)))
+      a))))
 
 ;; --- chunk assembly ---------------------------------------------------------
 
@@ -1684,12 +1810,18 @@
         x0    (* cx k/chunk-size)
         z0    (* cz k/chunk-size)
         field (road-field seed cx cz)
-        props (chunk-props seed cx cz field)
+        ;; Every generator below wants this chunk's own streets. Six of them
+        ;; used to work it out independently, which meant building the same
+        ;; fifty streets six times and was, by the end, most of the cost of a
+        ;; chunk.
+        owned (chunk-lines seed cx cz)
+        props (chunk-props seed cx cz field owned)
         {:keys [buildings parts]} (chunk-structures seed cx cz field)
-        peds  (chunk-peds seed cx cz field)
-        furniture (chunk-furniture seed cx cz field)
-        bridges (chunk-bridges seed cx cz)
+        peds  (chunk-peds seed cx cz field owned)
+        furniture (chunk-furniture seed cx cz field owned)
+        bridges (chunk-bridges seed cx cz owned)
         flora (chunk-flora seed cx cz field)
+        traffic (chunk-traffic seed cx cz owned)
         heights (farray (* n n))
         colors  (farray (* n n 3))]
     (dotimes [j n]                       ; j indexes z
@@ -1752,6 +1884,7 @@
      :furniture furniture
      :bridges bridges
      :flora flora
+     :traffic traffic
      :biome (biome seed cx cz)}))
 
 (defn spawn-point

@@ -3,6 +3,7 @@
   to connect them and owns no game logic."
   (:require [carmageddon.client.ai :as ai]
             [carmageddon.client.api :as api]
+            [carmageddon.client.birds :as birds]
             [carmageddon.client.buildings :as buildings]
             [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
@@ -14,6 +15,7 @@
             [carmageddon.client.parts :as parts]
             [carmageddon.client.peds :as peds]
             [carmageddon.client.props :as props]
+            [carmageddon.client.traffic :as traffic]
             [carmageddon.client.remote :as remote]
             [carmageddon.client.render :as render]
             [carmageddon.client.sim :as sim]
@@ -103,8 +105,9 @@
       nil)))
 
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
-                                  buildings-state furniture-state peds-state game
-                                  controllers wrecked remotes]}]
+                                  buildings-state furniture-state traffic-state
+                                  birds-state peds-state game controllers wrecked
+                                  remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -115,7 +118,9 @@
       (fn [tick _dt]
         (let [cmd (input/sample tick)]
           (sim/step! sim cmd (opponent-commands sim peds-state controllers tick))
-          (peds/walk! peds-state tick)
+          ;; Traffic drives on the fixed step, like everything else that moves.
+          (traffic/drive! traffic-state k/dt (js/Date.now))
+          (peds/walk! peds-state tick (sim/player-x sim) (sim/player-z sim))
           (game/tick! game)
           ;; An opponent past the damage threshold is out, and scored once.
           (doseq [i (range (count controllers))]
@@ -141,6 +146,9 @@
         ;; vectors, which is fine at HUD rate but not 60+ times a second.
         (chunks/update! chunk-mgr (sim/player-x sim) (sim/player-z sim))
         (props/sync! props-state)
+        (traffic/sync! traffic-state)
+        (birds/update! birds-state (* 0.001 (js/Date.now))
+                       (sim/player-x sim) (sim/player-z sim))
         ;; Lights are a pure function of the clock, so this only has to repaint
         ;; instance colours -- there is no signal state to advance.
         (furniture/sync-signals! furniture-state (js/Date.now))
@@ -167,7 +175,9 @@
                      "   slip " (.toFixed slip 0) "\u00b0"
                      (cond (> slip 25) "  DRIFT" (> slip 8) "  loose" :else "")
                      "   dmg " (.toFixed (* 100 dmg) 0) "%"
-                     "   peds " (:alive pd)
+                     "   peds " (:people pd) "+" (:animals pd)
+                     (if (= :outbreak (:mode pd)) " OUTBREAK" "")
+                     "   cars " (:driving (traffic/stats traffic-state))
                      "   rivals " (- (count controllers) (count @wrecked))
                      (let [n (remote/count-players remotes)]
                        (if (pos? n) (str "   online " n) ""))
@@ -189,7 +199,17 @@
         fu        (furniture/create (:world @s) (:scene rs))
         br        (parts/create (:world @s) (:scene rs))
         fl        (parts/create (:world @s) (:scene rs))
-        pd        (peds/create (:world @s) (:scene rs))
+        tf        (traffic/create (:world @s) (:scene rs) seed)
+        bd        (birds/create (:scene rs))
+        ;; Outbreak is a property of the world, with a query parameter for
+        ;; trying it without one -- the flag changes behaviour, not generation,
+        ;; so the same seed makes the same city either way.
+        pd        (peds/create (:world @s) (:scene rs)
+                               (or (:mode world)
+                                   (if (.has (js/URLSearchParams.
+                                              (.-search js/location))
+                                             "outbreak")
+                                     :outbreak :normal)))
         gm        (game/create)
         ctls      (vec (repeatedly opponent-count ai/controller))
         wrecked   (atom #{})
@@ -204,6 +224,7 @@
                                      (furniture/add-chunk! fu key (:furniture data))
                                      (parts/add-chunk! br key (:bridges data))
                                      (parts/add-chunk! fl key (:flora data))
+                                     (traffic/add-chunk! tf key (:traffic data))
                                      (peds/add-chunk! pd key (:peds data)))
                     :on-physics-remove (fn [key]
                                      (props/remove-chunk! ps key)
@@ -211,6 +232,7 @@
                                      (furniture/remove-chunk! fu key)
                                      (parts/remove-chunk! br key)
                                      (parts/remove-chunk! fl key)
+                                     (traffic/remove-chunk! tf key)
                                      (peds/remove-chunk! pd key))})
         ;; One seam, two implementations. Nothing below this line knows
         ;; whether it is single player.
@@ -244,7 +266,8 @@
                             speed (js/Math.abs (sim/player-speed s))]
                         (when (> speed min-smash-speed)
                           (let [prop? (props/prop? ps other)
-                                ped?  (peds/ped? pd other)]
+                                ped?  (peds/ped? pd other)
+                                car?  (traffic/traffic? tf other)]
                             (when prop?
                               (when-let [d (props/destroy! ps other)]
                                 (game/prop-wrecked! gm)
@@ -256,6 +279,10 @@
                                 (when-let [d (peds/kill! pd other [vx vy vz])]
                                   (game/ped-killed! gm)
                                   (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))))
+                            (when car?
+                              (let [[vx vy vz] (:vel (sim/telemetry s))]
+                                (when (traffic/wreck! tf other [vx vy vz])
+                                  (game/prop-wrecked! gm))))
                             ;; Pedestrians and clutter barely scratch the paint;
                             ;; terrain, buildings and other cars hit properly.
                             ;; Capped per event so one scrape spread over many
@@ -277,11 +304,13 @@
                                                  :canvas canvas :chunk-mgr mgr
                                                  :props-state ps :buildings-state bs
                                                  :furniture-state fu
+                                                 :traffic-state tf
+                                                 :birds-state bd
                                                  :peds-state pd :game gm
                                                  :controllers ctls :wrecked wrecked
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
-                                 :props ps :buildings bs :furniture fu :bridges br :flora fl :peds pd :game gm
+                                 :props ps :buildings bs :furniture fu :bridges br :flora fl :traffic tf :birds bd :peds pd :game gm
                                  :controllers ctls :wrecked wrecked :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"
