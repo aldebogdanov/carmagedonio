@@ -106,12 +106,52 @@
   [{:keys [^js damage]} amount]
   (aset damage 0 (min 1.0 (+ (aget damage 0) amount))))
 
+(defn forward-speed
+  "Signed metres per second along the chassis' forward axis."
+  [{:keys [^js body]}]
+  (let [^js lv (.linvel body)]
+    (qrot! s-fwd (.rotation body) 0.0 0.0 -1.0)
+    (+ (* (.-x lv) (aget s-fwd 0))
+       (* (.-y lv) (aget s-fwd 1))
+       (* (.-z lv) (aget s-fwd 2)))))
+
+(def ^:private creep 0.8)          ; m/s below which the car counts as stopped
+(def ^:private reverse-torque 0.55) ; reverse is geared lower than first
+(def ^:private reverse-max 11.0)    ; and runs out of gearing sooner, m/s
+
+(defn- gear-for
+  "Resolve the two pedals into a signed drive and a brake.
+
+  The car has a reverse gear, chosen the way an automatic chooses one: from how
+  fast it is already going, not from a separate control. Above walking pace the
+  brake pedal brakes; at rest it drives backwards; and once rolling backwards
+  the two pedals swap, so the throttle is what stops you.
+
+  This did not exist. The comment where reverse was supposed to happen claimed
+  that `the tyre model runs the wheels backwards under sustained braking from a
+  standstill`, but brake torque is clamped at zero angular velocity and never
+  takes it past -- so holding the brake against a wall did nothing at all, for
+  the player and for the AI backing out of whatever it had driven into."
+  [veh {:keys [throttle brake] :as cmd}]
+  (let [v (forward-speed veh)]
+    (cond
+      ;; Rolling forwards: everything as it was.
+      (> v creep)     (assoc cmd :drive throttle :brake brake)
+      ;; Rolling backwards: the pedals have swapped.
+      (< v (- creep)) (assoc cmd :drive (if (< (- v) reverse-max)
+                                          (* (- reverse-torque) brake)
+                                          0.0)
+                                 :brake throttle)
+      ;; Stopped: whichever pedal is down decides which way to go.
+      :else           (assoc cmd :drive (- throttle (* reverse-torque brake))
+                                 :brake 0.0))))
+
 ;; --- per-wheel step ---------------------------------------------------------
 
 (defn- step-wheel!
   [{:keys [^js world ^js body layout tuning omega susp susp-prev fz fx fy
            slip-a slip-r contact spin steer ^js damage]}
-   i dt {:keys [throttle brake handbrake]}]
+   i dt {:keys [drive brake handbrake]}]
   (let [{:keys [connections radius steered driven]} layout
         {:keys [suspension-rest spring-rate damper-compression damper-rebound
                 max-load nominal-load grip grip-rear-bias load-sensitivity
@@ -148,7 +188,7 @@
         (aset susp i suspension-rest)
         (aset fz i 0.0) (aset fx i 0.0) (aset fy i 0.0)
         (aset slip-a i 0.0) (aset slip-r i 0.0)
-        (let [drive (if (driven i) (* engine-torque throttle) 0.0)
+        (let [drive (if (driven i) (* engine-torque drive) 0.0)
               w     (+ (aget omega i) (/ (* drive dt) wheel-inertia))
               bt    (+ (* brake-torque brake)
                        (if (and handbrake (driven i)) handbrake-torque 0.0))
@@ -235,7 +275,7 @@
                           #js {:x cpx :y cpy :z cpz}
                           true)
         ;; --- wheel spin ---------------------------------------------------
-        (let [drive (if (driven i) (* engine-torque throttle) 0.0)
+        (let [drive (if (driven i) (* engine-torque drive) 0.0)
               react (* -1.0 fxv radius)
               w     (+ (aget omega i) (/ (* (+ drive react) dt) wheel-inertia))
               bt    (+ (* brake-torque brake)
@@ -275,22 +315,13 @@
                        (< target (- cur d)) (- cur d)
                        :else target)]
     (aset steer 0 next)
-    (dotimes [i 4] (step-wheel! veh i dt cmd))))
+    (dotimes [i 4] (step-wheel! veh i dt (gear-for veh cmd)))))
 
 (defn reset-state! [{:keys [omega susp susp-prev fz fx fy slip-a slip-r contact spin steer damage tuning]}]
   (let [rest (:suspension-rest @tuning)]
     (doseq [a [omega fz fx fy slip-a slip-r spin damage]] (.fill a 0))
     (.fill susp rest) (.fill susp-prev rest)
     (.fill contact 0) (.fill steer 0)))
-
-(defn forward-speed
-  "Signed metres per second along the chassis' forward axis."
-  [{:keys [^js body]}]
-  (let [^js lv (.linvel body)]
-    (qrot! s-fwd (.rotation body) 0.0 0.0 -1.0)
-    (+ (* (.-x lv) (aget s-fwd 0))
-       (* (.-y lv) (aget s-fwd 1))
-       (* (.-z lv) (aget s-fwd 2)))))
 
 (defn chassis-position [{:keys [^js body]}]
   (let [t (.translation body)] [(.-x t) (.-y t) (.-z t)]))

@@ -11,6 +11,7 @@
             [carmageddon.client.furniture :as furniture]
             [carmageddon.client.game :as game]
             [carmageddon.client.input :as input]
+            [carmageddon.client.minimap :as minimap]
             [carmageddon.client.net :as net]
             [carmageddon.client.overlay :as overlay]
             [carmageddon.client.parts :as parts]
@@ -108,8 +109,8 @@
 
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
-                                  birds-state peds-state overlay game controllers
-                                  wrecked remotes]}]
+                                  birds-state peds-state overlay minimap game
+                                  controllers wrecked remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -170,6 +171,11 @@
       :on-stats
       (fn [s]
         (reset! stats s)
+        ;; The map redraws at HUD rate. Twice a second is indistinguishable from
+        ;; sixty times a second for a map, and it rasterises 169 cells.
+        (let [[fx _ fz] (sim/forward-vector sim)]
+          (minimap/draw! minimap (sim/player-x sim) (sim/player-z sim)
+                         (js/Math.atan2 fx fz)))
         (let [tel  (sim/telemetry sim)
               slip (js/Math.abs (sim/sideslip-deg tel))
               cs   (chunks/stats chunk-mgr)
@@ -218,6 +224,7 @@
         fl        (parts/create (:world @s) (:scene rs))
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
+        mm        (minimap/create seed)
         ;; Outbreak is a property of the world, with a query parameter for
         ;; trying it without one -- the flag changes behaviour, not generation,
         ;; so the same seed makes the same city either way.
@@ -322,12 +329,13 @@
                                                  :traffic-state tf
                                                  :birds-state bd
                                                  :overlay ov
+                                                 :minimap mm
                                                  :peds-state pd :game gm
                                                  :controllers ctls :wrecked wrecked
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl :traffic tf :birds bd :peds pd
-                                 :overlay ov :game gm
+                                 :overlay ov :minimap mm :game gm
                                  :controllers ctls :wrecked wrecked :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"

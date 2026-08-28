@@ -94,9 +94,11 @@
   [tick {:keys [throttle brake steer handbrake reverse?]}]
   (input/->Command tick
                    (if reverse? 0.0 (or throttle 0.0))
-                   ;; Reverse is modelled as brake: the tyre model runs the
-                   ;; wheels backwards under sustained braking from a standstill,
-                   ;; so there is no separate gear to represent.
+                   ;; Reverse is the brake pedal held from a standstill, which
+                   ;; is what `vehicle/gear-for` turns into backwards drive. It
+                   ;; used to be claimed that the tyre model did this on its own;
+                   ;; it did not, and a stuck opponent simply sat there holding
+                   ;; the brake against whatever it had hit.
                    (if reverse? 1.0 (or brake 0.0))
                    (or steer 0.0)
                    (boolean handbrake)

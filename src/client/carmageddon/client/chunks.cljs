@@ -58,25 +58,50 @@
      :peds (unchecked-get r "peds")
      :furniture (unchecked-get r "furniture")}))
 
+(defn- worker-count
+  "How many chunk workers to run.
+
+  One less than the machine claims, so the main thread keeps a core to render
+  on, and capped: a chunk is about five milliseconds of work and the queue is
+  rarely more than a dozen deep, so more workers past this point buy nothing
+  and cost a copy of the generator each."
+  []
+  (let [n (or (.-hardwareConcurrency js/navigator) 2)]
+    (max 1 (min 4 (dec n)))))
+
 (defn worker-generator
-  "Generate chunks in a Web Worker. Requests are keyed by chunk coordinate so
-  replies can be matched to their promise -- the worker answers in order, but
-  relying on that would break the moment it grew a thread pool."
-  [url]
-  (let [w       (js/Worker. url)
-        pending (atom {})]
-    (set! (.-onmessage w)
-          (fn [e]
-            (let [d   (.-data e)
-                  key [(unchecked-get d "cx") (unchecked-get d "cz")]]
-              (when-let [resolve-fn (get @pending key)]
-                (swap! pending dissoc key)
-                (resolve-fn d)))))
-    (fn [seed cx cz]
-      (js/Promise.
-       (fn [resolve _reject]
-         (swap! pending assoc [cx cz] resolve)
-         (.postMessage w #js {:seed seed :cx cx :cz cz}))))))
+  "Generate chunks in a pool of Web Workers.
+
+  Requests are keyed by chunk coordinate so replies can be matched to their
+  promise: with a pool the answers genuinely do come back out of order, which is
+  exactly what the keying was there to allow. Work is handed to whichever worker
+  has the least outstanding, which with a queue this shallow is as good as any
+  scheduler would manage."
+  ([url] (worker-generator url (worker-count)))
+  ([url n]
+   (let [pending (atom {})
+         load    (atom (vec (repeat n 0)))
+         workers (mapv (fn [i]
+                         (let [w (js/Worker. url)]
+                           (set! (.-onmessage w)
+                                 (fn [e]
+                                   (let [d (.-data e)
+                                         key [(unchecked-get d "cx")
+                                              (unchecked-get d "cz")]]
+                                     (swap! load update i dec)
+                                     (when-let [resolve-fn (get @pending key)]
+                                       (swap! pending dissoc key)
+                                       (resolve-fn d)))))
+                           w))
+                       (range n))]
+     (fn [seed cx cz]
+       (js/Promise.
+        (fn [resolve _reject]
+          (let [i (apply min-key (fn [j] (nth @load j)) (range n))
+                ^js w (nth workers i)]
+            (swap! load update i inc)
+            (swap! pending assoc [cx cz] resolve)
+            (.postMessage w #js {:seed seed :cx cx :cz cz}))))))))
 
 (defn main-thread-generator
   "Same-thread fallback, used by tests and by anything running without a DOM."
@@ -99,19 +124,38 @@
          :on-physics-add on-physics-add :on-physics-remove on-physics-remove
          :loaded  {}         ; [cx cz] -> {:handle :collider :data}
          :loading #{}        ; [cx cz] currently being generated
-         :queue   []         ; [cx cz] wanted, nearest first
-         :centre  nil}))
+         :queue   []         ; [cx cz] wanted, most urgent first
+         :centre  nil
+         :last    nil}))     ; last position, for a heading
+
+(def ^:private lookahead
+  "How strongly to favour the direction of travel when ordering the queue.
+
+  At 150 km/h the chunk ahead is needed several seconds before the one to the
+  side, and both are the same distance away. This biases the ordering by where
+  the car is going rather than only by where it is, which costs one dot product
+  per chunk and is the difference between the world arriving before you and
+  arriving with you."
+  2.2)
 
 (defn- wanted
-  "Chunk coordinates within `radius` of the centre chunk, nearest first so the
-  ground under the player exists before the horizon does."
-  [[ccx ccz] radius]
-  (->> (for [dx (range (- radius) (inc radius))
-             dz (range (- radius) (inc radius))]
-         [(+ ccx dx) (+ ccz dz) (+ (* dx dx) (* dz dz))])
-       (filter (fn [[_ _ d2]] (<= d2 (* radius radius))))
-       (sort-by peek)
-       (mapv (fn [[x z _]] [x z]))))
+  "Chunk coordinates within `radius` of the centre chunk, in the order they are
+  wanted -- nearest first, and ahead before behind."
+  ([centre radius] (wanted centre radius 0.0 0.0))
+  ([[ccx ccz] radius vx vz]
+   (let [sp (js/Math.hypot vx vz)
+         [ux uz] (if (> sp 1.0) [(/ vx sp) (/ vz sp)] [0.0 0.0])
+         bias (* lookahead (min 1.0 (/ sp 25.0)))]
+     (->> (for [dx (range (- radius) (inc radius))
+                dz (range (- radius) (inc radius))]
+            (let [d2 (+ (* dx dx) (* dz dz))
+                  ;; Distance along the heading, in chunks; negative behind.
+                  along (+ (* dx ux) (* dz uz))]
+              [(+ ccx dx) (+ ccz dz) d2
+               (- (js/Math.sqrt d2) (* bias along))]))
+          (filter (fn [[_ _ d2 _]] (<= d2 (* radius radius))))
+          (sort-by peek)
+          (mapv (fn [[x z _ _]] [x z]))))))
 
 (defn- unload! [mgr key]
   (let [{:keys [^js world loaded on-remove on-physics-remove]} @mgr
@@ -180,17 +224,34 @@
       (.catch (fn [e] (swap! mgr update :loading disj key)
                 (js/console.error "chunk generation failed" (pr-str key) e)))))
 
+(def ^:private keep-slack
+  "Chunks are loaded at `radius` and only dropped past `radius + slack`.
+
+  Without the gap, driving along a chunk boundary loads and unloads the same
+  ring continuously -- every crossing throws away work that is wanted again a
+  second later. One chunk of hysteresis costs a few megabytes and removes the
+  thrash entirely."
+  1)
+
 (defn update!
   "Call once a frame with the player's world position. Recomputes the wanted set
-  when the player changes chunk, then loads at most a couple per frame."
+  when the player changes chunk, then tops up the workers."
   [mgr x z]
-  (let [{:keys [radius loaded centre]} @mgr
-        c (worldgen/chunk-of x z)]
+  (let [{:keys [radius loaded centre last]} @mgr
+        c (worldgen/chunk-of x z)
+        ;; Heading, from where the player was when this last ran. Frame-to-frame
+        ;; movement is small, so this is smooth enough to order a queue by.
+        [vx vz] (if last [(- x (nth last 0)) (- z (nth last 1))] [0.0 0.0])]
+    (swap! mgr assoc :last [x z])
     (when (not= c centre)
-      (let [want (wanted c radius)
-            want-set (set want)]
+      (let [want (wanted c radius (* 60.0 vx) (* 60.0 vz))
+            want-set (set want)
+            ;; Hysteresis: keep anything still within the slack ring, even
+            ;; though it is not being asked for.
+            keep? (fn [key] (or (want-set key)
+                                (near-centre? key c (+ radius keep-slack))))]
         (doseq [key (keys loaded)]
-          (when-not (want-set key) (unload! mgr key)))
+          (when-not (keep? key) (unload! mgr key)))
         (swap! mgr assoc
                :centre c
                :queue (vec (remove #(contains? (:loaded @mgr) %) want)))

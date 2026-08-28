@@ -47,6 +47,7 @@
 (defn- dget  [a i]   #?(:clj (aget ^doubles a i)            :cljs (aget a i)))
 (defn- iput! [a i v] #?(:clj (aset ^ints a i (int v))       :cljs (aset a i v)))
 (defn- iget  [a i]   #?(:clj (aget ^ints a i)               :cljs (aget a i)))
+(defn- fget  [a i]   #?(:clj (aget ^floats a i)             :cljs (aget a i)))
 (defn- dlen  [a]     #?(:clj (alength ^doubles a)           :cljs (.-length a)))
 
 (defn- grid-floor
@@ -622,6 +623,98 @@
 
 (defn crop-at [seed x z] (nth crop-names (field-index seed x z)))
 
+(defn industrialness
+  "A second field, independent of `urbanness`, that says where the works are.
+
+  Industry is not simply 'less city': it clusters, and it clusters at the edge
+  of a town rather than in the middle of it. Giving it its own field is what
+  stops factories being scattered through the housing."
+  [seed x z]
+  (let [d (* 3.5 k/chunk-size)]
+    (noise/fbm2d (+ seed 8123) (/ x d) (/ z d) 3)))
+
+;; --- what a place is --------------------------------------------------------
+
+(def area-kinds
+  "Coarse labels for a place, in the order a map legend would want them."
+  [:water :wild :woods :farm :village :suburb :industry :city :downtown])
+
+(def area-labels
+  {:water "water" :wild "wild" :woods "woods" :farm "farmland"
+   :village "village" :suburb "suburb" :industry "industrial"
+   :city "city" :downtown "downtown"})
+
+(defn area-kind
+  "What sort of place a chunk is, in one word.
+
+  Deliberately cheap: it samples the same fields the generator does -- how
+  built-up, how industrial, how wet, what is growing -- and none of the
+  geometry. A map can ask this about a hundred chunks at once, which is the
+  whole point, because the thing a player wants to know about the chunk two
+  kilometres away is exactly this and nothing else. Generating that chunk to
+  find out would cost six milliseconds; this costs four field samples."
+  [seed cx cz]
+  (let [x (* (+ cx 0.5) k/chunk-size)
+        z (* (+ cz 0.5) k/chunk-size)
+        u (urbanness seed x z)
+        ind (industrialness seed x z)]
+    (cond
+      (> (river seed x z) 0.55) :water
+      (and (> ind 0.68) (< 0.22 u 0.74)) :industry
+      (> u 0.82) :downtown
+      (> u 0.58) :city
+      (> u 0.34) :suburb
+      (> u 0.16) :village
+      (= :woodland (crop-at seed x z)) :woods
+      (> u 0.05) :farm
+      :else :wild)))
+
+(defn area-label [seed cx cz] (area-labels (area-kind seed cx cz)))
+
+(defn arterial-line?
+  "Is lattice line `i` a main road? Pure arithmetic on the index, so a map can
+  draw the road grid without generating a single street."
+  [i]
+  (= :arterial (line-class i)))
+
+
+(defn ground-sampler
+  "A function giving the height of the ground at a point.
+
+  The analytic form, for callers with no heightfield to hand."
+  [seed field]
+  (fn [x z] (first (surface seed field x z))))
+
+(defn heightfield-sampler
+  "A function giving the height of a chunk's *heightfield* at a point.
+
+  This is the surface the collider is built from and the mesh is drawn from, so
+  standing an object on it rather than on the analytic surface is not an
+  approximation -- it is the correction. The two differ by up to 0.14 m where
+  the grid cannot follow a road's edge, and that difference is exactly the gap
+  between where a lamp post looks like it is and where the car can drive.
+
+  It is also most of the cost of a chunk. Building corners alone asked the
+  analytic surface seven hundred times per chunk, each answer a road lookup plus
+  a four-octave fbm; this is four array reads. Outside the chunk it falls back,
+  because a prop may be flung past the edge of the plot that owns it."
+  [heights n x0 z0 step seed field]
+  (fn [x z]
+    (let [fx (/ (- x x0) step)
+          fz (/ (- z z0) step)]
+      (if (or (< fx 0.0) (< fz 0.0) (> fx (dec n)) (> fz (dec n)))
+        (first (surface seed field x z))
+        (let [i0 (long (floor fx)) j0 (long (floor fz))
+              i1 (min (dec n) (inc i0)) j1 (min (dec n) (inc j0))
+              tx (- fx i0) tz (- fz j0)
+              h00 (fget heights (+ (* i0 n) j0))
+              h10 (fget heights (+ (* i1 n) j0))
+              h01 (fget heights (+ (* i0 n) j1))
+              h11 (fget heights (+ (* i1 n) j1))
+              a (+ h00 (* (- h10 h00) tx))
+              b (+ h01 (* (- h11 h01) tx))]
+          (+ a (* (- b a) tz)))))))
+
 (defn chunk-of [x z]
   [(grid-floor x k/chunk-size) (grid-floor z k/chunk-size)])
 
@@ -952,6 +1045,8 @@
   roadside band is about 12 m wide out of 256."
   ([seed cx cz field] (chunk-props seed cx cz field (chunk-lines seed cx cz)))
   ([seed cx cz field owned]
+   (chunk-props seed cx cz field owned (ground-sampler seed field)))
+  ([seed cx cz field owned ground]
   ;; Bridges are skipped: `surface` under a span reports the riverbed, so a
   ;; barrel placed along one would sit in the water forty feet below the road.
   (let [lines (remove :bridge? owned)]
@@ -995,7 +1090,7 @@
                                   (<= (second (surface seed field cx' cz')) 0.85))
                             [cx' cz']
                             (recur (rest ms)))))
-                [y _] (surface seed field x z)]
+                y (ground x z)]
             (conj! out x) (conj! out y) (conj! out z)
             (conj! out yaw) (conj! out (double kind)) (conj! out scale)))
         (let [v (persistent! out)
@@ -1004,16 +1099,6 @@
           a))))))
 
 ;; --- blocks, lots and zoning ------------------------------------------------
-
-(defn industrialness
-  "A second field, independent of `urbanness`, that says where the works are.
-
-  Industry is not simply 'less city': it clusters, and it clusters at the edge
-  of a town rather than in the middle of it. Giving it its own field is what
-  stops factories being scattered through the housing."
-  [seed x z]
-  (let [d (* 3.5 k/chunk-size)]
-    (noise/fbm2d (+ seed 8123) (/ x d) (/ z d) 3)))
 
 (def ^:private lot-setback 2.4)    ; pavement between kerb and plot boundary
 (def ^:private open-setback 0.8)   ; where a block side has no street at all
@@ -1373,7 +1458,8 @@
 
   Both come out of the same pass over the chunk's plots, so the mass a player
   can see and the box they collide with cannot drift apart."
-  [seed cx cz field]
+  ([seed cx cz field] (chunk-structures seed cx cz field (ground-sampler seed field)))
+  ([seed cx cz field ground]
   (let [r     (prng/chunk-rng seed cx cz (+ 17 (:blocks k/salt)))
         boxes (transient [])
         parts (transient [])]
@@ -1397,7 +1483,7 @@
             corners [[bx bz]
                      [(- bx bhx) (- bz bhz)] [(+ bx bhx) (- bz bhz)]
                      [(- bx bhx) (+ bz bhz)] [(+ bx bhx) (+ bz bhz)]]
-            gy (reduce min (map (fn [[px pz]] (first (surface seed field px pz))) corners))]
+            gy (reduce min (map (fn [[px pz]] (ground px pz)) corners))]
         (conj! boxes bx) (conj! boxes gy) (conj! boxes bz)
         (conj! boxes bhx) (conj! boxes bhz) (conj! boxes hgt)
         (conj! boxes (double zi)) (conj! boxes yaw)
@@ -1422,7 +1508,7 @@
           pa (farray (count pv))]
       (dotimes [i (count bv)] (fput! ba i (nth bv i)))
       (dotimes [i (count pv)] (fput! pa i (nth pv i)))
-      {:buildings ba :parts pa})))
+      {:buildings ba :parts pa}))))
 
 (defn chunk-buildings
   "Coarse footprints only. Kept as its own name because the physics side and
@@ -1478,11 +1564,13 @@
   turns out to be."
   ([seed cx cz field] (chunk-peds seed cx cz field (chunk-lines seed cx cz)))
   ([seed cx cz field owned]
+   (chunk-peds seed cx cz field owned (ground-sampler seed field)))
+  ([seed cx cz field owned ground]
   (let [lines (remove :bridge? owned)
         r     (prng/chunk-rng seed cx cz (:peds k/salt))
         out   (transient [])
         emit  (fn [x z head speed kind]
-                (let [[y _] (surface seed field x z)]
+                (let [y (ground x z)]
                   (conj! out x) (conj! out y) (conj! out z)
                   (conj! out head) (conj! out speed)
                   (conj! out (double (kind-index kind)))))]
@@ -1675,8 +1763,9 @@
   it costs almost nothing, because the graph already knows the topology."
   ([seed cx cz field] (chunk-furniture seed cx cz field (chunk-lines seed cx cz)))
   ([seed cx cz field owned]
-  (let [out (transient [])
-        ground (fn [x z] (first (surface seed field x z)))]
+   (chunk-furniture seed cx cz field owned (ground-sampler seed field)))
+  ([seed cx cz field owned ground]
+  (let [out (transient [])]
     ;; Junction furniture.
     (doseq [{:keys [pos arms kind half offset] :as j} (chunk-junctions seed cx cz)]
       (let [[jx jz] pos
@@ -1815,15 +1904,14 @@
         ;; fifty streets six times and was, by the end, most of the cost of a
         ;; chunk.
         owned (chunk-lines seed cx cz)
-        props (chunk-props seed cx cz field owned)
-        {:keys [buildings parts]} (chunk-structures seed cx cz field)
-        peds  (chunk-peds seed cx cz field owned)
-        furniture (chunk-furniture seed cx cz field owned)
-        bridges (chunk-bridges seed cx cz owned)
-        flora (chunk-flora seed cx cz field)
-        traffic (chunk-traffic seed cx cz owned)
         heights (farray (* n n))
         colors  (farray (* n n 3))]
+    ;; The ground comes first, and everything else is then placed on it. That
+    ;; ordering is the point: the heightfield is what the collider is built from
+    ;; and what the mesh is drawn from, so a lamp post standing on it stands
+    ;; where the car can actually drive rather than up to 0.14 m away from it.
+    ;; It is also four array reads instead of a road lookup and a four-octave
+    ;; fbm, which is most of what a chunk used to cost.
     (dotimes [j n]                       ; j indexes z
       (dotimes [i n]                     ; i indexes x
         (let [x (+ x0 (* i step))
@@ -1842,10 +1930,6 @@
               ;; and if urban ground lands on the same value the streets vanish
               ;; into the pavement and a city reads as one flat slab.
               u    (urbanness seed x z)
-              ;; Pavement has to sit clearly *above* the asphalt in value. With
-              ;; streets 64 m apart most urban ground is near a road, and at the
-              ;; old spacing the two tints were close enough that a city read as
-              ;; one flat grey slab with buildings standing on it.
               tr   (+ tr (* u (- (* gr 1.34) tr)))
               tg   (+ tg (* u (- (* gr 0.98) tg)))
               tb   (+ tb (* u (- (* gr 1.46) tb)))
@@ -1864,15 +1948,23 @@
               tb   (* tb (+ 1.0 (* farm (- cb 1.0))))
               ;; Out in the country a lane is a dirt track and a main road is
               ;; still tarmac, which is what `paved` in the segment array is for.
-              dirt (* (- 1.0 u) (- 1.0 paved))
-              rr   (+ road-colour-r (* dirt (- track-colour-r road-colour-r)))
-              rg   (+ road-colour-g (* dirt (- track-colour-g road-colour-g)))
-              rb   (+ road-colour-b (* dirt (- track-colour-b road-colour-b)))
+              dirt-road (* (- 1.0 u) (- 1.0 paved))
+              rr   (+ road-colour-r (* dirt-road (- track-colour-r road-colour-r)))
+              rg   (+ road-colour-g (* dirt-road (- track-colour-g road-colour-g)))
+              rb   (+ road-colour-b (* dirt-road (- track-colour-b road-colour-b)))
               o    (* idx 3)]
           (fput! heights idx y)
           (fput! colors (+ o 0) (+ tr (* road (- rr tr))))
           (fput! colors (+ o 1) (+ tg (* road (- rg tg))))
           (fput! colors (+ o 2) (+ tb (* road (- rb tb)))))))
+    (let [ground (heightfield-sampler heights n x0 z0 step seed field)
+          props (chunk-props seed cx cz field owned ground)
+          {:keys [buildings parts]} (chunk-structures seed cx cz field ground)
+          peds  (chunk-peds seed cx cz field owned ground)
+          furniture (chunk-furniture seed cx cz field owned ground)
+          bridges (chunk-bridges seed cx cz owned)
+          flora (chunk-flora seed cx cz field)
+          traffic (chunk-traffic seed cx cz owned)]
     {:cx cx :cz cz :verts n :size k/chunk-size
      :origin [x0 z0]
      :heights heights
@@ -1885,7 +1977,7 @@
      :bridges bridges
      :flora flora
      :traffic traffic
-     :biome (biome seed cx cz)}))
+     :biome (biome seed cx cz)})))
 
 (defn spawn-point
   "Somewhere on the street network near the origin, and which way that street

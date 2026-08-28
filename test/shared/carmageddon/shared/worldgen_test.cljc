@@ -1152,3 +1152,62 @@
                       (let [kk (aget* a (+ 5 (* i w/ped-stride)))]
                         (and (<= 0 kk) (< kk (count w/ped-kinds)))))
                     (range (/ (alen* a) w/ped-stride))))))))
+
+;; --- standing on the ground the car drives on -------------------------------
+
+(defn- sample-heightfield
+  "Bilinear lookup into a chunk's heights, independently of the generator's own."
+  [{:keys [heights verts origin size]} x z]
+  (let [n verts
+        step (/ size (dec n))
+        [x0 z0] origin
+        fx (/ (- x x0) step)
+        fz (/ (- z z0) step)]
+    (when (and (<= 0.0 fx (dec n)) (<= 0.0 fz (dec n)))
+      (let [i0 (int (Math/floor fx)) j0 (int (Math/floor fz))
+            i1 (min (dec n) (inc i0)) j1 (min (dec n) (inc j0))
+            tx (- fx i0) tz (- fz j0)
+            h (fn [i j] (aget* heights (+ (* i n) j)))
+            a (+ (h i0 j0) (* (- (h i1 j0) (h i0 j0)) tx))
+            b (+ (h i0 j1) (* (- (h i1 j1) (h i0 j1)) tx))]
+        (+ a (* (- b a) tz))))))
+
+(deftest things-stand-on-the-heightfield-not-beside-it
+  (testing "the collider is built from the heightfield and the mesh is drawn
+            from it, so an object placed on the analytic surface instead can sit
+            up to 0.14 m from the ground the car can actually reach. Generating
+            the ground first and standing everything on it is both cheaper and
+            the correction."
+    (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
+          d (w/chunk-data seed cx cz)
+          check (fn [label arr stride xi yi zi]
+                  (let [errs (for [i (range (/ (alen* arr) stride))
+                                   :let [o (* i stride)
+                                         x (aget* arr (+ o xi))
+                                         z (aget* arr (+ o zi))
+                                         want (sample-heightfield d x z)]
+                                   :when want]
+                               (abs (- (aget* arr (+ o yi)) want)))]
+                    (when (seq errs)
+                      (is (< (apply max errs) 0.02)
+                          (str label " sat " (apply max errs)
+                               " m off the heightfield")))
+                    (count errs)))]
+      (is (pos? (check "props" (:props d) w/prop-stride 0 1 2)))
+      (is (pos? (check "peds" (:peds d) w/ped-stride 0 1 2))))))
+
+(deftest the-analytic-surface-and-the-heightfield-still-agree-closely
+  (testing "they are not the same function -- a 33-vertex grid cannot follow a
+            kerb -- but they must not have drifted apart"
+    (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
+          d (w/chunk-data seed cx cz)
+          field (w/road-field seed cx cz)
+          errs (for [i (range 2 31), j (range 2 31)
+                     :let [x (+ (* cx k/chunk-size) (* i 8.0))
+                           z (+ (* cz k/chunk-size) (* j 8.0))
+                           grid (sample-heightfield d x z)]
+                     :when grid]
+                 (abs (- grid (first (w/surface seed field x z)))))]
+      (is (seq errs))
+      (is (< (/ (reduce + errs) (count errs)) 0.15) "mean")
+      (is (< (apply max errs) 1.2) "worst case, at a kerb"))))
