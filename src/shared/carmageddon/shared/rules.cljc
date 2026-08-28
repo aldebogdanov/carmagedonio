@@ -13,9 +13,13 @@
 
 (def scoring
   "Points, and seconds bought. Pedestrians are worth real time; scenery is worth
-  almost none, so smashing crates cannot substitute for playing."
+  almost none, so smashing crates cannot substitute for playing.
+
+  A civilian car sits between the two: harder to hit than a crate and worth
+  going after, but not a rival, so it buys a second rather than a lap."
   {:ped   {:points 230 :seconds 3.0}
    :prop  {:points 25  :seconds 0.4}
+   :car   {:points 140 :seconds 1.6}
    :wreck {:points 900 :seconds 12.0}})
 
 (def start-seconds 90.0)
@@ -25,17 +29,22 @@
 ;; quicker. This wants a real session to settle, not more arithmetic.
 (def target-kills 25)
 
+(def tally-fields
+  "The countable things, and which scoring entry each one earns. Named once so
+  that adding a category cannot be half-done: score, clock and verification all
+  walk this."
+  {:peds :ped :props :prop :cars :car :wrecks :wreck})
+
+(defn- earned [tally attr]
+  (reduce + (for [[field entry] tally-fields]
+              (* (get tally field 0) (get-in scoring [entry attr])))))
+
 (defn score-for
   "The only correct score for a given tally. Both sides derive it from here."
-  [{:keys [peds props wrecks] :or {peds 0 props 0 wrecks 0}}]
-  (+ (* peds   (get-in scoring [:ped :points]))
-     (* props  (get-in scoring [:prop :points]))
-     (* wrecks (get-in scoring [:wreck :points]))))
+  [tally]
+  (earned tally :points))
 
-(defn seconds-earned [{:keys [peds props wrecks] :or {peds 0 props 0 wrecks 0}}]
-  (+ (* peds   (get-in scoring [:ped :seconds]))
-     (* props  (get-in scoring [:prop :seconds]))
-     (* wrecks (get-in scoring [:wreck :seconds]))))
+(defn seconds-earned [tally] (earned tally :seconds))
 
 (defn won? [{:keys [peds] :or {peds 0}}] (>= peds target-kills))
 
@@ -55,8 +64,8 @@
   outcome matches the target, and that the run did not last longer than the
   clock could possibly have allowed. Those catch a client that edits its score
   without also faking a coherent run around it."
-  [{:keys [score peds props wrecks elapsed state] :as run}]
-  (let [tally    (select-keys run [:peds :props :wrecks])
+  [{:keys [score peds elapsed state] :as run}]
+  (let [tally    (select-keys run (keys tally-fields))
         expected (score-for tally)
         cap      (max-elapsed tally)
         problems
@@ -80,6 +89,6 @@
           (conj {:field :elapsed :problem :longer-than-clock-allowed
                  :cap cap :got elapsed})
 
-          (some neg? (remove nil? [peds props wrecks]))
+          (some neg? (remove nil? (vals tally)))
           (conj {:field :tally :problem :negative}))]
     (when (seq problems) problems)))

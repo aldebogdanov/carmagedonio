@@ -104,3 +104,37 @@
                                              :score (rules/score-for tally)
                                              :elapsed 30.0 :state :lost}))))
     (is (= [7 3 1] (mapv :peds (:runs (:body (req :get (str "/api/worlds/" (:id w) "/leaderboard")))))))))
+
+(deftest overrides-are-the-authored-part-of-a-world
+  (testing "the graph a seed cannot derive: the handful of places somebody
+            decided should be somewhere in particular"
+    (let [w  (new-world)
+          id (:id w)]
+      (is (= :normal (:mode w)) "a world defaults to a normal one")
+      (is (= {} (:overrides w)))
+
+      (testing "setting one"
+        (let [r (req :post (str "/api/worlds/" id "/overrides")
+                     {[12 -4] {:landmark :stadium :name "The Bowl"}})]
+          (is (= 200 (:status r)))
+          (is (= :stadium (get-in r [:body :overrides [12 -4] :landmark])))))
+
+      (testing "and another does not drop the first"
+        (req :post (str "/api/worlds/" id "/overrides")
+             {[40 40] {:force-district :downtown}})
+        (let [r (req :get (str "/api/worlds/" id "/overrides"))]
+          (is (= #{[12 -4] [40 40]} (set (keys (get-in r [:body :overrides])))))))
+
+      (testing "nonsense is rejected"
+        (is (= 400 (:status (req :post (str "/api/worlds/" id "/overrides")
+                                 {:not-a-chunk {:landmark :x}})))))
+
+      (testing "and an unknown world is a 404"
+        (is (= 404 (:status (req :get "/api/worlds/w_nope/overrides"))))))))
+
+(deftest a-world-can-be-created-in-outbreak
+  (let [w (:body (req :post "/api/worlds" {:name "outbreak" :mode :outbreak}))]
+    (is (= :outbreak (:mode w)))
+    (testing "which changes behaviour, not generation -- the seed still decides
+              what gets built"
+      (is (int? (:seed w))))))

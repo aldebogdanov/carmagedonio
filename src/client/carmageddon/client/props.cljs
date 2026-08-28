@@ -6,12 +6,14 @@
   there are a couple of hundred of these at any moment, and giving each its own
   would leak GPU resources the same way per-chunk materials did.
 
-  Destruction is recorded as a sparse per-chunk delta (a set of prop indices)
-  rather than by mutating the chunk. That keeps generation pure: a chunk is
-  still a function of its seed, with a small overlay of what has happened to it.
-  It is also exactly the payload multiplayer will need to sync."
+  Destruction is recorded in the shared overlay rather than by mutating the
+  chunk. That keeps generation pure: a chunk is still a function of its seed,
+  with a small record of what has happened to it. It is also exactly the payload
+  multiplayer syncs, and exactly what a save file contains -- which is why there
+  is one overlay for the whole world rather than a delta map per subsystem."
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
+            [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
 (defn- kind-assets []
@@ -22,15 +24,15 @@
                                                       :shininess 4})}))
         worldgen/prop-kinds))
 
-(defn create [world scene]
+(defn create [world scene ov]
   (atom {:world world :scene scene
+         :overlay ov
          :assets (kind-assets)
          :chunks {}        ; [cx cz] -> [{:body :mesh :collider-handle :idx} ...]
          :by-collider {}   ; collider handle -> {:key :idx}
-         :deltas {}        ; [cx cz] -> #{destroyed prop index}
          :wrecked 0}))
 
-(defn destroyed [ps key] (get (:deltas @ps) key #{}))
+(defn destroyed [ps key] (overlay/destroyed (:overlay @ps) key :props))
 
 (defn- spawn-one!
   [ps key idx x y z yaw kind scale]
@@ -120,7 +122,7 @@
   take effect here even if that chunk is not currently loaded, which is why the
   delta is recorded unconditionally."
   [ps key idx]
-  (swap! ps update-in [:deltas key] (fnil conj #{}) idx)
+  (overlay/record! (:overlay @ps) key :props idx)
   (when-let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))]
     (despawn! ps p)
     (swap! ps (fn [st]
@@ -163,5 +165,4 @@
 
 (defn stats [ps]
   {:live (reduce + (map count (vals (:chunks @ps))))
-   :wrecked (:wrecked @ps)
-   :delta-chunks (count (:deltas @ps))})
+   :wrecked (:wrecked @ps)})

@@ -53,7 +53,26 @@
 ;; --- schemas ---------------------------------------------------------------
 
 (def NewWorld
-  [:map [:name {:optional true} :string] [:seed {:optional true} :int]])
+  [:map
+   [:name {:optional true} :string]
+   [:seed {:optional true} :int]
+   ;; A mode changes how a world behaves, never how it generates: the same seed
+   ;; builds the same city either way, and only what is walking about differs.
+   [:mode {:optional true} [:enum :normal :outbreak]]])
+
+(def Overrides
+  "The authored part of a world -- the places a seed alone would not put there.
+
+  Keyed by chunk, because that is the unit a client streams and therefore the
+  unit it can cheaply check. This is the answer to wanting a server-held graph
+  of the world: the graph itself is derivable from the seed and needs no
+  storage, and what genuinely cannot be derived is the handful of places
+  somebody decided should be somewhere in particular."
+  [:map-of [:tuple :int :int]
+   [:map
+    [:landmark {:optional true} :keyword]
+    [:force-district {:optional true} :keyword]
+    [:name {:optional true} :string]]])
 
 (def NewProfile
   [:map [:name [:string {:min 1 :max 40}]]])
@@ -65,6 +84,7 @@
    [:score :int]
    [:peds :int]
    [:props :int]
+   [:cars {:optional true} :int]
    [:wrecks :int]
    [:elapsed number?]
    [:state [:enum :won :lost :running]]])
@@ -142,13 +162,33 @@
                           (edn-response 201
                             (store/create-world!
                              st {:name (:name body "unnamed")
-                                 :seed (or (:seed body) (random-seed))})))))}]
+                                 :seed (or (:seed body) (random-seed))
+                                 :mode (:mode body :normal)
+                                 :overrides {}})))))}]
 
    ["/api/worlds/:id"
     {:get (fn [req]
             (if-let [w (store/get-world st (get-in req [:path-params :id]))]
               (edn-response w)
               (not-found :world)))}]
+
+   ["/api/worlds/:id/overrides"
+    {:get (fn [req]
+            (if-let [w (store/get-world st (get-in req [:path-params :id]))]
+              (edn-response {:world-id (:id w) :overrides (:overrides w {})})
+              (not-found :world)))
+     :post (fn [req]
+             (let [id (get-in req [:path-params :id])]
+               (if-not (store/get-world st id)
+                 (not-found :world)
+                 (let [body (read-body req)]
+                   (cond
+                     (= ::unreadable body) (bad-request [{:body :unreadable}])
+                     (not (m/validate Overrides body))
+                     (bad-request (me/humanize (m/explain Overrides body)))
+                     :else (edn-response
+                            {:world-id id
+                             :overrides (:overrides (store/set-overrides! st id body))}))))))}]
 
    ["/api/worlds/:id/leaderboard"
     {:get (fn [req]

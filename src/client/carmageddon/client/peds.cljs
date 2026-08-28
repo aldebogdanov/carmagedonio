@@ -13,6 +13,7 @@
   driving away and coming back does not resurrect anyone."
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
+            [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
 (def ^:private walk-every 3)     ; ticks between walk updates; velocity persists
@@ -52,9 +53,10 @@
   "`mode` is :normal or :outbreak. Outbreak does not change what is spawned --
   the same people are standing in the same places -- only what they do when a
   car comes near, and what colour they are while doing it."
-  ([world scene] (create world scene :normal))
-  ([world scene mode]
+  ([world scene ov] (create world scene ov :normal))
+  ([world scene ov mode]
    (atom {:world world :scene scene
+          :overlay ov
           :mode mode
           :outbreak? (= :outbreak mode)
           :assets (kind-assets (= :outbreak mode))
@@ -62,10 +64,9 @@
                                                         :shininess 2})
           :chunks {}         ; [cx cz] -> [ped ...]
           :by-collider {}    ; handle -> {:key :idx}
-          :deltas {}         ; [cx cz] -> #{killed index}
           :killed 0})))
 
-(defn killed-in [ps key] (get (:deltas @ps) key #{}))
+(defn killed-in [ps key] (overlay/destroyed (:overlay @ps) key :peds))
 
 (defn- spawn-one! [ps key idx x y z heading speed kind]
   (let [{:keys [^js world ^js scene assets]} @ps
@@ -170,7 +171,7 @@
   recorded even when that chunk is not loaded here, so it stays dead when the
   chunk arrives."
   [ps key idx impulse]
-  (swap! ps update-in [:deltas key] (fnil conj #{}) idx)
+  (overlay/record! (:overlay @ps) key :peds idx)
   (let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))]
     (when (and p (:alive? p))
       (let [^js body (:body p)

@@ -17,6 +17,7 @@
          :score     0
          :peds      0
          :props     0
+         :cars      0
          :wrecks    0
          :state     :running}))
 
@@ -28,6 +29,7 @@
                       (update :remaining + seconds))))))
 
 (defn ped-killed!  [game] (award! game :ped)  (swap! game update :peds inc))
+(defn car-wrecked! [game] (award! game :car)  (swap! game update :cars inc))
 (defn prop-wrecked! [game] (award! game :prop) (swap! game update :props inc))
 (defn opponent-wrecked! [game] (award! game :wreck) (swap! game update :wrecks inc))
 
@@ -50,7 +52,7 @@
 (defn running? [game] (= :running (:state @game)))
 
 (defn summary [game]
-  (let [{:keys [remaining score peds props wrecks state elapsed]} @game]
+  (let [{:keys [remaining score peds props cars wrecks state elapsed]} @game]
     {:state state
      :remaining remaining
      :elapsed elapsed
@@ -58,6 +60,7 @@
      :peds peds
      :target rules/target-kills
      :props props
+     :cars cars
      :wrecks wrecks}))
 
 (defn result
@@ -65,8 +68,8 @@
   than read out of the running total, so what is sent is what the rules say --
   the server checks exactly this."
   [game]
-  (let [{:keys [peds props wrecks elapsed state]} @game
-        tally {:peds peds :props props :wrecks wrecks}]
+  (let [{:keys [elapsed state] :as g} @game
+        tally (select-keys g (keys rules/tally-fields))]
     (assoc tally
            :score (rules/score-for tally)
            :elapsed elapsed

@@ -12,6 +12,7 @@
             [carmageddon.client.game :as game]
             [carmageddon.client.input :as input]
             [carmageddon.client.net :as net]
+            [carmageddon.client.overlay :as overlay]
             [carmageddon.client.parts :as parts]
             [carmageddon.client.peds :as peds]
             [carmageddon.client.props :as props]
@@ -87,7 +88,7 @@
 (defn- apply-inbound!
   "Drain the transport. Everything the network can say about the world arrives
   here: who moved, who left, and what got destroyed."
-  [transport remotes props-state peds-state now]
+  [transport remotes props-state peds-state traffic-state now]
   (doseq [msg (net/-poll! transport)]
     (case (:type msg)
       :welcome (remote/set-self! remotes (:player-id msg))
@@ -101,13 +102,14 @@
                  (case kind
                    :prop (props/destroy-index! props-state key index)
                    :ped  (peds/kill-index! peds-state key index [0.0 0.0 0.0])
+                   :car  (traffic/wreck-index! traffic-state key index)
                    nil))
       nil)))
 
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
-                                  birds-state peds-state game controllers wrecked
-                                  remotes]}]
+                                  birds-state peds-state overlay game controllers
+                                  wrecked remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -133,7 +135,8 @@
           ;; render rate.
           (when (zero? (mod tick snap-every))
             (net/-send! transport (wire/encode-state tick [(car-snapshot sim)])))
-          (apply-inbound! transport remotes props-state peds-state (js/Date.now))))
+          (apply-inbound! transport remotes props-state peds-state traffic-state
+                          (js/Date.now))))
 
       :on-frame
       (fn [alpha dt]
@@ -145,6 +148,11 @@
         ;; Deliberately not `sim/telemetry` -- that allocates a map and six
         ;; vectors, which is fine at HUD rate but not 60+ times a second.
         (chunks/update! chunk-mgr (sim/player-x sim) (sim/player-z sim))
+        ;; Where the car is and how bent it is belong in the overlay too, so a
+        ;; reload puts the player back rather than at the spawn. Debounced
+        ;; inside `save!`; this only reads a transform.
+        (overlay/set-vehicle! overlay (car-snapshot sim))
+        (overlay/save! overlay (js/Date.now))
         (props/sync! props-state)
         (traffic/sync! traffic-state)
         (birds/update! birds-state (* 0.001 (js/Date.now))
@@ -183,6 +191,7 @@
                        (if (pos? n) (str "   online " n) ""))
                      "   cam " (camera/labels (camera/mode (:camera-state rs)))
                      "   " (.toFixed (:fps s) 0) " fps"
+                     "   saved " (:bytes (overlay/stats overlay)) "B"
                      "   chunks " (:loaded cs) "/" (:colliders cs)
                      (when (pos? (:pending cs)) (str " (+" (:pending cs) ")"))))))})))
 
@@ -192,24 +201,27 @@
   [world profile]
   (let [seed      (:seed world fallback-seed)
         canvas    (js/document.getElementById "game")
+        mode      (or (:mode world)
+                      (if (.has (js/URLSearchParams. (.-search js/location))
+                                "outbreak")
+                        :outbreak :normal))
+        ;; One record of everything the seed does not already say. Restored
+        ;; before anything spawns, so a chunk that was cleared out stays cleared.
+        ov        (overlay/create seed mode)
+        restored  (overlay/load! ov seed)
         s         (sim/create! {:seed seed :opponents opponent-count})
         rs        (render/create! canvas s seed)
-        ps        (props/create (:world @s) (:scene rs))
+        ps        (props/create (:world @s) (:scene rs) ov)
         bs        (buildings/create (:world @s) (:scene rs) (:textures rs))
         fu        (furniture/create (:world @s) (:scene rs))
         br        (parts/create (:world @s) (:scene rs))
         fl        (parts/create (:world @s) (:scene rs))
-        tf        (traffic/create (:world @s) (:scene rs) seed)
+        tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
         ;; Outbreak is a property of the world, with a query parameter for
         ;; trying it without one -- the flag changes behaviour, not generation,
         ;; so the same seed makes the same city either way.
-        pd        (peds/create (:world @s) (:scene rs)
-                               (or (:mode world)
-                                   (if (.has (js/URLSearchParams.
-                                              (.-search js/location))
-                                             "outbreak")
-                                     :outbreak :normal)))
+        pd        (peds/create (:world @s) (:scene rs) ov mode)
         gm        (game/create)
         ctls      (vec (repeatedly opponent-count ai/controller))
         wrecked   (atom #{})
@@ -281,8 +293,11 @@
                                   (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))))
                             (when car?
                               (let [[vx vy vz] (:vel (sim/telemetry s))]
-                                (when (traffic/wreck! tf other [vx vy vz])
-                                  (game/prop-wrecked! gm))))
+                                (when-let [d (traffic/wreck! tf other [vx vy vz])]
+                                  (game/car-wrecked! gm)
+                                  (net/-send! transport
+                                              (wire/encode-delta
+                                               (assoc d :kind :car))))))
                             ;; Pedestrians and clutter barely scratch the paint;
                             ;; terrain, buildings and other cars hit properly.
                             ;; Capped per event so one scrape spread over many
@@ -306,11 +321,13 @@
                                                  :furniture-state fu
                                                  :traffic-state tf
                                                  :birds-state bd
+                                                 :overlay ov
                                                  :peds-state pd :game gm
                                                  :controllers ctls :wrecked wrecked
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
-                                 :props ps :buildings bs :furniture fu :bridges br :flora fl :traffic tf :birds bd :peds pd :game gm
+                                 :props ps :buildings bs :furniture fu :bridges br :flora fl :traffic tf :birds bd :peds pd
+                                 :overlay ov :game gm
                                  :controllers ctls :wrecked wrecked :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"
@@ -325,12 +342,16 @@
   Submission is fire-and-forget and failure is silent by design: losing the
   record of a run is a far smaller problem than interrupting the player to tell
   them about it, and without a backend there is nothing to submit to."
-  [game world profile]
+  [game world profile ov]
   (add-watch game ::submit
              (fn [_ _ old new]
                (when (and (= :running (:state old))
                           (not= :running (:state new)))
                  (remove-watch game ::submit)
+                 ;; The run is over: write the overlay out now rather than
+                 ;; waiting for the debounce, and keep the tally with it.
+                 (overlay/set-tally! ov (game/result game))
+                 (overlay/save! ov (js/Date.now) true)
                  ;; `submit-run!` returns nil rather than a promise when there
                  ;; is no world or profile to attach the run to, which is the
                  ;; normal offline case -- and chaining `.then` onto that threw
@@ -353,7 +374,7 @@
                      profile (aget pair 1)]
                  (-> (boot! world profile)
                      (.then (fn [_]
-                              (watch-for-end! (:game @app) world profile)))))))
+                              (watch-for-end! (:game @app) world profile (:overlay @app))))))))
       (.catch (fn [e] (js/console.error "boot failed" e)))))
 
 

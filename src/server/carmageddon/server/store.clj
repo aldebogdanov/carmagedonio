@@ -19,6 +19,7 @@
 (defprotocol Store
   (create-world!   [this world])
   (get-world       [this id])
+  (set-overrides!  [this id overrides])
   (list-worlds     [this])
   (create-profile! [this profile])
   (get-profile     [this id])
@@ -44,7 +45,15 @@
     :profile (let [p (assoc arg :id (new-id "p") :created-at (now))]
                [(assoc-in db [:profiles (:id p)] p) p])
     :run     (let [r (assoc arg :id (new-id "r") :submitted-at (now))]
-               [(assoc-in db [:runs (:id r)] r) r])))
+               [(assoc-in db [:runs (:id r)] r) r])
+    ;; Overrides are the authored part of a world: the places a seed alone
+    ;; would not put there. Merged rather than replaced, so setting one
+    ;; landmark does not silently drop the rest.
+    :overrides (let [[id ov] arg
+                     w (get-in db [:worlds id])]
+                 (when w
+                   (let [w' (update w :overrides merge ov)]
+                     [(assoc-in db [:worlds id] w') w'])))))
 
 (defn- top-runs [db world-id limit]
   (->> (vals (:runs db))
@@ -59,6 +68,9 @@
       (let [[db w] (apply-op @state :world world)]
         (reset! state db) (persist! db) w))
     (get-world [_ id] (get-in @state [:worlds id]))
+    (set-overrides! [_ id overrides]
+      (when-let [[db w] (apply-op @state :overrides [id overrides])]
+        (reset! state db) (persist! db) w))
     (list-worlds [_] (vec (sort-by :created-at (vals (:worlds @state)))))
     (create-profile! [_ profile]
       (let [[db p] (apply-op @state :profile profile)]

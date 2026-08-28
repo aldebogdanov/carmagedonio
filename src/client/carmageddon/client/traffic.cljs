@@ -19,6 +19,7 @@
   genuinely be too slow."
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
+            [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
 (def ^:private half [0.82 0.58 1.85])
@@ -41,8 +42,8 @@
   Object
   (toString [_] (str "Car " idx " " from "->" to)))
 
-(defn create [world scene seed]
-  (atom {:world world :scene scene :seed seed
+(defn create [world scene seed ov]
+  (atom {:world world :scene scene :seed seed :overlay ov
          :geometry (three/BoxGeometry. (* 2 (nth half 0)) (* 2 (nth half 1))
                                        (* 2 (nth half 2)))
          :material (three/MeshPhongMaterial. #js {:color 0xffffff :shininess 24
@@ -182,11 +183,15 @@
 
 (defn add-chunk! [ts key arr]
   (when (and arr (pos? (.-length arr)))
-    (let [{:keys [^js scene ^js geometry ^js material]} @ts
+    (let [{:keys [^js scene ^js geometry ^js material overlay]} @ts
+          gone (overlay/destroyed overlay key :cars)
           st worldgen/traffic-stride
           n (/ (.-length arr) st)
+          ;; A car smashed earlier stays smashed when its chunk comes back,
+          ;; exactly as a crate does.
           cars (into-array
                 (for [i (range n)
+                      :when (not (contains? gone i))
                       :let [o (* i st)]]
                   (spawn-one! ts key i
                               [(int (aget arr (+ o 0))) (int (aget arr (+ o 1)))]
@@ -308,12 +313,13 @@
 (defn traffic? [ts handle] (contains? (:by-collider @ts) handle))
 
 (defn wreck!
-  "Stop driving a car and let physics have it. Returns true if this was the hit
-  that did it."
+  "Stop driving a car and let physics have it. Returns the delta describing what
+  was wrecked, or nil if this was not the hit that did it."
   [ts handle impulse]
   (when-let [^Car c (get (:by-collider @ts) handle)]
     (when (.-alive? c)
       (set! (.-alive? c) false)
+      (overlay/record! (:overlay @ts) (.-key c) :cars (.-idx c))
       (let [^js body (.-body c)]
         (.setBodyType body (.-Dynamic RAPIER/RigidBodyType) true)
         (.applyImpulse body
@@ -322,7 +328,18 @@
                             :z (* 90.0 (nth impulse 2))}
                        true))
       (swap! ts update :wrecked inc)
-      true)))
+      {:cx (first (.-key c)) :cz (second (.-key c)) :index (.-idx c)})))
+
+(defn wreck-index!
+  "Wreck car `idx` of chunk `key` because someone else did. Recorded even when
+  that chunk is not loaded here, so it stays wrecked when it arrives."
+  [ts key idx]
+  (overlay/record! (:overlay @ts) key :cars idx)
+  (when-let [{:keys [cars]} (get (:chunks @ts) key)]
+    (doseq [c0 cars]
+      (let [^Car c c0]
+        (when (and (= idx (.-idx c)) (.-alive? c))
+          (wreck! ts (.-handle c) [0.0 0.0 0.0]))))))
 
 (defn stats [ts]
   (let [all (mapcat (fn [[_ v]] (seq (:cars v))) (:chunks @ts))]
