@@ -15,6 +15,7 @@
   ground instead does not work, because a 1.2 t block under realistic friction
   simply resists any force an engine could plausibly apply."
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
+            [carmageddon.client.cars :as cars]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.shared.worldgen :as worldgen]
             [carmageddon.shared.constants :as k]))
@@ -31,64 +32,15 @@
 
 ;; --- vehicle configuration --------------------------------------------------
 ;;
-;; M1 is where these get tuned until driving is fun. They are gathered here,
-;; named, and deliberately not spread through the code.
+;; What a vehicle *is* lives in `carmageddon.client.cars`: box, mass, wheels,
+;; gearing, bodywork. This namespace only knows that a vehicle has a layout and
+;; a tuning atom, which is what keeps a tractor and a muscle car running through
+;; exactly the same tyre model.
 
-(def chassis-half [0.9 0.30 1.9])
-(def ^:private chassis-density 292.0)   ; ~1200 kg for the box above
-
-;; Forward is -Z, so the front axle sits at negative z.
-(def wheel-connections
-  [[-0.85 -0.15 -1.35]     ; 0 front left
-   [ 0.85 -0.15 -1.35]     ; 1 front right
-   [-0.85 -0.15  1.35]     ; 2 rear left
-   [ 0.85 -0.15  1.35]])   ; 3 rear right
-
-(def wheel-radius 0.35)
-
-(def layout
-  {:connections wheel-connections
-   :radius      wheel-radius
-   :steered     #{0 1}
-   :driven      #{2 3}})
-
-(def tuning
-  "Live-adjustable so the testbed can sweep it and a tuning overlay can drive it
-  from the browser. Read fresh every tick, so a change takes effect immediately.
-
-  All SI. The magic-formula B/C/E constants shape the tyre curves: B is
-  stiffness (how fast force builds with slip), C the peak's shape, E how sharply
-  force falls away past the peak. Lower `grip` for a loose surface."
-  (atom
-   {;; suspension
-    :suspension-rest      0.32
-    :spring-rate          34000.0   ; N/m -- ~8.5 cm static sag at 1200 kg
-    :damper-compression   3000.0    ; N.s/m
-    :damper-rebound       4200.0
-    :max-load             20000.0   ; N, clamp against solver spikes
-    :nominal-load         2950.0    ; N, static load on one corner
-
-    ;; tyre
-    :grip                 1.60      ; peak mu; sweeps show slides sustain best here
-    ;; <1.0 makes the rear let go first. Measured: it tightens turn-in but
-    ;; shortens slides and costs acceleration, because the rear wheels are the
-    ;; driven ones. Left neutral; it is a lever, not a default.
-    :grip-rear-bias       1.0
-    :load-sensitivity     0.25      ; grip lost as a tyre is loaded past nominal
-    :lat-B  9.0   :lat-C  1.60  :lat-E  0.92   ; peak near 7.5 deg slip angle
-    :long-B 11.0  :long-C 1.65  :long-E 0.90   ; peak near 12% slip ratio
-
-    ;; drivetrain
-    :engine-torque        1200.0    ; N.m per driven wheel
-    :brake-torque         1800.0    ; N.m per wheel -- enough to lock
-    :handbrake-torque     2600.0
-    :wheel-inertia        1.4       ; kg.m^2
-    :rolling-resistance   0.6
-
-    ;; steering
-    :max-steer            0.55      ; radians at standstill
-    :steer-speed-falloff  0.016     ; authority lost per m/s
-    :steer-rate           6.0}))    ; radians/second of input travel
+(def chassis-half
+  "The reference car's box. Remote proxies are drawn with it until the wire
+  carries a vehicle kind."
+  (cars/half cars/default-kind))
 
 ;; --- construction -----------------------------------------------------------
 
@@ -127,17 +79,24 @@
   the rest are opponents, and they are identical in every other respect -- same
   tyre model, same tuning, same damage. An opponent that handled differently
   would be a different game."
-  [sim i]
+  [sim i kind]
   (let [{:keys [world bodies ^js by-collider]} @sim
         ^js body (aget bodies i)
-        v (vehicle/create world body layout tuning)]
+        v (vehicle/create world body (cars/layout kind) (cars/tuning kind))]
     (swap! sim update :vehicles (fnil conj []) v)
     ;; Contact events arrive as collider handles. Resolving one back to a
     ;; vehicle used to mean comparing against the player's handle and nothing
     ;; else, which is why an opponent could be driven into a wall all day
     ;; without ever being damaged.
     (.set by-collider (.-handle (.collider body 0)) (dec (count (:vehicles @sim))))
+    (swap! sim update :kinds conj kind)
     v))
+
+(defn kind-of
+  "Which catalogue entry vehicle `i` is. Presentation needs this to know what
+  shape to draw; the simulation never asks."
+  [sim i]
+  (nth (:kinds @sim) i))
 
 (defn vehicle-of-collider
   "Which vehicle that collider belongs to, or nil for scenery."
@@ -145,6 +104,16 @@
   (let [^js m (:by-collider @sim)
         v (.get m handle)]
     (when-not (undefined? v) v)))
+
+(defn- spawn-lift
+  "How far above the nominal spawn height a vehicle's chassis centre has to
+  start. The spawn is quoted for the reference car; a truck dropped at that
+  height starts with its axles underground and is fired into the air by the
+  solver on the first tick."
+  [kind]
+  (let [[_ hy _] (cars/half kind)
+        {:keys [rear-radius radius]} (:wheels (cars/spec kind))]
+    (max 0.0 (- (+ hy (or rear-radius radius)) 0.65))))
 
 (defn vehicles [sim] (:vehicles @sim))
 (defn opponent-count [sim] (max 0 (dec (count (:vehicles @sim)))))
@@ -161,7 +130,8 @@
   that measured braking on procedurally rolling terrain would be measuring the
   hill, not the tyres."
   ([] (create! {}))
-  ([{:keys [flat? seed opponents] :or {seed 0 opponents 0}}]
+  ([{:keys [flat? seed opponents kind rival-kinds]
+     :or   {seed 0 opponents 0 kind cars/default-kind}}]
    (let [[gx gy gz] k/gravity
          ^js world (RAPIER/World. (vec3 gx gy gz))
          spawn      (when-not flat? (worldgen/spawn-point seed))
@@ -187,31 +157,48 @@
                      :by-collider (js/Map.)
                      :player 0
                      :vehicles []
-                     :tick   0})]
+                     :kinds  []
+                     :tick   0})
+         ;; Rivals cycle through the catalogue rather than picking at random:
+         ;; three cars of the same kind is a duller field than three different
+         ;; ones, and a random draw produces that a fifth of the time.
+         rivals (or rival-kinds
+                    (mapv #(nth cars/kinds (mod (inc %) (count cars/kinds)))
+                          (range opponents)))]
      (set! (.-timestep world) k/dt)
      (when flat?
-       (.createCollider world (-> (.cuboid RAPIER/ColliderDesc 400.0 0.5 400.0)
+       ;; Twenty kilometres of it. The harness holds full throttle for a minute
+       ;; to find a top speed, and on the 800 m plate this used to have was off
+       ;; the edge and in free fall long before then -- which the measurement
+       ;; then reported as the top speed, because a tumbling car has plenty of
+       ;; velocity along its own nose.
+       (.createCollider world (-> (.cuboid RAPIER/ColliderDesc 20000.0 0.5 20000.0)
                                   (.setTranslation 0.0 -0.5 0.0)
                                   (.setFriction 1.0))))
      ;; Player must be entity 0.
-     (spawn-box! sim [sx sy sz] chassis-half
-                 {:density chassis-density :can-sleep false :events? true
+     (spawn-box! sim [sx (+ sy (spawn-lift kind)) sz] (cars/half kind)
+                 {:density (cars/density kind) :can-sleep false :events? true
                   :yaw spawn-yaw})
-     (build-vehicle! sim 0)
+     (build-vehicle! sim 0 kind)
      ;; Opponents queue up along the carriageway behind the player, two abreast.
      ;; They used to be scattered round a 9 m circle, which was fine when the
      ;; only scenery was the odd crate but drops half the field inside a
      ;; building now that blocks are built out to the pavement.
      (dotimes [i opponents]
-       (let [back (* (+ i 1) 8.0)
+       (let [rk   (nth rivals i)
+             ;; A lorry is seven metres long. Spacing the queue by a fixed
+             ;; eight put the truck's nose through the car in front of it.
+             back (reduce + 4.0 (map #(+ 3.0 (* 2.0 (nth (cars/half (nth rivals %)) 2)))
+                                     (range (inc i))))
              lat  (if (even? i) 2.4 -2.4)
              ox (+ sx (* (- fdx) back) (* (- fdz) lat))
              oz (+ sz (* (- fdz) back) (* fdx lat))
-             oy (if flat? 1.2 (+ 1.2 (worldgen/height-at seed ox oz)))]
-         (spawn-box! sim [ox oy oz] chassis-half
-                     {:density chassis-density :can-sleep false :events? true
+             oy (+ (if flat? 1.2 (+ 1.2 (worldgen/height-at seed ox oz)))
+                   (spawn-lift rk))]
+         (spawn-box! sim [ox oy oz] (cars/half rk)
+                     {:density (cars/density rk) :can-sleep false :events? true
                       :yaw spawn-yaw})
-         (build-vehicle! sim (inc i))))
+         (build-vehicle! sim (inc i) rk)))
      sim)))
 
 (defn entity-count [sim] (count (:halves @sim)))
@@ -237,15 +224,15 @@
         (aset curr (+ o 4) (.-y r))
         (aset curr (+ o 5) (.-z r))
         (aset curr (+ o 6) (.-w r))))
-    (let [steered (:steered layout)]
-      (dotimes [v (count vehicles)]
-        (let [{:keys [susp steer spin]} (nth vehicles v)
-              base (* v 4 wheel-stride)]
-          (dotimes [i 4]
-            (let [o (+ base (* i wheel-stride))]
-              (aset wheels (+ o 0) (aget susp i))
-              (aset wheels (+ o 1) (if (steered i) (aget steer 0) 0.0))
-              (aset wheels (+ o 2) (aget spin i)))))))))
+    (dotimes [v (count vehicles)]
+      (let [{:keys [susp steer spin layout]} (nth vehicles v)
+            steered (:steered layout)
+            base (* v 4 wheel-stride)]
+        (dotimes [i 4]
+          (let [o (+ base (* i wheel-stride))]
+            (aset wheels (+ o 0) (aget susp i))
+            (aset wheels (+ o 1) (if (steered i) (aget steer 0) 0.0))
+            (aset wheels (+ o 2) (aget spin i))))))))
 
 (defn- reset-player! [sim]
   (let [^js body (aget (:bodies @sim) 0)

@@ -133,7 +133,17 @@
   takes it past -- so holding the brake against a wall did nothing at all, for
   the player and for the AI backing out of whatever it had driven into."
   [veh {:keys [throttle brake] :as cmd}]
-  (let [v (forward-speed veh)]
+  (let [v    (forward-speed veh)
+        top  (:top-speed @(:tuning veh) 62.0)
+        ;; Gearing. Drive torque fades out as the vehicle approaches what its
+        ;; drivetrain is geared for, cubically so that it is barely felt until
+        ;; the last third. Without it a lorry and a hot rod converge on the same
+        ;; terminal speed, because past the tyres the only things resisting are
+        ;; rolling resistance and body damping and neither knows what it is
+        ;; pushing.
+        gear (let [r (/ (js/Math.abs v) top)]
+               (max 0.0 (- 1.0 (* r r r))))
+        throttle (* throttle gear)]
     (cond
       ;; Rolling forwards: everything as it was.
       (> v creep)     (assoc cmd :drive throttle :brake brake)
@@ -152,7 +162,8 @@
   [{:keys [^js world ^js body layout tuning omega susp susp-prev fz fx fy
            slip-a slip-r contact spin steer ^js damage]}
    i dt {:keys [drive brake handbrake]}]
-  (let [{:keys [connections radius steered driven]} layout
+  (let [{:keys [connections radii steered driven handbraked]} layout
+        radius (nth radii i)
         {:keys [suspension-rest spring-rate damper-compression damper-rebound
                 max-load nominal-load grip grip-rear-bias load-sensitivity
                 lat-B lat-C lat-E long-B long-C long-E
@@ -191,7 +202,7 @@
         (let [drive (if (driven i) (* engine-torque drive) 0.0)
               w     (+ (aget omega i) (/ (* drive dt) wheel-inertia))
               bt    (+ (* brake-torque brake)
-                       (if (and handbrake (driven i)) handbrake-torque 0.0))
+                       (if (and handbrake (handbraked i)) handbrake-torque 0.0))
               dw    (/ (* bt dt) wheel-inertia)
               w'    (cond
                       (<= (js/Math.abs w) dw) 0.0
@@ -279,7 +290,7 @@
               react (* -1.0 fxv radius)
               w     (+ (aget omega i) (/ (* (+ drive react) dt) wheel-inertia))
               bt    (+ (* brake-torque brake)
-                       (if (and handbrake (driven i)) handbrake-torque 0.0))
+                       (if (and handbrake (handbraked i)) handbrake-torque 0.0))
               dw    (/ (* bt dt) wheel-inertia)
               w'    (cond
                       (<= (js/Math.abs w) dw) 0.0

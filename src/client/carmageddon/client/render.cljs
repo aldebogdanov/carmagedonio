@@ -13,6 +13,7 @@
   Visuals stay cheap: flat shading, procedurally painted textures, no shadows."
   (:require ["three" :as three]
             [carmageddon.client.camera :as camera]
+            [carmageddon.client.cars :as cars]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.textures :as textures]
             [carmageddon.shared.constants :as k]))
@@ -22,10 +23,12 @@
 (defn- lerp [a b t] (+ a (* (- b a) t)))
 
 (defn- mat
-  ([tex] (mat tex false))
-  ([tex vertex-colors?]
-   (three/MeshPhongMaterial. #js {:map tex :shininess 6
-                                  :vertexColors vertex-colors?})))
+  ([tex] (mat tex false nil))
+  ([tex vertex-colors?] (mat tex vertex-colors? nil))
+  ([tex vertex-colors? colour]
+   (three/MeshPhongMaterial. (cond-> #js {:map tex :shininess 6
+                                          :vertexColors vertex-colors?}
+                               colour (doto (aset "color" colour))))))
 
 (defn- chunk-geometry
   "Build a BufferGeometry for one streamed chunk.
@@ -116,27 +119,67 @@
     (.add scene (three/HemisphereLight. 0xffffff 0x4a5240 1.0))
     scene))
 
+(def ^:private part-tints
+  "Bodywork that is not paint. Glass is dark and slightly blue; trim is the
+  bumpers, stacks and spoilers, which read best as near-black."
+  {:glass 0x1d2733
+   :trim  0x2b2b2e})
+
+(def ^:private rival-paint
+  "Rivals are painted from their own palette rather than their catalogue
+  colour, so a truck bearing down on you is distinguishable at a glance from
+  the traffic. Which one you are looking at is the map's job; *that it is
+  hostile* has to be readable from the mirror."
+  [0xd8722c 0x7d3fa8 0xb8322f 0x1c7d74 0xc9a227])
+
 (defn- build-wheels!
-  "Four cylinders parented to the chassis. Geometry is rotated onto the X axis
-  once, at build time, so the per-frame quaternion is just steer * spin."
-  [^js chassis-mesh tex]
-  (let [geom (doto (three/CylinderGeometry. sim/wheel-radius sim/wheel-radius 0.26 16)
-               (.rotateZ (/ js/Math.PI 2)))
-        m    (mat (:tyre tex))
-        out  (make-array 4)]
+  "Four cylinders parented to the chassis, sized per corner.
+
+  Geometry is rotated onto the X axis once, at build time, so the per-frame
+  quaternion is just steer * spin. Per corner rather than per car because the
+  tractor's back wheels are nearly twice the size of its front ones."
+  [^js chassis-mesh tex layout]
+  (let [{:keys [radii widths]} layout
+        m   (mat (:tyre tex))
+        out (make-array 4)]
     (dotimes [i 4]
-      (let [^js w (three/Mesh. geom m)]
+      (let [r (nth radii i)
+            geom (doto (three/CylinderGeometry. r r (nth widths i) 16)
+                   (.rotateZ (/ js/Math.PI 2)))
+            ^js w (three/Mesh. geom m)]
         (aset out i w)
         (.add chassis-mesh w)))
     out))
 
-(defn- build-meshes! [^js scene sim tex]
+(defn- build-body!
+  "The shapes bolted to the hull: cabin, bed sides, bull bar, exhaust stack.
+
+  A box is a box, and every vehicle in the catalogue was one until this
+  existed. The silhouette is what makes a truck read as a truck from behind the
+  wheel, and it costs four child meshes."
+  [^js chassis-mesh kind paint tex]
+  (doseq [[x y z hx hy hz tint] (:body (cars/spec kind))]
+    (let [^js m (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
+                             (if (= :paint tint)
+                               (mat (:body tex) false paint)
+                               (three/MeshPhongMaterial.
+                                #js {:color (part-tints tint) :shininess 24})))]
+      (.set (.-position m) x y z)
+      (.add chassis-mesh m))))
+
+(defn- build-meshes!
+  "One mesh tree per vehicle. Entities and vehicles are the same set: props,
+  buildings and traffic are all instanced elsewhere."
+  [^js scene sim tex]
   (let [meshes (make-array sim/max-entities)]
     (doseq [[i [hx hy hz]] (map-indexed vector (:halves @sim))]
-      (let [^js m (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
-                               ;; Opponents share the player's body texture; telling them apart is the
-        ;; camera's job, not the paintwork's.
-        (mat (:body tex)))]
+      (let [kind  (sim/kind-of sim i)
+            paint (if (zero? i)
+                    (cars/paint kind)
+                    (nth rival-paint (mod (dec i) (count rival-paint))))
+            ^js m (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
+                               (mat (:body tex) false paint))]
+        (build-body! m kind paint tex)
         (aset meshes i m)
         (.add scene m)))
     meshes))
@@ -160,8 +203,13 @@
      ;; without `camera` having to know that a simulation exists.
      :cast         (fn [ox oy oz dx dy dz d] (sim/cast-ray sim ox oy oz dx dy dz d))
      :meshes       meshes
-     ;; One set of wheels per vehicle, parented to that vehicle's chassis.
-     :wheel-meshes (mapv (fn [i] (build-wheels! (aget meshes i) tex))
+     ;; One set of wheels per vehicle, parented to that vehicle's chassis, plus
+     ;; that vehicle's own suspension mounts -- a lorry's are nowhere near a
+     ;; hatchback's, and one shared table put every wheel in the same place.
+     :wheel-meshes (mapv (fn [i] (build-wheels! (aget meshes i) tex
+                                                (cars/layout (sim/kind-of sim i))))
+                         (range (count (:vehicles @sim))))
+     :wheel-mounts (mapv (fn [i] (:connections (cars/layout (sim/kind-of sim i))))
                          (range (count (:vehicles @sim))))
      ;; Scratch objects, reused every frame rather than allocated.
      :q0      (three/Quaternion.)
@@ -190,15 +238,16 @@
       (set! (.-aspect camera) (/ w h))
       (.updateProjectionMatrix camera))))
 
-(defn- draw-wheels! [{:keys [wheel-meshes ^js qa ^js qb ^js axis-x ^js axis-y]} sim]
+(defn- draw-wheels! [{:keys [wheel-meshes wheel-mounts ^js qa ^js qb ^js axis-x ^js axis-y]} sim]
   (let [wheels (:wheels @sim)]
     (dotimes [v (count wheel-meshes)]
       (let [set-of (nth wheel-meshes v)
+            mounts (nth wheel-mounts v)
             base   (* v 4 sim/wheel-stride)]
         (dotimes [i 4]
           (let [o     (+ base (* i sim/wheel-stride))
                 ^js w (aget set-of i)
-                [cx cy cz] (nth sim/wheel-connections i)]
+                [cx cy cz] (nth mounts i)]
             ;; The wheel hangs below its chassis connection point by however far
             ;; the suspension is currently extended.
             (.set (.-position w) cx (- cy (aget wheels (+ o 0))) cz)

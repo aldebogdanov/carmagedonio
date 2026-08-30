@@ -8,7 +8,8 @@
   up as a diff rather than as a vague complaint three weeks later.
 
       npx shadow-cljs compile testbed && node target/testbed.js"
-  (:require [carmageddon.client.input :as input]
+  (:require [carmageddon.client.cars :as cars]
+            [carmageddon.client.input :as input]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.chunks :as chunks]
             ["@dimforge/rapier3d-compat" :as RAPIER]
@@ -32,11 +33,20 @@
         (recur (inc t) (inc i)))
       t)))
 
+(def ^:dynamic *kind*
+  "Which catalogue entry the manoeuvres are run against. A dynamic var rather
+  than an argument threaded through every manoeuvre: the manoeuvres are about
+  what a vehicle does, not about which one, and the vehicle under test is
+  exactly the kind of thing a binding is for."
+  cars/default-kind)
+
 (defn- fresh!
-  "A settled car on an empty plane."
+  "A settled car on an empty plane. Long enough for the suspension to stop
+  ringing, which for a lorry on 130 kN springs takes rather more than a
+  hatchback."
   []
-  (let [s (sim/create! {:flat? true})]
-    (step-n! s 0 90 {})
+  (let [s (sim/create! {:flat? true :kind *kind*})]
+    (step-n! s 0 150 {})
     s))
 
 (defn- speed-kmh [tel] (* 3.6 (js/Math.abs (:speed tel))))
@@ -71,6 +81,26 @@
           (> t 1800) {:seconds nil :top-speed-kmh (round 1 (speed-kmh tel))}
 
           :else (do (sim/step! s (command t {:throttle 1.0})) (recur (inc t))))))))
+
+(defn top-speed
+  "Full throttle until it stops accelerating. This is the number gearing is for:
+  without it every vehicle converges on the same terminal speed, because past
+  the tyres the only thing resisting is body damping.
+
+  Stops when a whole second of throttle is worth less than 0.05 m/s rather than
+  after a fixed run: a tractor is done in six seconds and a muscle car is not."
+  []
+  (let [s (fresh!)]
+    (loop [t 0, was 0.0]
+      (let [v (js/Math.abs (:speed (sim/telemetry s)))]
+        (cond
+          (and (pos? t) (zero? (mod t 60)) (< (- v was) 0.05))
+          {:kmh (round 1 (* 3.6 v))}
+
+          (> t 5400) {:kmh (round 1 (* 3.6 v)) :converged false}
+
+          :else (do (sim/step! s (command t {:throttle 1.0}))
+                    (recur (inc t) (if (zero? (mod t 60)) v was))))))))
 
 (defn brake-from
   "Accelerate to `from` km/h, then full brake to a stop."
@@ -120,12 +150,19 @@
                  (conj lat (lateral-g tel))
                  (conj slip (js/Math.abs (sim/sideslip-deg tel)))
                  (conj sp (planar-speed tel))))
-        {:target-kmh   target
-         :lateral-g    (round 2 (mean lat))
-         :sideslip-deg (round 1 (mean slip))
-         :radius-m     (round 1 (/ (* (mean sp) (mean sp)) (max 0.01 (* g (mean lat)))))
-         :sim          s
-         :tick         t}))))
+        ;; A car that has fallen over is producing no lateral grip and a
+        ;; radius of nothing, and reporting those as measurements makes a
+        ;; rollover look like understeer. The tractor does exactly this at
+        ;; full lock, which is the correct behaviour for a tractor.
+        (let [up (nth (:contact (sim/telemetry s)) 0)
+              on (sim/wheels-on-ground s)]
+          {:target-kmh   target
+           :lateral-g    (round 2 (mean lat))
+           :sideslip-deg (round 1 (mean slip))
+           :radius-m     (round 1 (/ (* (mean sp) (mean sp)) (max 0.01 (* g (mean lat)))))
+           :upright      (and up (>= on 3))
+           :sim          s
+           :tick         t})))))
 
 (defn friction-circle
   "The decisive test. Establish steady cornering, then add full braking.
@@ -263,6 +300,33 @@
   (line "heightfield" (heightfield-orientation))
   (println))
 
+(defn catalogue!
+  "Every vehicle in the catalogue, measured the same way.
+
+  The point of the table is that the rows differ. A catalogue where the truck
+  accelerates like the muscle car is a catalogue of one car wearing five hats,
+  and the only way to know which one you have is to measure it."
+  []
+  (println "\n=== catalogue ===")
+  ;; 0-40 and a 30 km/h skidpad, because the tractor is geared for 43 km/h and
+  ;; a table full of "-" measures nothing.
+  (println "  vehicle      mass-kg   0-40s   top-kmh   brake-m   lat-g   radius-m")
+  (doseq [kind cars/kinds]
+    (binding [*kind* kind]
+      (let [s    (fresh!)
+            mass (round 0 (.mass ^js (sim/chassis-body s)))
+            acc  (accelerate 40)
+            top  (top-speed)
+            brk  (brake-from 40)
+            pad  (skidpad 30 1.0)]
+        (println (str "  " (.padEnd (cars/display-name kind) 13)
+                      (.padEnd (str mass) 10)
+                      (.padEnd (str (or (:seconds acc) "-")) 8)
+                      (.padEnd (str (:kmh top)) 10)
+                      (.padEnd (str (:metres brk)) 10)
+                      (.padEnd (str (if (:upright pad) (:lateral-g pad) "roll")) 8)
+                      (str (if (:upright pad) (:radius-m pad) "-"))))))))
+
 (defn sweep!
   "Vary one tuning key and report what it does to grip and to slide behaviour.
   Sweeping beats guessing: the interesting number is not peak grip, it is
@@ -270,9 +334,9 @@
   [k values]
   (println (str "\n=== sweep " k " ==="))
   (println "  value   lat-g   radius   0-100   brake-m   peak-slip   slip-after-1.5s")
-  (let [original (get @sim/tuning k)]
+  (let [original (get @cars/base-tuning k)]
     (doseq [v values]
-      (swap! sim/tuning assoc k v)
+      (swap! cars/base-tuning assoc k v)
       (let [pad   (skidpad 60 1.0)
             hb    (handbrake-slide 60)
             acc   (accelerate 100)
@@ -285,12 +349,13 @@
                       (.padEnd (str (:metres brk)) 10)
                       (.padEnd (str (:peak-sideslip-deg hb)) 12)
                       (str (nth trace 3 "-"))))))
-    (swap! sim/tuning assoc k original)))
+    (swap! cars/base-tuning assoc k original)))
 
 (defn -main [& _]
   (-> (sim/init!)
       (.then (fn [_]
                (run-all!)
+               (catalogue!)
                (sweep! :grip [0.9 1.15 1.35 1.6 1.9])
                (sweep! :grip-rear-bias [1.0 0.96 0.92 0.88 0.84])
                (println)

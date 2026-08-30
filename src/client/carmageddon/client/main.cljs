@@ -2,6 +2,7 @@
   "Wiring only. Every subsystem is independently testable; this namespace exists
   to connect them and owns no game logic."
   (:require [carmageddon.client.api :as api]
+            [carmageddon.client.cars :as cars]
             [carmageddon.client.birds :as birds]
             [carmageddon.client.buildings :as buildings]
             [carmageddon.client.camera :as camera]
@@ -150,7 +151,9 @@
         ;; sixty times a second for a map, and it rasterises 169 cells.
         (let [[fx _ fz] (sim/forward-vector sim)]
           (minimap/draw! minimap (sim/player-x sim) (sim/player-z sim)
-                         (js/Math.atan2 fx fz)))
+                         (js/Math.atan2 fx fz)
+                         (when (minimap/rivals-shown? minimap)
+                           (rivals/blips rvs sim))))
         (let [tel  (sim/telemetry sim)
               slip (js/Math.abs (sim/sideslip-deg tel))
               cs   (chunks/stats chunk-mgr)
@@ -159,6 +162,7 @@
               pd   (peds/stats peds-state)
               dmg  (sim/damage sim)]
           (hud! (str (game/hud-line game)
+                     "   " (cars/display-name (sim/kind-of sim 0))
                      "   " (.toFixed (js/Math.abs (* 3.6 (:speed tel))) 0) " km/h"
                      "   " (sim/wheels-on-ground sim) "/4 down"
                      "   slip " (.toFixed slip 0) "\u00b0"
@@ -182,15 +186,19 @@
   [world profile]
   (let [seed      (:seed world fallback-seed)
         canvas    (js/document.getElementById "game")
+        params    (js/URLSearchParams. (.-search js/location))
         mode      (or (:mode world)
-                      (if (.has (js/URLSearchParams. (.-search js/location))
-                                "outbreak")
-                        :outbreak :normal))
+                      (if (.has params "outbreak") :outbreak :normal))
+        ;; Which car the player drives. A query parameter rather than a key,
+        ;; because swapping vehicles means rebuilding a rigid body and its mesh
+        ;; tree -- reasonable at boot, not mid-corner.
+        car       (let [k (keyword (.get params "car"))]
+                    (if (contains? cars/catalogue k) k cars/default-kind))
         ;; One record of everything the seed does not already say. Restored
         ;; before anything spawns, so a chunk that was cleared out stays cleared.
         ov        (overlay/create seed mode)
         restored  (overlay/load! ov seed)
-        s         (sim/create! {:seed seed :opponents opponent-count})
+        s         (sim/create! {:seed seed :opponents opponent-count :kind car})
         rs        (render/create! canvas s seed)
         ps        (props/create (:world @s) (:scene rs) ov)
         bs        (buildings/create (:world @s) (:scene rs) (:textures rs))
@@ -241,8 +249,9 @@
         ;; only the first becomes a `Command`, and a Command has to mean the
         ;; same thing whether a human, the AI or the network produced it.
         detach    (let [d-input (input/attach!)
-                        d-cam   (camera/attach! (:camera-state rs) canvas)]
-                    (fn [] (d-input) (d-cam)))
+                        d-cam   (camera/attach! (:camera-state rs) canvas)
+                        d-map   (minimap/attach! mm)]
+                    (fn [] (d-input) (d-cam) (d-map)))
         [sx _ sz] (:spawn @s)]
            ;; The one place physics impacts become gameplay.
            ;;
