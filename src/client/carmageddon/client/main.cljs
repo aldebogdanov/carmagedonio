@@ -7,6 +7,7 @@
             [carmageddon.client.buildings :as buildings]
             [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
+            [carmageddon.client.cockpit :as cockpit]
             [carmageddon.client.clock :as clock]
             [carmageddon.client.furniture :as furniture]
             [carmageddon.client.game :as game]
@@ -88,7 +89,7 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges rvs remotes]}]
+                                  bridges rvs cock remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -141,6 +142,25 @@
         (furniture/sync-signals! furniture-state (js/Date.now))
         (peds/sync! peds-state)
         (remote/sync! remotes (js/Date.now))
+        ;; The cluster repaints every frame. A needle that moves twice a second
+        ;; is not a speedometer, it is a readout with extra steps -- and the
+        ;; whole reason for drawing instruments is that their movement is what
+        ;; carries the value.
+        (let [v (sim/player-vehicle sim)
+              kind (sim/kind-of sim 0)]
+          (cockpit/draw!
+           cock
+           (cockpit/state-of
+            {:speed      (sim/player-speed sim)
+             :top-speed  (:top-speed @(cars/tuning kind) 62.0)
+             :panels     (vehicle/panels v)
+             :damage     (vehicle/damage v)
+             :game       (game/summary game)
+             :rivals     (rivals/alive rvs)
+             :wheels     (sim/wheels-on-ground sim)
+             :slip       (js/Math.abs (sim/sideslip-now sim))
+             :handbrake? (input/handbrake-held?)
+             :car        (cars/display-name kind)})))
         (render/draw! rs sim alpha dt))
 
       ;; HUD is updated twice a second, not per frame. UI state and sim state
@@ -156,39 +176,24 @@
                          (js/Math.atan2 fx fz)
                          (when (minimap/rivals-shown? minimap)
                            (rivals/blips rvs sim))))
-        (let [tel  (sim/telemetry sim)
-              slip (js/Math.abs (sim/sideslip-deg tel))
-              cs   (chunks/stats chunk-mgr)
-              ps   (props/stats props-state)
-              bs   (buildings/stats buildings-state)
-              pd   (peds/stats peds-state)
-              dmg  (sim/damage sim)]
-          (hud! (str (game/hud-line game)
-                     "   " (cars/display-name (sim/kind-of sim 0))
-                     "   " (.toFixed (js/Math.abs (* 3.6 (:speed tel))) 0) " km/h"
-                     "   " (sim/wheels-on-ground sim) "/4 down"
-                     "   slip " (.toFixed slip 0) "\u00b0"
-                     (cond (> slip 25) "  DRIFT" (> slip 8) "  loose" :else "")
-                     "   dmg " (.toFixed (* 100 dmg) 0) "%"
-                     ;; Which panel is worst, because that is what is
-                     ;; actually costing you: a folded nose is lost power
-                     ;; and lost brakes, a caved-in flank is a car that
-                     ;; pulls.
-                     (let [ps (vehicle/panels (sim/player-vehicle sim))
-                           [nm v] (apply max-key second
-                                         (map vector ["front" "rear" "left" "right"] ps))]
-                       (if (> v 0.15) (str " " nm " " (.toFixed (* 100 v) 0) "%") ""))
+        ;; Everything the cluster does not show. This is diagnostics -- counts,
+        ;; frame rate, how much of the world is loaded -- and it is deliberately
+        ;; small, dim and out of the way, because it used to sit in the same
+        ;; line and at the same weight as the player's remaining seconds.
+        (let [cs (chunks/stats chunk-mgr)
+              pd (peds/stats peds-state)]
+          (hud! (str (.toFixed (:fps s) 0) " fps"
+                     "   cam " (camera/labels (camera/mode (:camera-state rs)))
+                     "   chunks " (:loaded cs) "/" (:colliders cs)
+                     (when (pos? (:pending cs)) (str " (+" (:pending cs) ")"))
                      "   peds " (:people pd) "+" (:animals pd)
                      (if (= :outbreak (:mode pd)) " OUTBREAK" "")
                      "   cars " (:driving (traffic/stats traffic-state))
-                     "   rivals " (rivals/alive rvs)
+                     "   props " (:live (props/stats props-state))
+                     "   panels " (:smashed (parts/stats bridges))
                      (let [n (remote/count-players remotes)]
                        (if (pos? n) (str "   online " n) ""))
-                     "   cam " (camera/labels (camera/mode (:camera-state rs)))
-                     "   " (.toFixed (:fps s) 0) " fps"
-                     "   saved " (:bytes (overlay/stats overlay)) "B"
-                     "   chunks " (:loaded cs) "/" (:colliders cs)
-                     (when (pos? (:pending cs)) (str " (+" (:pending cs) ")"))))))})))
+                     "   saved " (:bytes (overlay/stats overlay)) "B"))))})))
 
 (defn- boot!
   "Build the world and start playing. `world` is the server's record of it, or
@@ -222,6 +227,7 @@
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
         mm        (minimap/create seed)
+        ck        (cockpit/create)
         ;; Outbreak is a property of the world, with a query parameter for
         ;; trying it without one -- the flag changes behaviour, not generation,
         ;; so the same seed makes the same city either way.
@@ -352,6 +358,7 @@
                                                  :furniture-state fu
                                                  :traffic-state tf
                                                  :bridges br
+                                                 :cock ck
                                                  :birds-state bd
                                                  :overlay ov
                                                  :minimap mm
@@ -361,7 +368,7 @@
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
                                  :landmarks lm :traffic tf :birds bd :peds pd
-                                 :overlay ov :minimap mm :game gm
+                                 :overlay ov :minimap mm :cockpit ck :game gm
                                  :rivals rvs :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"

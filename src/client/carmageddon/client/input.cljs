@@ -38,6 +38,12 @@
       (.removeEventListener js/window "keyup" on-up)
       (.removeEventListener js/window "blur" on-blur))))
 
+(defn handbrake-held?
+  "For the dashboard tell-tale. Reading raw key state is fine here and only
+  here: this never becomes a `Command`, so it cannot desync anything."
+  []
+  (down? :handbrake))
+
 (defn sample
   "Snapshot the current keyboard into an immutable command for `tick`.
 

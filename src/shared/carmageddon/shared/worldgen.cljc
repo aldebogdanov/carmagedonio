@@ -1440,21 +1440,22 @@
   (fn [kind _hx _hz _r] kind))
 
 (defmethod landmark-shapes :stadium [_ hx hz r]
-  (let [rx (* 0.80 hx) rz (* 0.80 hz)]
+  (let [rx (* 0.52 hx) rz (* 0.52 hz)]
     (concat
      [(apron hx hz :concrete)
-      ;; The pitch, and the running track around it.
-      (lp 0.0 0.12 0.0 0.0 (* 1.30 rx) 0.24 (* 1.30 rz) :cylinder :tarmac 0.0)
-      (lp 0.0 0.20 0.0 0.0 (* 1.05 rx) 0.24 (* 1.05 rz) :box :grass 0.0)]
-     ;; Stands: boxes laid tangentially round the bowl, leaning outward, so
-     ;; the silhouette from outside is a wall and from above it is a ring.
-     (for [[x z a] (ring 22 rx rz)]
-       (lp (* 1.35 x) 7.0 (* 1.35 z) a
-           (/ (* 0.34 (+ rx rz)) 2.0) 14.0 12.0 :box :concrete 1.0))
-     ;; Floodlights on the four corners.
-     (for [[x z _] (ring 4 (* 1.5 rx) (* 1.5 rz))]
+      ;; Track, then pitch inside it, and both ellipses. The pitch was a square
+      ;; box first and its corners came out through the track that was meant to
+      ;; be running round the outside of it.
+      (lp 0.0 0.14 0.0 0.0 (* 2.5 rx) 0.28 (* 2.5 rz) :cylinder :tarmac 0.0)
+      (lp 0.0 0.24 0.0 0.0 (* 2.0 rx) 0.30 (* 2.0 rz) :cylinder :grass 0.0)]
+     ;; Stands, laid tangentially and overlapping slightly, so the silhouette
+     ;; from outside is a wall and from above a ring.
+     (for [[x z a] (ring 24 (* 1.45 rx) (* 1.45 rz))]
+       (lp x 8.0 z a (* 0.30 (+ rx rz)) 16.0 13.0 :box :concrete 1.0))
+     ;; Floodlights, which is what makes it a stadium from three blocks away.
+     (for [[x z _] (ring 4 (* 1.75 rx) (* 1.75 rz))]
        (lp x 15.0 z 0.0 1.2 30.0 1.2 :cylinder :metal 1.0))
-     (for [[x z _] (ring 4 (* 1.5 rx) (* 1.5 rz))]
+     (for [[x z _] (ring 4 (* 1.75 rx) (* 1.75 rz))]
        (lp x 31.0 z 0.0 5.0 2.0 1.5 :box :white 0.0)))))
 
 (defmethod landmark-shapes :mall [_ hx hz r]

@@ -74,13 +74,3 @@
            :score (rules/score-for tally)
            :elapsed elapsed
            :state state)))
-
-(defn hud-line [game]
-  (let [{:keys [state remaining score peds target]} (summary game)]
-    (str (.toFixed remaining 1) "s"
-         "   " score " pts"
-         "   peds " peds "/" target
-         (case state
-           :won  "   *** WON ***"
-           :lost "   *** OUT OF TIME ***"
-           ""))))

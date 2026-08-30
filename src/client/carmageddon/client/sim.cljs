@@ -361,6 +361,24 @@
 (defn player-x [sim] (let [^js b (chassis-body sim)] (.-x (.translation b))))
 (defn player-z [sim] (let [^js b (chassis-body sim)] (.-z (.translation b))))
 
+(defn sideslip-now
+  "The same angle, read straight off the body.
+
+  `sideslip-deg` takes a telemetry map, which is right at HUD rate and wrong at
+  frame rate: the cluster wants this sixty times a second and telemetry
+  allocates a map and six vectors to produce it."
+  [sim]
+  (let [^js b (chassis-body sim)
+        ^js lv (.linvel b)
+        vx (.-x lv) vz (.-z lv)
+        sp (js/Math.hypot vx vz)]
+    (if (< sp 1.0)
+      0.0
+      (let [[fx _ fz] (forward-vector sim)]
+        (* (/ 180.0 js/Math.PI)
+           (js/Math.atan2 (- (* fx vz) (* fz vx))
+                          (+ (* fx vx) (* fz vz))))))))
+
 (defn sideslip-deg
   "Angle between where the car is pointing and where it is actually going.
   Near zero is gripping; large and steady is a drift; large and growing is a
