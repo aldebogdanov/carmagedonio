@@ -168,6 +168,14 @@
                      "   slip " (.toFixed slip 0) "\u00b0"
                      (cond (> slip 25) "  DRIFT" (> slip 8) "  loose" :else "")
                      "   dmg " (.toFixed (* 100 dmg) 0) "%"
+                     ;; Which panel is worst, because that is what is
+                     ;; actually costing you: a folded nose is lost power
+                     ;; and lost brakes, a caved-in flank is a car that
+                     ;; pulls.
+                     (let [ps (vehicle/panels (sim/player-vehicle sim))
+                           [nm v] (apply max-key second
+                                         (map vector ["front" "rear" "left" "right"] ps))]
+                       (if (> v 0.15) (str " " nm " " (.toFixed (* 100 v) 0) "%") ""))
                      "   peds " (:people pd) "+" (:animals pd)
                      (if (= :outbreak (:mode pd)) " OUTBREAK" "")
                      "   cars " (:driving (traffic/stats traffic-state))

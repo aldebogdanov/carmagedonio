@@ -11,6 +11,7 @@
   (:require [carmageddon.client.cars :as cars]
             [carmageddon.client.input :as input]
             [carmageddon.client.sim :as sim]
+            [carmageddon.client.vehicle :as vehicle]
             [carmageddon.client.chunks :as chunks]
             ["@dimforge/rapier3d-compat" :as RAPIER]
             [carmageddon.shared.worldgen :as worldgen]
@@ -300,6 +301,64 @@
   (line "heightfield" (heightfield-orientation))
   (println))
 
+(defn- hurt!
+  "A settled car with `panels` worth of damage already on it."
+  [panels total]
+  (let [s (fresh!)]
+    (vehicle/set-damage! (sim/player-vehicle s) panels total)
+    s))
+
+(defn damaged-run
+  "Full throttle in a straight line from a standstill, with no steering input
+  at all. Reports how long it takes to reach 40 km/h, how far it strays
+  sideways from the line it started on, and how far it then takes to stop."
+  [panels total]
+  (let [s (hurt! panels total)
+        [x0 _ z0] (:pos (sim/telemetry s))
+        [fx _ fz] (:forward (sim/telemetry s))
+        t40 (loop [t 0]
+              (cond (>= (speed-kmh (sim/telemetry s)) 40) t
+                    (> t 1800) nil
+                    :else (do (sim/step! s (command t {:throttle 1.0}))
+                              (recur (inc t)))))
+        t   (or t40 1800)
+        t   (step-n! s t 240 {:throttle 1.0})
+        [x _ z] (:pos (sim/telemetry s))
+        ;; Distance from the line the car set off along: the cross product of
+        ;; the travelled vector with the starting heading.
+        drift (js/Math.abs (- (* (- x x0) fz) (* (- z z0) fx)))
+        v0    (speed-kmh (sim/telemetry s))
+        stop  (loop [t t, i 0]
+                (if (or (< (speed-kmh (sim/telemetry s)) 1.0) (> i 900))
+                  i
+                  (do (sim/step! s (command t {:brake 1.0})) (recur (inc t) (inc i)))))]
+    {:seconds-to-40 (when t40 (round 2 (* t40 k/dt)))
+     :drift-m       (round 1 drift)
+     :from-kmh      (round 0 v0)
+     :stop-seconds  (round 2 (* stop k/dt))}))
+
+(defn damage!
+  "What being broken in each particular way actually costs.
+
+  A damage model whose panels all do the same thing is a scalar wearing four
+  hats. The columns are here so it can be seen not to be one."
+  []
+  (println "\n=== damage ===")
+  (println "  state           0-40s   drift-m   from-kmh   stop-s")
+  (doseq [[label panels total]
+          [["pristine"    [0.0 0.0 0.0 0.0] 0.0]
+           ["front 0.8"   [0.8 0.0 0.0 0.0] 0.5]
+           ["rear 0.8"    [0.0 0.8 0.0 0.0] 0.5]
+           ["left 0.8"    [0.0 0.0 0.8 0.0] 0.5]
+           ["right 0.8"   [0.0 0.0 0.0 0.8] 0.5]
+           ["all over"    [0.5 0.5 0.5 0.5] 0.9]]]
+    (let [r (damaged-run panels total)]
+      (println (str "  " (.padEnd label 16)
+                    (.padEnd (str (or (:seconds-to-40 r) "-")) 8)
+                    (.padEnd (str (:drift-m r)) 10)
+                    (.padEnd (str (:from-kmh r)) 11)
+                    (str (:stop-seconds r)))))))
+
 (defn catalogue!
   "Every vehicle in the catalogue, measured the same way.
 
@@ -356,6 +415,7 @@
       (.then (fn [_]
                (run-all!)
                (catalogue!)
+               (damage!)
                (sweep! :grip [0.9 1.15 1.35 1.6 1.9])
                (sweep! :grip-rear-bias [1.0 0.96 0.92 0.88 0.84])
                (println)

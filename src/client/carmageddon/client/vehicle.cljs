@@ -95,16 +95,34 @@
    :contact   (js/Uint8Array. 4)
    :spin      (js/Float64Array. 4)
    :steer     (js/Float64Array. 1)
-   ;; 0 = pristine, 1 = wrecked. Held here rather than in the sim so the vehicle
-   ;; model is self-contained and an AI or remote car carries its own.
-   :damage    (js/Float64Array. 1)})
+   ;; [front rear left right total], each 0 = pristine, 1 = destroyed. Held
+   ;; here rather than in the sim so the vehicle model is self-contained and an
+   ;; AI or remote car carries its own.
+   ;;
+   ;; The total is accumulated separately rather than derived from the panels.
+   ;; Deriving it means a car that has been hit hard in one place only and a car
+   ;; that has been hit everywhere lightly can come out the same, and they
+   ;; should not: the first still drives.
+   :damage    (js/Float64Array. 5)})
 
-(defn damage [{:keys [^js damage]}] (aget damage 0))
+(def ^:const dmg-front 0)
+(def ^:const dmg-rear  1)
+(def ^:const dmg-left  2)
+(def ^:const dmg-right 3)
+(def ^:const dmg-total 4)
 
-(defn add-damage!
-  "Accumulate impact damage, saturating at 1."
-  [{:keys [^js damage]} amount]
-  (aset damage 0 (min 1.0 (+ (aget damage 0) amount))))
+(defn damage
+  "How wrecked the car is overall, 0 to 1."
+  [{:keys [^js damage]}] (aget damage dmg-total))
+
+(defn panel
+  "One panel's damage: `dmg-front`, `dmg-rear`, `dmg-left` or `dmg-right`."
+  [{:keys [^js damage]} i] (aget damage i))
+
+(defn panels
+  "All four panels as a vector, for the HUD and the bodywork."
+  [{:keys [^js damage]}]
+  [(aget damage 0) (aget damage 1) (aget damage 2) (aget damage 3)])
 
 (defn forward-speed
   "Signed metres per second along the chassis' forward axis."
@@ -114,6 +132,56 @@
     (+ (* (.-x lv) (aget s-fwd 0))
        (* (.-y lv) (aget s-fwd 1))
        (* (.-z lv) (aget s-fwd 2)))))
+
+(defn- impact-panel
+  "Which panel took the hit, inferred from the direction the car was travelling
+  in its own frame.
+
+  A contact-force event carries a force magnitude and a pair of collider
+  handles -- not a contact point -- so where the car was hit has to be worked
+  out rather than read. Its own velocity is the right thing to work it out
+  from: driving into a wall is a front-end impact, reversing into a bollard is
+  a rear one, and being caught while sliding is a side one. It also agrees with
+  what the player will say happened, which matters more here than being right
+  about some grazing contact."
+  [{:keys [^js body]}]
+  (let [^js q  (.rotation body)
+        ^js lv (.linvel body)]
+    (qrot! s-fwd q 0.0 0.0 -1.0)
+    (qrot! s-right q 1.0 0.0 0.0)
+    (let [vf (+ (* (.-x lv) (aget s-fwd 0)) (* (.-y lv) (aget s-fwd 1))
+                (* (.-z lv) (aget s-fwd 2)))
+          vr (+ (* (.-x lv) (aget s-right 0)) (* (.-y lv) (aget s-right 1))
+                (* (.-z lv) (aget s-right 2)))]
+      (if (>= (js/Math.abs vf) (js/Math.abs vr))
+        (if (pos? vf) dmg-front dmg-rear)
+        (if (pos? vr) dmg-right dmg-left)))))
+
+(defn add-damage!
+  "Accumulate impact damage, saturating at 1.
+
+  The total takes all of it and decides when the car is written off; the panel
+  the car was moving into takes half again as much, so a driver who only ever
+  hits things nose-first cooks the engine well before the car is finished. A
+  car that has only ever been rear-ended still pulls."
+  [{:keys [^js damage] :as veh} amount]
+  (let [p (impact-panel veh)]
+    (aset damage dmg-total (min 1.0 (+ (aget damage dmg-total) amount)))
+    (aset damage p (min 1.0 (+ (aget damage p) (* 1.5 amount))))))
+
+(defn set-damage!
+  "Force the damage state: four panels and a total.
+
+  Gameplay damage always arrives through `add-damage!`, which decides for
+  itself which panel took it. This is for the measurement harness, which needs
+  to ask what a folded nose costs without having to arrange to crash into
+  something at exactly the right angle first."
+  [{:keys [^js damage]} [f r l rt] total]
+  (aset damage dmg-front f)
+  (aset damage dmg-rear  r)
+  (aset damage dmg-left  l)
+  (aset damage dmg-right rt)
+  (aset damage dmg-total total))
 
 (def ^:private creep 0.8)          ; m/s below which the car counts as stopped
 (def ^:private reverse-torque 0.55) ; reverse is geared lower than first
@@ -170,12 +238,23 @@
                 engine-torque brake-torque handbrake-torque
                 wheel-inertia rolling-resistance]} @tuning
         [cx cy cz] (nth connections i)
-        ;; A wrecked car should be a worse car: less power to the wheels and
-        ;; less adhesion. Both saturate well short of undriveable, because a
-        ;; car you cannot move is not fun, it is just over.
-        dmg    (aget damage 0)
-        engine-torque (* engine-torque (- 1.0 (* 0.55 dmg)))
-        grip          (* grip (- 1.0 (* 0.30 dmg)))
+        ;; A wrecked car should be a worse car, and it should be worse in the
+        ;; way it was broken. Everything here saturates well short of
+        ;; undriveable, because a car you cannot move is not a challenge, it is
+        ;; just the end of the run without the screen saying so.
+        dmg    (aget damage dmg-total)
+        front  (aget damage dmg-front)
+        ;; The engine and the radiator are at the front, so that is what costs
+        ;; power. Broad damage costs some anyway -- a bent shell drags.
+        engine-torque (* engine-torque
+                         (- 1.0 (* 0.35 dmg))
+                         (- 1.0 (* 0.40 front)))
+        ;; Brake lines and discs are behind the same bumper.
+        brake-torque  (* brake-torque (- 1.0 (* 0.30 front)))
+        ;; Wheels 0 and 2 are the left pair; a caved-in flank ruins the
+        ;; geometry on that side and the tyres on it stop working properly.
+        side   (aget damage (if (even? i) dmg-left dmg-right))
+        grip          (* grip (- 1.0 (* 0.22 dmg)) (- 1.0 (* 0.28 side)))
         ^js q  (.rotation body)
         ^js p  (.translation body)
         theta  (if (steered i) (aget steer 0) 0.0)
@@ -304,7 +383,7 @@
 (defn update!
   "Advance steering and apply all four wheels' forces for this tick. Must run
   before `world.step`, because the forces it adds are consumed by that step."
-  [{:keys [steer tuning] :as veh} cmd dt]
+  [{:keys [steer tuning ^js damage] :as veh} cmd dt]
   (let [{:keys [max-steer steer-speed-falloff steer-rate]} @tuning
         ^js body (:body veh)
         ;; Rapier's addForce accumulator persists across steps until cleared --
@@ -317,11 +396,21 @@
         ;; Steering authority falls off with speed, otherwise the car spins the
         ;; moment it has any pace.
         limit    (* max-steer (max 0.25 (- 1.0 (* steer-speed-falloff speed))))
+        ;; A car with one flank caved in pulls towards the damage: that side
+        ;; is dragging and the geometry on it is bent. Added to the input
+        ;; rather than to the output so it is limited by the same lock the
+        ;; driver has, and so full opposite lock can still hold it straight --
+        ;; which is the point. It should cost attention, not control.
+        ;; 0.22 was the first guess and it was far too much: the harness put
+        ;; a car with one flank in at 62 m off its own line in four seconds,
+        ;; which is not a car that pulls, it is a car that turns.
+        pull     (* 0.10 (- (aget damage dmg-right) (aget damage dmg-left)))
         ;; Negated: a positive rotation about +Y swings a -Z-facing car left,
         ;; and input +1 means "right".
-        target   (* limit (- (:steer cmd)))
+        target   (* limit (- (max -1.0 (min 1.0 (+ (:steer cmd) pull)))))
         cur      (aget steer 0)
-        d        (* steer-rate dt max-steer)
+        ;; Bent steering is slow steering.
+        d        (* steer-rate dt max-steer (- 1.0 (* 0.35 (aget damage dmg-total))))
         next     (cond (> target (+ cur d)) (+ cur d)
                        (< target (- cur d)) (- cur d)
                        :else target)]
