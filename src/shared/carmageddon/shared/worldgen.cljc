@@ -1979,6 +1979,49 @@
      :traffic traffic
      :biome (biome seed cx cz)})))
 
+(defn road-point-near
+  "A point on the street network near `[x z]`, and which way that street runs:
+  `{:pos [x y z] :dir [dx dz]}`, or nil if no chunk within `rings` owns a road.
+
+  Rings outward from the chunk the point is in rather than sampling around it: a
+  chunk in open country may own no street at all, and the nearest one can be
+  several hundred metres away.
+
+  The point returned is the *middle* of a street, never an end. That is not
+  cosmetic -- whatever is placed here is placed facing along `dir` and usually
+  has other things queued up behind it, and a point chosen near a junction puts
+  those on the pavement."
+  ([seed x z] (road-point-near seed x z 4))
+  ([seed x z rings]
+   (let [[cx0 cz0] (chunk-of x z)
+         ring (for [d (range 0 rings)
+                    dx (range (- d) (inc d))
+                    dz (range (- d) (inc d))
+                    :when (= d (max (abs dx) (abs dz)))]
+                [(+ cx0 dx) (+ cz0 dz)])
+         ;; Bridge decks are excluded: a car dropped onto one lands on a
+         ;; structure that only exists while that chunk is loaded.
+         streets (fn [[cx cz]] (seq (remove :bridge? (chunk-lines seed cx cz))))]
+     (when-let [ss (first (keep streets ring))]
+       (let [;; Nearest by midpoint, so a rival respawned "near the player"
+             ;; arrives on the closest street rather than an arbitrary one.
+             mid   (fn [{:keys [points]}]
+                     (let [i0 (max 0 (dec (quot (count points) 2)))
+                           i1 (min (dec (count points)) (inc i0))]
+                       [(nth points i0) (nth points i1)]))
+             best  (apply min-key
+                          (fn [s]
+                            (let [[[ax az] [bx bz]] (mid s)]
+                              (hypot (- (* 0.5 (+ ax bx)) x)
+                                     (- (* 0.5 (+ az bz)) z))))
+                          ss)
+             [[ax az] [bx bz]] (mid best)
+             px  (* 0.5 (+ ax bx))
+             pz  (* 0.5 (+ az bz))
+             len (max 1e-6 (hypot (- bx ax) (- bz az)))]
+         {:pos [px (+ 1.2 (height-at seed px pz)) pz]
+          :dir [(/ (- bx ax) len) (/ (- bz az) len)]})))))
+
 (defn spawn-point
   "Somewhere on the street network near the origin, and which way that street
   runs: {:pos [x y z] :dir [dx dz]}.
@@ -1989,20 +2032,7 @@
 
   Takes a street rather than a lattice node: a node can be a dead end in sparse
   country, whereas the middle of a street that exists is by definition on a
-  road. Chunks are searched outward because a wilderness chunk may own none."
+  road."
   [seed]
-  (let [rings (for [d (range 0 8), cx (range (- d) (inc d)), cz (range (- d) (inc d))
-                    :when (= d (max (abs cx) (abs cz)))]
-                [cx cz])
-        on-land (fn [[cx cz]] (seq (remove :bridge? (chunk-lines seed cx cz))))
-        [cx cz] (or (first (filter on-land rings)) [0 0])
-        pts  (:points (first (remove :bridge? (chunk-lines seed cx cz))))
-        i0   (max 0 (dec (quot (count pts) 2)))
-        i1   (min (dec (count pts)) (inc i0))
-        [ax az] (nth pts i0)
-        [bx bz] (nth pts i1)
-        x  (* 0.5 (+ ax bx))
-        z  (* 0.5 (+ az bz))
-        len (max 1e-6 (hypot (- bx ax) (- bz az)))]
-    {:pos [x (+ 1.2 (height-at seed x z)) z]
-     :dir [(/ (- bx ax) len) (/ (- bz az) len)]}))
+  (or (road-point-near seed 0.0 0.0 8)
+      {:pos [0.0 (+ 1.2 (height-at seed 0.0 0.0)) 0.0] :dir [0.0 -1.0]}))

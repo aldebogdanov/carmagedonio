@@ -128,10 +128,23 @@
   tyre model, same tuning, same damage. An opponent that handled differently
   would be a different game."
   [sim i]
-  (let [{:keys [world bodies]} @sim
-        v (vehicle/create world (aget bodies i) layout tuning)]
+  (let [{:keys [world bodies ^js by-collider]} @sim
+        ^js body (aget bodies i)
+        v (vehicle/create world body layout tuning)]
     (swap! sim update :vehicles (fnil conj []) v)
+    ;; Contact events arrive as collider handles. Resolving one back to a
+    ;; vehicle used to mean comparing against the player's handle and nothing
+    ;; else, which is why an opponent could be driven into a wall all day
+    ;; without ever being damaged.
+    (.set by-collider (.-handle (.collider body 0)) (dec (count (:vehicles @sim))))
     v))
+
+(defn vehicle-of-collider
+  "Which vehicle that collider belongs to, or nil for scenery."
+  [sim handle]
+  (let [^js m (:by-collider @sim)
+        v (.get m handle)]
+    (when-not (undefined? v) v)))
 
 (defn vehicles [sim] (:vehicles @sim))
 (defn opponent-count [sim] (max 0 (dec (count (:vehicles @sim)))))
@@ -170,6 +183,8 @@
                      :spawn  [sx sy sz]
                      :events (RAPIER/EventQueue. true)
                      :on-impact nil
+                     ;; collider handle -> vehicle index
+                     :by-collider (js/Map.)
                      :player 0
                      :vehicles []
                      :tick   0})]
@@ -273,6 +288,24 @@
 
 (defn player-vehicle [sim] (first (:vehicles @sim)))
 
+(defn vehicle-body ^js [sim i] (aget (:bodies @sim) i))
+
+(defn place-vehicle!
+  "Put vehicle `i` down at `[x y z]` facing `yaw`, stationary.
+
+  Damage is deliberately kept: a rival that has been leashed back to the player
+  is the same car that was just being shot at, not a new one."
+  [sim i [x y z] yaw]
+  (let [^js body (aget (:bodies @sim) i)]
+    (.setTranslation body (vec3 x y z) true)
+    (.setRotation body #js {:x 0.0 :y (js/Math.sin (* 0.5 yaw))
+                            :z 0.0 :w (js/Math.cos (* 0.5 yaw))} true)
+    (.setLinvel body (vec3 0 0 0) true)
+    (.setAngvel body (vec3 0 0 0) true)
+    (.resetForces body true)
+    (.resetTorques body true)
+    (vehicle/clear-motion! (nth (:vehicles @sim) i))))
+
 (defn player-speed
   "Signed metres per second along the vehicle's forward axis."
   [sim]
@@ -326,10 +359,6 @@
      :slip-angle  (vec (array-seq slip-a))
      :slip-ratio  (vec (array-seq slip-r))
      :contact     (mapv pos? (array-seq contact))}))
-
-(defn chassis-collider-handle [sim]
-  (let [^js b (chassis-body sim)]
-    (.-handle (.collider b 0))))
 
 (defn damage [sim] (vehicle/damage (player-vehicle sim)))
 

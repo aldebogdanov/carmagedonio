@@ -352,6 +352,34 @@
           (is (= 1.0 (second (w/surface seed (w/road-field seed ocx ocz) ox oz)))
               (str d " m back was not on the carriageway")))))))
 
+(deftest a-road-can-be-found-near-anywhere
+  (testing "wherever you are, there is a carriageway within a few chunks"
+    (doseq [[x z] [[0.0 0.0] [1500.0 -900.0] [-4200.0 3100.0] [640.0 640.0]]]
+      (let [{:keys [pos dir]} (w/road-point-near seed x z)
+            [px _ pz] pos
+            [cx cz] (w/chunk-of px pz)]
+        (is (some? pos) (str "no road near " x "," z))
+        (is (= 1.0 (second (w/surface seed (w/road-field seed cx cz) px pz)))
+            "the point returned is on the carriageway")
+        (is (< (abs (- 1.0 (Math/sqrt (+ (* (first dir) (first dir))
+                                         (* (second dir) (second dir))))))
+               1e-9))
+        ;; Rivals respawn here and queue up behind, so the road has to keep
+        ;; going. This is the property that picking street *middles* buys.
+        (doseq [d [8.0 16.0]]
+          (let [ox (- px (* (first dir) d)) oz (- pz (* (second dir) d))
+                [ocx ocz] (w/chunk-of ox oz)]
+            (is (= 1.0 (second (w/surface seed (w/road-field seed ocx ocz) ox oz)))
+                (str d " m back was not on the carriageway")))))))
+
+  (testing "and it is a road near *there*, not near the origin"
+    (let [{:keys [pos]} (w/road-point-near seed 3000.0 -2000.0)
+          [px _ pz] pos]
+      (is (< (Math/sqrt (+ (* (- px 3000.0) (- px 3000.0))
+                           (* (- pz -2000.0) (- pz -2000.0))))
+             (* 4 w/street-spacing))
+          "should land within a couple of blocks of where it was asked"))))
+
 ;; --- clutter ----------------------------------------------------------------
 
 (deftest props-are-deterministic-and-roadside

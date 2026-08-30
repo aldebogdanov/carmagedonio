@@ -317,11 +317,19 @@
     (aset steer 0 next)
     (dotimes [i 4] (step-wheel! veh i dt (gear-for veh cmd)))))
 
-(defn reset-state! [{:keys [omega susp susp-prev fz fx fy slip-a slip-r contact spin steer damage tuning]}]
+(defn clear-motion!
+  "Everything about how the car is moving, zeroed. Damage is not motion and is
+  deliberately left alone -- this is what a car being picked up and put down
+  somewhere else needs, and a leashed rival keeps its dents."
+  [{:keys [omega susp susp-prev fz fx fy slip-a slip-r contact spin steer tuning]}]
   (let [rest (:suspension-rest @tuning)]
-    (doseq [a [omega fz fx fy slip-a slip-r spin damage]] (.fill a 0))
+    (doseq [a [omega fz fx fy slip-a slip-r spin]] (.fill a 0))
     (.fill susp rest) (.fill susp-prev rest)
     (.fill contact 0) (.fill steer 0)))
+
+(defn reset-state! [{:keys [^js damage] :as veh}]
+  (clear-motion! veh)
+  (.fill damage 0))
 
 (defn chassis-position [{:keys [^js body]}]
   (let [t (.translation body)] [(.-x t) (.-y t) (.-z t)]))

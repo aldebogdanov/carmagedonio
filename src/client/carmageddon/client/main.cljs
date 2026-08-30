@@ -1,8 +1,7 @@
 (ns carmageddon.client.main
   "Wiring only. Every subsystem is independently testable; this namespace exists
   to connect them and owns no game logic."
-  (:require [carmageddon.client.ai :as ai]
-            [carmageddon.client.api :as api]
+  (:require [carmageddon.client.api :as api]
             [carmageddon.client.birds :as birds]
             [carmageddon.client.buildings :as buildings]
             [carmageddon.client.camera :as camera]
@@ -20,6 +19,7 @@
             [carmageddon.client.traffic :as traffic]
             [carmageddon.client.remote :as remote]
             [carmageddon.client.render :as render]
+            [carmageddon.client.rivals :as rivals]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.shared.constants :as k]
@@ -37,8 +37,6 @@
 (def ^:private min-smash-speed 4.0)     ; m/s
 (def ^:private max-damage-per-hit 0.02)
 (def ^:private opponent-count 3)
-;; Past this an opponent is out of the race and worth points.
-(def ^:private wreck-damage 0.9)
 
 ;; Contact force below this is scraping, not crashing. Set high deliberately:
 ;; the chassis grinds along terrain constantly when bottoming out or rolling,
@@ -49,28 +47,6 @@
 (defn- hud! [text]
   (when-let [el (js/document.getElementById "hud")]
     (set! (.-textContent el) text)))
-
-(defn opponent-commands
-  "Each opponent hunts the nearest living pedestrian, or just presses on if
-  there are none nearby. They drive through `input/->Command` exactly as the
-  player does."
-  [sim peds-state controllers tick]
-  (let [vs (sim/vehicles sim)]
-    (mapv (fn [i]
-            (let [v   (nth vs (inc i))
-                  [x _ z] (vehicle/chassis-position v)
-                  ctl (nth controllers i)
-                  tgt (or (ai/target ctl tick (* 7 i)
-                                     #(peds/nearest-alive peds-state x z))
-                          [(+ x (* 60 (nth (vehicle/heading v) 0))) 0
-                           (+ z (* 60 (nth (vehicle/heading v) 2)))])]
-              (ai/->command tick
-                            (ai/drive-toward ctl
-                                             {:x x :z z
-                                              :forward (vehicle/heading v)
-                                              :speed (vehicle/forward-speed v)}
-                                             tgt))))
-          (range (count controllers)))))
 
 (defn- car-snapshot
   "The player's car as the wire wants it. Read straight from the body rather
@@ -110,7 +86,7 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  controllers wrecked remotes]}]
+                                  rvs remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -120,18 +96,17 @@
      {:on-tick
       (fn [tick _dt]
         (let [cmd (input/sample tick)]
-          (sim/step! sim cmd (opponent-commands sim peds-state controllers tick))
+          (sim/step! sim cmd (rivals/commands rvs sim peds-state tick))
           ;; Traffic drives on the fixed step, like everything else that moves.
           (traffic/drive! traffic-state k/dt (js/Date.now))
           (peds/walk! peds-state tick (sim/player-x sim) (sim/player-z sim))
           (game/tick! game)
-          ;; An opponent past the damage threshold is out, and scored once.
-          (doseq [i (range (count controllers))]
-            (let [v (nth (sim/vehicles sim) (inc i))]
-              (when (and (> (vehicle/damage v) wreck-damage)
-                         (not (contains? @wrecked i)))
-                (swap! wrecked conj i)
-                (game/opponent-wrecked! game))))
+          ;; Rivals that have lost touch are brought back. Checked every tick,
+          ;; but only acts after a few seconds out of contact.
+          (let [[fx _ fz] (sim/forward-vector sim)]
+            (rivals/leash! rvs sim (js/Math.atan2 fx fz)))
+          (dotimes [_ (rivals/score-wrecks! rvs sim)]
+            (game/opponent-wrecked! game))
           ;; Outbound snapshot rate is deliberately independent of both sim and
           ;; render rate.
           (when (zero? (mod tick snap-every))
@@ -192,7 +167,7 @@
                      "   peds " (:people pd) "+" (:animals pd)
                      (if (= :outbreak (:mode pd)) " OUTBREAK" "")
                      "   cars " (:driving (traffic/stats traffic-state))
-                     "   rivals " (- (count controllers) (count @wrecked))
+                     "   rivals " (rivals/alive rvs)
                      (let [n (remote/count-players remotes)]
                        (if (pos? n) (str "   online " n) ""))
                      "   cam " (camera/labels (camera/mode (:camera-state rs)))
@@ -230,8 +205,7 @@
         ;; so the same seed makes the same city either way.
         pd        (peds/create (:world @s) (:scene rs) ov mode)
         gm        (game/create)
-        ctls      (vec (repeatedly opponent-count ai/controller))
-        wrecked   (atom #{})
+        rvs       (rivals/create seed opponent-count)
         mgr       (chunks/create
                    {:seed      seed
                     :world     (:world @s)
@@ -269,52 +243,67 @@
         detach    (let [d-input (input/attach!)
                         d-cam   (camera/attach! (:camera-state rs) canvas)]
                     (fn [] (d-input) (d-cam)))
-        [sx _ sz] (:spawn @s)
-        chassis   (sim/chassis-collider-handle s)]
+        [sx _ sz] (:spawn @s)]
            ;; The one place physics impacts become gameplay.
            ;;
-           ;; Only collisions involving the car count, and only above a speed
+           ;; Only collisions involving a car count, and only above a speed
            ;; threshold. Contact force on its own is not evidence of a crash:
            ;; props settling against each other generate more force than a car
            ;; clipping one, and gating on force alone wrecked a sixth of the
            ;; world while the player sat still.
            (swap! s assoc :on-impact
                   (fn [h1 h2 force]
-                    (when (or (= h1 chassis) (= h2 chassis))
-                      (let [other (if (= h1 chassis) h2 h1)
-                            speed (js/Math.abs (sim/player-speed s))]
-                        (when (> speed min-smash-speed)
-                          (let [prop? (props/prop? ps other)
-                                ped?  (peds/ped? pd other)
-                                car?  (traffic/traffic? tf other)]
-                            (when prop?
-                              (when-let [d (props/destroy! ps other)]
+                    (let [v1 (sim/vehicle-of-collider s h1)
+                          v2 (sim/vehicle-of-collider s h2)]
+                      (when (or v1 v2)
+                        ;; Scoring belongs to the player alone. Rivals drive
+                        ;; through the same crowds and collect the same dents,
+                        ;; but a rival that ran someone over would be taking
+                        ;; kills off the player's target.
+                        (when-let [hit (cond (= 0 v1) h2 (= 0 v2) h1)]
+                          (when (> (js/Math.abs (sim/player-speed s)) min-smash-speed)
+                            (when (props/prop? ps hit)
+                              (when-let [d (props/destroy! ps hit)]
                                 (game/prop-wrecked! gm)
                                 ;; Tell the room: this is the only world state
                                 ;; that ever crosses the network.
                                 (net/-send! transport (wire/encode-delta (assoc d :kind :prop)))))
-                            (when ped?
+                            (when (peds/ped? pd hit)
                               (let [[vx vy vz] (:vel (sim/telemetry s))]
-                                (when-let [d (peds/kill! pd other [vx vy vz])]
+                                (when-let [d (peds/kill! pd hit [vx vy vz])]
                                   (game/ped-killed! gm)
                                   (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))))
-                            (when car?
+                            (when (traffic/traffic? tf hit)
                               (let [[vx vy vz] (:vel (sim/telemetry s))]
-                                (when-let [d (traffic/wreck! tf other [vx vy vz])]
+                                (when-let [d (traffic/wreck! tf hit [vx vy vz])]
                                   (game/car-wrecked! gm)
                                   (net/-send! transport
                                               (wire/encode-delta
-                                               (assoc d :kind :car))))))
-                            ;; Pedestrians and clutter barely scratch the paint;
-                            ;; terrain, buildings and other cars hit properly.
-                            ;; Capped per event so one scrape spread over many
-                            ;; contacts cannot write the car off in a single tick.
-                            (vehicle/add-damage!
-                             (:vehicle @s)
-                             (min max-damage-per-hit
-                                  (* (if (or prop? ped?) 0.04 1.0)
-                                     (/ (max 0.0 (- force damage-force-floor))
-                                        damage-force-scale)))))))))) 
+                                               (assoc d :kind :car))))))))
+                        ;; Damage lands on every car in the collision, which is
+                        ;; how a rival gets written off at all. This used to be
+                        ;; applied to `(:vehicle @s)` -- a key the sim stopped
+                        ;; having when it grew from one vehicle to several -- so
+                        ;; every qualifying impact threw out of the contact
+                        ;; callback and took the rest of that tick with it.
+                        ;; Nothing was damaged, and no opponent could be wrecked.
+                        (doseq [[vi hit] [[v1 h2] [v2 h1]]
+                                :when vi]
+                          (let [veh (nth (sim/vehicles s) vi)]
+                            (when (> (js/Math.abs (vehicle/forward-speed veh))
+                                     min-smash-speed)
+                              ;; Pedestrians and clutter barely scratch the
+                              ;; paint; terrain, buildings and other cars hit
+                              ;; properly. Capped per event so one scrape spread
+                              ;; over many contacts cannot write a car off in a
+                              ;; single tick.
+                              (vehicle/add-damage!
+                               veh
+                               (min max-damage-per-hit
+                                    (* (if (or (props/prop? ps hit) (peds/ped? pd hit))
+                                         0.04 1.0)
+                                       (/ (max 0.0 (- force damage-force-floor))
+                                          damage-force-scale))))))))))) 
            (render/resize! rs canvas)
            ;; Wait for ground under the spawn before the first tick, or the car
            ;; falls through the world. Generation is in a worker, so this is a
@@ -331,12 +320,12 @@
                                                  :overlay ov
                                                  :minimap mm
                                                  :peds-state pd :game gm
-                                                 :controllers ctls :wrecked wrecked
+                                                 :rvs rvs
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl :traffic tf :birds bd :peds pd
                                  :overlay ov :minimap mm :game gm
-                                 :controllers ctls :wrecked wrecked :remotes remotes
+                                 :rivals rvs :remotes remotes
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"
                                   (:live (props/stats ps)) "props,"
