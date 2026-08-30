@@ -89,6 +89,10 @@
     ;; sphere knows nothing about -- leaving culling on makes furniture wink out
     ;; when the chunk's origin leaves the frustum.
     (set! (.-frustumCulled m) false)
+    ;; Road markings are painted on the carriageway and have no thickness to
+    ;; cast with; everything else stands up.
+    (set! (.-castShadow m) (not= :marking part))
+    (set! (.-receiveShadow m) true)
     (doseq [[i {:keys [x y z yaw size phase]}] (map-indexed vector instances)]
       (.set (.-position scratch) x y z)
       (.set (.-rotation scratch) 0 yaw 0)

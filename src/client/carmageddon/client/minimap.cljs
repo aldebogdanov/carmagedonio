@@ -12,7 +12,11 @@
   (:require [carmageddon.shared.constants :as k]
             [carmageddon.shared.worldgen :as worldgen]))
 
-(def ^:private radius 6)                     ; chunks either side, so 13 across
+(def ^:private radius 4)
+;; Chunks either side, so 9 across -- 2.3 km of context. It used to be 13, and
+;; that was a better world map than it was a tactical one: at that scale a
+;; rival at the end of its leash is eleven pixels from the centre, which is
+;; underneath the marker for your own car.
 (def ^:private span (inc (* 2 radius)))
 
 (def ^:private colours

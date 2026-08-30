@@ -105,15 +105,24 @@
         v (.get m handle)]
     (when-not (undefined? v) v)))
 
+(def ^:private spawn-clearance
+  "How far the spawn point sits above the ground it was measured on."
+  1.2)
+
 (defn- spawn-lift
-  "How far above the nominal spawn height a vehicle's chassis centre has to
-  start. The spawn is quoted for the reference car; a truck dropped at that
-  height starts with its axles underground and is fired into the air by the
-  solver on the first tick."
+  "How much further up than that a vehicle has to start.
+
+  The spawn height is quoted for the reference car. A lorry's axles hang half a
+  metre lower than a hatchback's and its tyres are half again as big, so
+  dropping one from the same place starts it with its wheels through the road
+  and the solver throws it into the air on the first tick. This is the amount
+  by which the vehicle's own resting height exceeds the quoted clearance, plus
+  a little to fall through."
   [kind]
-  (let [[_ hy _] (cars/half kind)
-        {:keys [rear-radius radius]} (:wheels (cars/spec kind))]
-    (max 0.0 (- (+ hy (or rear-radius radius)) 0.65))))
+  (let [{:keys [rear-radius radius axle-y]} (:wheels (cars/spec kind))
+        rest-height (+ (abs axle-y) (or rear-radius radius)
+                       (:suspension-rest @(cars/tuning kind)))]
+    (max 0.0 (+ 0.25 (- rest-height spawn-clearance)))))
 
 (defn vehicles [sim] (:vehicles @sim))
 (defn opponent-count [sim] (max 0 (dec (count (:vehicles @sim)))))

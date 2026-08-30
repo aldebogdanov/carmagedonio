@@ -19,7 +19,15 @@
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.shared.constants :as k]))
 
-(def ^:private sky 0x9ec4e2)
+(def ^:private sky-top 0x4d86c6)
+(def ^:private sky-horizon 0xbdd6e8)
+(def ^:private ground-bounce 0x54503f)
+
+;; How far the sun's shadow camera reaches, in metres either side of the car.
+;; A shadow map covers a fixed box, so this trades resolution against range:
+;; 70 m keeps the texels small enough that a lamp post has a lamp post's
+;; shadow, and everything past it is beyond where anyone is looking anyway.
+(def ^:private shadow-reach 90.0)
 
 (defn- lerp [a b t] (+ a (* (- b a) t)))
 
@@ -30,6 +38,14 @@
    (three/MeshPhongMaterial. (cond-> #js {:map tex :shininess 6
                                           :vertexColors vertex-colors?}
                                colour (doto (aset "color" colour))))))
+
+(defn- paint-mat
+  "Bodywork. A standard material rather than the Phong everything else uses,
+  because `scene.environment` only reaches standard materials -- and a sky to
+  reflect is the entire difference between paint and coloured cardboard."
+  [tex colour]
+  (three/MeshStandardMaterial. #js {:map tex :color colour
+                                    :metalness 0.45 :roughness 0.42}))
 
 (defn- chunk-geometry
   "Build a BufferGeometry for one streamed chunk.
@@ -97,6 +113,10 @@
   (let [[x0 z0] (:origin data)
         ^js m (three/Mesh. (chunk-geometry data) chunk-material)]
     (.set (.-position m) x0 0 z0)
+    ;; Terrain receives but does not cast. Casting would double the shadow
+    ;; pass for hills that mostly shadow themselves, and self-shadowing a
+    ;; heightfield is the classic source of acne.
+    (set! (.-receiveShadow m) true)
     (.add scene m)
     m))
 
@@ -108,17 +128,87 @@
   (.remove scene m)
   (.dispose (.-geometry m)))
 
-(defn- build-scene! []
+(defn- sky-texture
+  "A vertical gradient, painted once into a 2 x 256 canvas.
+
+  Treated as an equirectangular map, so it works both as the background and --
+  once run through the PMREM generator -- as the environment the cars reflect.
+  A gradient is all an equirect needs when the sky has no clouds in it, and two
+  pixels wide is all it needs when nothing varies with bearing."
+  []
+  (let [^js c (js/document.createElement "canvas")
+        _ (set! (.-width c) 2)
+        _ (set! (.-height c) 256)
+        ^js g (.getContext c "2d")
+        grad (.createLinearGradient g 0 0 0 256)
+        hex (fn [n] (str "#" (.padStart (.toString n 16) 6 "0")))]
+    (.addColorStop grad 0.0 (hex sky-top))
+    (.addColorStop grad 0.52 (hex sky-horizon))
+    ;; Below the horizon is haze, not ground: the terrain covers it, and the
+    ;; only place this shows is in the cars' reflections.
+    (.addColorStop grad 1.0 (hex 0x8e9384))
+    (set! (.-fillStyle g) grad)
+    (.fillRect g 0 0 2 256)
+    (doto (three/CanvasTexture. c)
+      (-> .-mapping (set! (.-EquirectangularReflectionMapping three)))
+      (-> .-colorSpace (set! (.-SRGBColorSpace three))))))
+
+(defn- build-scene!
+  "Sky, sun and the shadow camera.
+
+  The environment map is what turns flat-shaded boxes into cars: paint with
+  nothing to reflect reads as coloured cardboard whatever the lighting does."
+  [^js renderer]
   (let [scene   (three/Scene.)
-        ^js sun (three/DirectionalLight. 0xffffff 1.25)]
-    (set! (.-background scene) (three/Color. sky))
+        tex     (sky-texture)
+        ^js pmrem (three/PMREMGenerator. renderer)
+        env     (.-texture (.fromEquirectangular pmrem tex))
+        ^js sun (three/DirectionalLight. 0xfff0d4 2.8)]
+    (.dispose pmrem)
+    (set! (.-background scene) tex)
+    (set! (.-environment scene) env)
     ;; Fog has to close in before the streaming radius ends, or chunks visibly
-    ;; pop into existence at the horizon.
-    (set! (.-fog scene) (three/Fog. sky 120 (* 0.92 k/stream-radius k/chunk-size)))
-    (.set (.-position sun) 40 80 20)
+    ;; pop into existence at the horizon. Matched to the horizon stop of the
+    ;; gradient, so the world dissolves into the sky rather than into a band of
+    ;; the wrong colour.
+    (set! (.-fog scene) (three/Fog. sky-horizon 160 (* 0.92 k/stream-radius k/chunk-size)))
+    ;; Mid-afternoon, about 35 degrees up. This is not a cosmetic choice: the
+    ;; first version put the sun 63 degrees up, and at that angle a low block
+    ;; casts a shadow shorter than its own pavement. Everything was working --
+    ;; the map was full of geometry, the shaders sampled it, the depth
+    ;; comparison came out "in shadow" -- and nothing was visible on the road.
+    (.set (.-position sun) 95 82 62)
+    (set! (.-castShadow sun) true)
+    (let [^js sh (.-shadow sun)
+          ^js c  (.-camera sh)]
+      (.set (.-mapSize sh) 2048 2048)
+      (set! (.-left c) (- shadow-reach))
+      (set! (.-right c) shadow-reach)
+      (set! (.-top c) shadow-reach)
+      (set! (.-bottom c) (- shadow-reach))
+      (set! (.-near c) 1.0)
+      (set! (.-far c) 420.0)
+      ;; Acne on the terrain and peter-panning under the cars are the two ways
+      ;; this goes wrong, and they pull in opposite directions. normalBias
+      ;; handles the first without lifting shadows off their objects.
+      (set! (.-bias sh) -0.0004)
+      (set! (.-normalBias sh) 0.04)
+      (.updateProjectionMatrix c))
     (.add scene sun)
-    (.add scene (three/HemisphereLight. 0xffffff 0x4a5240 1.0))
-    scene))
+    (.add scene (.-target sun))
+    (.add scene (three/HemisphereLight. sky-horizon ground-bounce 1.1))
+    [scene sun]))
+
+(defn- follow-sun!
+  "Keep the shadow box over the car.
+
+  A directional light's shadow covers one fixed box in world space. Left at the
+  origin it stops working the moment the player drives out of it, which in a
+  world this size is about four seconds."
+  [^js sun px py pz]
+  (.set (.-position sun) (+ px 95.0) (+ py 82.0) (+ pz 62.0))
+  (.set (.-position (.-target sun)) px py pz)
+  (.updateMatrixWorld (.-target sun)))
 
 (def ^:private part-tints
   "Bodywork that is not paint. Glass is dark and slightly blue; trim is the
@@ -154,6 +244,7 @@
             geom (doto (three/CylinderGeometry. r r (nth widths i) 16)
                    (.rotateZ (/ js/Math.PI 2)))
             ^js w (three/Mesh. geom m)]
+        (set! (.-castShadow w) true)
         (aset out i w)
         (.add root w)))
     out))
@@ -168,9 +259,10 @@
   (doseq [[x y z hx hy hz tint] (:body (cars/spec kind))]
     (let [^js m (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
                              (if (= :paint tint)
-                               (mat (:body tex) false paint)
-                               (three/MeshPhongMaterial.
-                                #js {:color (part-tints tint) :shininess 24})))]
+                               (paint-mat (:body tex) paint)
+                               (three/MeshStandardMaterial.
+                                #js {:color (part-tints tint)
+                                     :metalness 0.6 :roughness 0.25})))]
       (.set (.-position m) x y z)
       (.add hull m))))
 
@@ -211,10 +303,14 @@
                                  (nth rival-paint (mod (dec i) (count rival-paint))))
                         layout (cars/layout kind)
                         ^js root (three/Group.)
-                        ^js hull-mat (mat (:body tex) false paint)
+                        ^js hull-mat (paint-mat (:body tex) paint)
                         ^js hull (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
                                               hull-mat)]
                     (build-body! hull kind paint tex)
+                    (set! (.-castShadow hull) true)
+                    (set! (.-receiveShadow hull) true)
+                    (doseq [^js c (array-seq (.-children hull))]
+                      (set! (.-castShadow c) true))
                     (.add root hull)
                     (let [wheels (build-wheels! root tex layout)
                           smoke  (build-smoke! root half)]
@@ -232,11 +328,19 @@
   The renderer comes first because texture anisotropy is a device capability."
   [canvas sim seed]
   (let [^js renderer (three/WebGLRenderer. #js {:canvas canvas :antialias true})
+        ;; ACES flattens the highlights the way a camera does. Without it the
+        ;; sunlit side of every white building clips to paper and the shaded
+        ;; side goes to mud, which is most of why the world read as flat.
+        _            (set! (.-toneMapping renderer) (.-ACESFilmicToneMapping three))
+        _            (set! (.-toneMappingExposure renderer) 1.25)
+        _            (set! (.-enabled (.-shadowMap renderer)) true)
+        _            (set! (.-type (.-shadowMap renderer)) (.-PCFSoftShadowMap three))
         tex          (textures/build! renderer seed)
-        scene        (build-scene!)
+        [scene sun]  (build-scene! renderer)
         [meshes cars] (build-cars! scene sim tex)
         ^js cam      (three/PerspectiveCamera. 70 1 0.3 2000)]
     {:renderer       renderer
+     :sun            sun
      :textures       tex
      :chunk-material (mat (:ground tex) true)
      :scene        scene
@@ -368,6 +472,10 @@
     (vswap! (:clock rs) #(mod (+ % dt) 1.0))
     (draw-damage! rs sim)
     (let [o (* player sim/stride)]
+      (follow-sun! (:sun rs)
+                   (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)
+                   (lerp (aget prev (+ o 1)) (aget curr (+ o 1)) alpha)
+                   (lerp (aget prev (+ o 2)) (aget curr (+ o 2)) alpha))
       (camera/update! camera-state
                       (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)
                       (lerp (aget prev (+ o 1)) (aget curr (+ o 1)) alpha)

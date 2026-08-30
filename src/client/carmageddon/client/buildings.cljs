@@ -109,6 +109,10 @@
     ;; knows nothing about; leaving culling on makes whole blocks wink out when
     ;; the chunk origin leaves the frustum.
     (set! (.-frustumCulled m) false)
+    ;; Buildings are what the shadows are for. They both cast and receive: a
+    ;; block that shades the street but not its own side walls reads wrong.
+    (set! (.-castShadow m) true)
+    (set! (.-receiveShadow m) true)
     (set! (.-needsUpdate (.-instanceMatrix m)) true)
     (when-let [ic (.-instanceColor m)] (set! (.-needsUpdate ic) true))
     (.add scene m)

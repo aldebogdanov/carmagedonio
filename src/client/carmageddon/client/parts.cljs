@@ -55,6 +55,10 @@
       (.setHex colour tint)
       (.setColorAt m i colour))
     (set! (.-frustumCulled m) false)
+    ;; Trees and bridge decks. A tree without a shadow sits on the grass
+    ;; rather than in it.
+    (set! (.-castShadow m) true)
+    (set! (.-receiveShadow m) true)
     (set! (.-needsUpdate (.-instanceMatrix m)) true)
     (when-let [ic (.-instanceColor m)] (set! (.-needsUpdate ic) true))
     (.add scene m)

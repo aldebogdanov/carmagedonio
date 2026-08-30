@@ -87,6 +87,10 @@
         ^js mesh (three/Mesh. geometry material)]
     ;; Upright without a balance model: it cannot topple because it cannot turn.
     (.lockRotations body true true)
+    ;; Casts but does not receive: a shadow is what stops a pedestrian looking
+    ;; like a sticker on the road, and nothing is ever going to be lit through
+    ;; one of them.
+    (set! (.-castShadow mesh) true)
     (.add scene mesh)
     {:body body :mesh mesh :collider collider :handle (.-handle collider)
      :idx idx :heading heading :speed speed :kind kind

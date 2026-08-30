@@ -58,6 +58,8 @@
                           (.setContactForceEventThreshold 1000.0))
                       body)
         ^js mesh (three/Mesh. geometry material)]
+    (set! (.-castShadow mesh) true)
+    (set! (.-receiveShadow mesh) true)
     (.set (.-scale mesh) scale scale scale)
     (.set (.-position mesh) x (+ y hy) z)
     (.set (.-quaternion mesh) 0.0 (js/Math.sin (/ yaw 2)) 0.0 (js/Math.cos (/ yaw 2)))

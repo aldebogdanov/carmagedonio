@@ -44,6 +44,8 @@
                          (.setFriction 0.8)
                          (.setRestitution 0.2))
                      body)
+    (set! (.-castShadow mesh) true)
+    (set! (.-receiveShadow mesh) true)
     (.add scene mesh)
     {:body body :mesh mesh :buffer (interp/buffer)}))
 

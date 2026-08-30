@@ -199,6 +199,8 @@
                               (aget arr (+ o 4)) (aget arr (+ o 5)))))
           ^js mesh (three/InstancedMesh. geometry material (max 1 (alength cars)))]
       (set! (.-frustumCulled mesh) false)
+      (set! (.-castShadow mesh) true)
+      (set! (.-receiveShadow mesh) true)
       (.add scene mesh)
       (swap! ts (fn [s]
                   (-> s
