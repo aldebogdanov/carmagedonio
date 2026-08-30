@@ -30,6 +30,11 @@
    :city     "#8e8b86"
    :downtown "#adaaa4"})
 
+(def ^:private landmark-colours
+  {:stadium "#e0d24a" :mall "#d97fd0" :park "#6fd66f" :plaza "#e0e0e0"
+   :works "#d9803a" :silos "#e8dcae" :church "#c6c0f0" :monument "#a8a29a"
+   :mast "#ff6b6b"})
+
 (def ^:private road-colour "rgba(20,20,22,0.55)")
 (def ^:private grid-colour "rgba(0,0,0,0.16)")
 
@@ -42,6 +47,9 @@
        :label (js/document.getElementById "where")
        ;; [cx cz] -> kind. Never invalidated: a seed's world does not change.
        :cache (js/Map.)
+       ;; Landmarks are cached the same way and for the same reason: one per
+       ;; district, worked out from the seed, never changing.
+       :landmark-cache (js/Map.)
        :misses (volatile! 0)
        :at (volatile! nil)
        ;; Rivals are shown by default and can be switched off. Some players
@@ -82,6 +90,41 @@
         (vswap! misses inc)
         v)
       hit)))
+
+(defn- landmark-at [{:keys [seed ^js landmark-cache]} dx dz]
+  (let [k (cache-key dx dz)
+        hit (.get landmark-cache k)]
+    (if (undefined? hit)
+      (let [v (or (worldgen/landmark seed dx dz) false)]
+        (.set landmark-cache k v)
+        v)
+      hit)))
+
+(defn- landmarks-near
+  "Every landmark within `m` metres of the car, nearest first.
+
+  Districts are a kilometre across, so this is nine of them at the map's scale
+  and each one is a cached lookup."
+  [ms x z m]
+  (let [[dx0 dz0] (worldgen/district-of (long (js/Math.floor (/ (- x m) k/chunk-size)))
+                                        (long (js/Math.floor (/ (- z m) k/chunk-size))))
+        [dx1 dz1] (worldgen/district-of (long (js/Math.floor (/ (+ x m) k/chunk-size)))
+                                        (long (js/Math.floor (/ (+ z m) k/chunk-size))))]
+    (sort-by :away
+             (for [dx (range dx0 (inc dx1))
+                   dz (range dz0 (inc dz1))
+                   :let [lm (landmark-at ms dx dz)]
+                   :when lm]
+               (assoc lm :away (js/Math.hypot (- (:x lm) x) (- (:z lm) z)))))))
+
+(def ^:private compass ["N" "NE" "E" "SE" "S" "SW" "W" "NW"])
+
+(defn- bearing-to
+  "Which way to go, in the eight directions anyone actually uses. North is -Z."
+  [dx dz]
+  (let [a (js/Math.atan2 dx (- dz))
+        i (mod (js/Math.round (/ (* 8 a) (* 2 js/Math.PI))) 8)]
+    (nth compass i)))
 
 (defn area-here
   "The label for the chunk the player is standing in."
@@ -174,6 +217,29 @@
     (set! (.-lineWidth ctx) 2)
     (.strokeRect ctx 1 1 (- size 2) (- size 2))))
 
+(defn- draw-landmarks!
+  "A diamond per landmark, coloured by what it is.
+
+  The point of a landmark is that you can navigate by it, and you cannot
+  navigate by something the map does not show you."
+  [ms px pz per-m size]
+  (let [^js ctx (:ctx ms)
+        half (* 0.5 (/ size per-m))
+        x0 (- px half) z0 (- pz half)]
+    (doseq [{:keys [kind x z]} (landmarks-near ms px pz (* 0.75 (/ size per-m)))
+            :let [sx (* (- x x0) per-m)
+                  sz (* (- z z0) per-m)]
+            :when (and (<= 0 sx size) (<= 0 sz size))]
+      (.save ctx)
+      (.translate ctx sx sz)
+      (.rotate ctx (/ js/Math.PI 4))
+      (set! (.-fillStyle ctx) (get landmark-colours kind "#fff"))
+      (set! (.-strokeStyle ctx) "rgba(0,0,0,0.8)")
+      (set! (.-lineWidth ctx) 1.5)
+      (.fillRect ctx -4 -4 8 8)
+      (.strokeRect ctx -4 -4 8 8)
+      (.restore ctx))))
+
 (defn- draw-rivals!
   "One arrowhead per rival, pointing the way it is driving.
 
@@ -231,10 +297,19 @@
           per-m (/ size (* span k/chunk-size))]
       (draw-cells! ms x z per-m size)
       (draw-roads! ms x z per-m size)
+      (draw-landmarks! ms x z per-m size)
       (when (and @show-rivals (seq blips))
         (draw-rivals! ms x z per-m size blips))
       (draw-player! ms size heading)
-      (let [nm (area-here ms x z)]
+      ;; The label says where you are and what is nearby, which between them
+      ;; are the two things a place needs before it is somewhere rather than
+      ;; some coordinates.
+      (let [near (first (landmarks-near ms x z 900.0))
+            nm   (str (area-here ms x z)
+                      (when near
+                        (str "  \u00b7  " (worldgen/landmark-labels (:kind near))
+                             " " (js/Math.round (:away near)) " m "
+                             (bearing-to (- (:x near) x) (- (:z near) z)))))]
         (when (and label (not= nm @at))
           (vreset! at nm)
           (set! (.-textContent label) nm)))))))

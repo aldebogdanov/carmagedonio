@@ -731,6 +731,80 @@
           (is (< (abs (- yb (+ lift-b (first (w/surface seed field bx bz))))) 0.05)
               "far end"))))))
 
+(deftest every-district-gets-a-landmark
+  (testing "a hundred districts, and every one of them has something in it"
+    (let [lms (for [dx (range -5 5), dz (range -5 5)] (w/landmark seed dx dz))]
+      (is (every? some? lms) "a district with nothing to navigate by")
+      (is (every? #(contains? (set w/landmark-kinds) (:kind %)) lms))
+      (testing "and they are not all the same thing"
+        ;; The first version put standing stones in half of them, because half
+        ;; the world is open country and open country had one answer.
+        (let [freq (frequencies (map :kind lms))]
+          (is (>= (count freq) 5) (str "only " (count freq) " kinds: " freq))
+          (is (< (apply max (vals freq)) (* 0.45 (count lms)))
+              (str "one kind dominates: " freq))))))
+
+  (testing "each is inside its own district and nowhere near the water"
+    (doseq [dx (range -3 3), dz (range -3 3)
+            :let [{:keys [x z cell]} (w/landmark seed dx dz)
+                  [cx cz] (w/chunk-of x z)
+                  [ddx ddz] (w/district-of cx cz)]]
+      (is (= [dx dz] [ddx ddz])
+          (str "district " [dx dz] " put its landmark in " [ddx ddz]))
+      (is (< (w/river seed x z) 0.5) "a landmark in the river")
+      ;; The cell it claims is the cell it stands in.
+      (is (= cell [(long (Math/floor (/ x w/street-spacing)))
+                   (long (Math/floor (/ z w/street-spacing)))])))))
+
+(deftest a-landmark-clears-its-block
+  (testing "none of the cell's own lots survive into the chunk"
+    ;; Compared against `cell-lots` for the claimed cell rather than against a
+    ;; nominal 64 m square: nodes are displaced by up to 13 m, so a cell's real
+    ;; rectangle is not its grid square and a neighbour's lot can legitimately
+    ;; have its centre inside that square. What must not survive is a lot the
+    ;; *landmark's own cell* produced -- otherwise the stadium is built through
+    ;; a terrace, which is the whole thing this arrangement exists to avoid.
+    (doseq [dx (range -3 3), dz (range -3 3)
+            :let [{:keys [x z cell]} (w/landmark seed dx dz)
+                  [cx cz] (w/chunk-of x z)
+                  [gx gz] cell
+                  own  (set (map (juxt :x :z) (w/cell-lots seed gx gz)))
+                  ;; Lots are owned by the chunk their centre lands in and a
+                  ;; cell can straddle two, so every neighbouring chunk is asked.
+                  kept (for [c (range (dec cx) (+ 2 cx)), z' (range (dec cz) (+ 2 cz))
+                             lot (w/chunk-lots seed c z')
+                             :when (contains? own [(:x lot) (:z lot)])]
+                         lot)]]
+      (is (empty? kept)
+          (str "district " [dx dz] " built " (count kept)
+               " lots inside its landmark cell " cell)))))
+
+(deftest landmark-parts-are-well-formed
+  (let [built (for [dx (range -4 4), dz (range -4 4)
+                    :let [{:keys [kind x z]} (w/landmark seed dx dz)
+                          [cx cz] (w/chunk-of x z)]]
+                [kind (w/chunk-landmarks seed cx cz)])
+        at (fn [a i o] (double (aget* a (+ o (* i w/part-stride)))))]
+    (is (seq built))
+    (testing "the owning chunk builds it and nobody else does"
+      (doseq [[kind a] built]
+        (is (pos? (alen* a)) (str kind " generated nothing"))
+        (is (zero? (mod (alen* a) w/part-stride)) "ragged parts array")))
+    (testing "shapes are positive and the flags are in range"
+      (doseq [[_ a] built
+              :let [n (/ (alen* a) w/part-stride)]]
+        (is (every? (fn [i] (and (< (at a i 8) (count w/part-prims))
+                                 (<= 0 (at a i 9) 0xffffff)
+                                 (contains? #{0.0 1.0 2.0} (at a i 10))
+                                 (> (at a i 5) 0.0) (> (at a i 6) 0.0)
+                                 (> (at a i 7) 0.0)))
+                    (range n)))))
+    (testing "and something in every one of them is solid enough to crash into"
+      (doseq [[kind a] built
+              :let [n (/ (alen* a) w/part-stride)]]
+        (is (some (fn [i] (and (pos? (at a i 10)) (> (at a i 6) 3.0))) (range n))
+            (str kind " is scenery you can drive through"))))))
+
 (deftest bridge-parts-are-well-formed
   (let [[cx cz] (bridge-chunk)
         a (w/chunk-bridges seed cx cz)

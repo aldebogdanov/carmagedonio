@@ -215,6 +215,10 @@
         fu        (furniture/create (:world @s) (:scene rs))
         br        (parts/create (:world @s) (:scene rs) ov)
         fl        (parts/create (:world @s) (:scene rs))
+        ;; Landmarks are parts like anything else: same array layout, same
+        ;; colliders, same shadows. They get their own state only so the
+        ;; overlay-backed barrier bookkeeping on bridges stays theirs.
+        lm        (parts/create (:world @s) (:scene rs))
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
         mm        (minimap/create seed)
@@ -235,6 +239,7 @@
                                      (furniture/add-chunk! fu key (:furniture data))
                                      (parts/add-chunk! br key (:bridges data))
                                      (parts/add-chunk! fl key (:flora data))
+                                     (parts/add-chunk! lm key (:landmarks data))
                                      (traffic/add-chunk! tf key (:traffic data))
                                      (peds/add-chunk! pd key (:peds data)))
                     :on-physics-remove (fn [key]
@@ -243,6 +248,7 @@
                                      (furniture/remove-chunk! fu key)
                                      (parts/remove-chunk! br key)
                                      (parts/remove-chunk! fl key)
+                                     (parts/remove-chunk! lm key)
                                      (traffic/remove-chunk! tf key)
                                      (peds/remove-chunk! pd key))})
         ;; One seam, two implementations. Nothing below this line knows
@@ -353,7 +359,8 @@
                                                  :rvs rvs
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
-                                 :props ps :buildings bs :furniture fu :bridges br :flora fl :traffic tf :birds bd :peds pd
+                                 :props ps :buildings bs :furniture fu :bridges br :flora fl
+                                 :landmarks lm :traffic tf :birds bd :peds pd
                                  :overlay ov :minimap mm :game gm
                                  :rivals rvs :remotes remotes
                                  :stop stop :detach detach}))

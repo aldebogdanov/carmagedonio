@@ -54,6 +54,7 @@
      :building-parts (unchecked-get r "parts")
      :bridges (unchecked-get r "bridges")
      :flora (unchecked-get r "flora")
+     :landmarks (unchecked-get r "landmarks")
      :traffic (unchecked-get r "traffic")
      :peds (unchecked-get r "peds")
      :furniture (unchecked-get r "furniture")}))

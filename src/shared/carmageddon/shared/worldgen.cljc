@@ -1298,6 +1298,297 @@
              (strip :east iz0 iz1 (- x1 dx) x1 false)]))
     []))
 
+;; --- landmarks --------------------------------------------------------------
+;;
+;; One per district, always. A city where every block is interchangeable has no
+;; landmarks by definition: what makes somewhere a place is that it has a thing
+;; in it you can point at from the next district over, and navigate by.
+;;
+;; A landmark takes a whole lattice cell and the lots in that cell are not
+;; generated, so it replaces a block of housing rather than sitting on top of
+;; one. It is built from the same handful of prims as bridges and trees, and
+;; travels to the client down the same array.
+
+(def district-chunks 4)          ; a district is 4x4 chunks, about a km square
+(def ^:private cells-per-district
+  (long (/ (* district-chunks k/chunk-size) street-spacing)))
+
+(def landmark-kinds
+  [:stadium :mall :park :plaza :works :silos :church :monument :mast])
+
+(def landmark-labels
+  {:stadium "the stadium" :mall "the shopping centre" :park "the park"
+   :plaza "the plaza" :works "the works" :silos "the grain silos"
+   :church "the church" :monument "the standing stones"
+   :mast "the transmitter"})
+
+(defn district-of
+  "Which district a chunk belongs to. Floor division, so it keeps working west
+  and north of the origin -- truncation would fold two districts into one along
+  each axis."
+  [cx cz]
+  [(long (floor (/ (double cx) district-chunks)))
+   (long (floor (/ (double cz) district-chunks)))])
+
+(defn- landmark-for-place
+  "What sort of landmark belongs somewhere like this.
+
+  Drawn from the area kind rather than at random, because a grain silo in the
+  middle of downtown is not a landmark, it is a mistake."
+  [kind r]
+  (case kind
+    :downtown (nth [:stadium :plaza :mall] (prng/next-int! r 3))
+    :city     (nth [:stadium :mall :park :plaza] (prng/next-int! r 4))
+    :suburb   (nth [:mall :park :church] (prng/next-int! r 3))
+    :industry :works
+    :village  (if (prng/next-bool! r) :church :park)
+    :farm     (if (prng/next-bool! r) :silos :mast)
+    ;; Open country is most of the world, so it needs more than one answer or
+    ;; half the landmarks anywhere are the same ring of stones.
+    :woods    (if (prng/next-bool! r) :monument :mast)
+    :wild     (nth [:monument :mast :monument :silos] (prng/next-int! r 4))
+    :monument))
+
+(defn landmark
+  "The landmark of district (dx, dz): {:kind :cell [gx gz] :x :z :radius}, or
+  nil where there is nowhere to put one.
+
+  Eight tries at a cell rather than a scan of all 256. A scan would be the most
+  expensive question the map can ask, and the map asks it about every district
+  on screen; eight tries finds dry buildable ground everywhere except the middle
+  of a lake, which is a district that should not have a landmark anyway."
+  [seed dx dz]
+  (let [r   (prng/chunk-rng seed dx dz (:landmarks k/salt))
+        g0x (* dx cells-per-district)
+        g0z (* dz cells-per-district)]
+    (loop [i 0]
+      (when (< i 8)
+        (let [gx (+ g0x (prng/next-int! r cells-per-district))
+              gz (+ g0z (prng/next-int! r cells-per-district))
+              interior (cell-interior seed gx gz)]
+          (if-let [{:keys [x0 x1 z0 z1]} interior]
+            (let [x (* 0.5 (+ x0 x1))
+                  z (* 0.5 (+ z0 z1))
+                  ;; Rivers are checked directly rather than through
+                  ;; `area-kind`, which answers for a whole chunk and would
+                  ;; happily drop a stadium on the one wet corner of a dry one.
+                  wet? (> (river seed x z) 0.35)
+                  [cx cz] (chunk-of x z)]
+              (if wet?
+                (recur (inc i))
+                {:kind   (landmark-for-place (area-kind seed cx cz) r)
+                 :cell   [gx gz]
+                 :x x :z z
+                 :half-x (* 0.5 (- x1 x0))
+                 :half-z (* 0.5 (- z1 z0))}))
+            (recur (inc i))))))))
+
+(defn landmark-cells
+  "The landmark cells of every district touching lattice cells gx0..gx1,
+  gz0..gz1, as a set. Districts are a kilometre across and chunks a quarter of
+  that, so this is one district in the middle of one and four at a corner."
+  [seed gx0 gx1 gz0 gz1]
+  (let [d (fn [g] (long (floor (/ (double g) cells-per-district))))]
+    (into #{}
+          (for [dx (range (d gx0) (inc (d gx1)))
+                dz (range (d gz0) (inc (d gz1)))
+                :let [lm (landmark seed dx dz)]
+                :when lm]
+            (:cell lm)))))
+
+
+(def ^:private tau 6.283185307179586)
+
+(def ^:private landmark-tints
+  {:concrete 0xb8b4ac :dark 0x4a4a4e :grass 0x4c7a3e :water 0x35617f
+   :brick 0x9a5f47 :metal 0x8b9199 :roof 0x6b4a3c :stone 0x8f8a80
+   :tarmac 0x3a3a3e :white 0xd8d0c4 :timber 0x6f5238 :leaf 0x3f6b32
+   :red 0xa33b30})
+
+(defn- lp
+  "One landmark part, in the cell's own frame: centre at (0,0), y from the
+  ground the landmark was levelled to."
+  ([x y z sx sy sz prim tint] (lp x y z 0.0 sx sy sz prim tint 1.0))
+  ([x y z yaw sx sy sz prim tint solid]
+   {:x x :y y :z z :yaw yaw :sx sx :sy sy :sz sz :prim prim
+    :tint (landmark-tints tint) :solid solid}))
+
+(defn- apron
+  "The slab a landmark stands on.
+
+  Terrain under a landmark cell is not flattened -- flattening it would mean
+  the heightfield and its collider disagreeing with the road field -- so
+  everything is built to one height sampled at the centre and given a plinth
+  deep enough to bury the difference. On a slope it reads as a raised
+  platform, which is what a stadium on a hillside looks like anyway."
+  [hx hz tint]
+  (lp 0.0 -1.4 0.0 0.0 (* 1.9 hx) 3.0 (* 1.9 hz) :box tint 0.0))
+
+(defn- ring
+  "n points evenly around an ellipse: [x z angle]."
+  [n rx rz]
+  (for [i (range n)
+        :let [a (* tau (/ (double i) n))]]
+    [(* rx (js-sin a)) (* rz (js-cos a)) a]))
+
+(defn- tree-at [x z h]
+  [(lp x (* 0.5 h) z 0.0 0.5 h 0.5 :cylinder :timber 1.0)
+   (lp x (* 1.05 h) z 0.0 (* 0.9 h) (* 0.8 h) (* 0.9 h) :blob :leaf 0.0)])
+
+(defmulti ^:private landmark-shapes
+  "The volumes a landmark is made of, in its own frame."
+  (fn [kind _hx _hz _r] kind))
+
+(defmethod landmark-shapes :stadium [_ hx hz r]
+  (let [rx (* 0.80 hx) rz (* 0.80 hz)]
+    (concat
+     [(apron hx hz :concrete)
+      ;; The pitch, and the running track around it.
+      (lp 0.0 0.12 0.0 0.0 (* 1.30 rx) 0.24 (* 1.30 rz) :cylinder :tarmac 0.0)
+      (lp 0.0 0.20 0.0 0.0 (* 1.05 rx) 0.24 (* 1.05 rz) :box :grass 0.0)]
+     ;; Stands: boxes laid tangentially round the bowl, leaning outward, so
+     ;; the silhouette from outside is a wall and from above it is a ring.
+     (for [[x z a] (ring 22 rx rz)]
+       (lp (* 1.35 x) 7.0 (* 1.35 z) a
+           (/ (* 0.34 (+ rx rz)) 2.0) 14.0 12.0 :box :concrete 1.0))
+     ;; Floodlights on the four corners.
+     (for [[x z _] (ring 4 (* 1.5 rx) (* 1.5 rz))]
+       (lp x 15.0 z 0.0 1.2 30.0 1.2 :cylinder :metal 1.0))
+     (for [[x z _] (ring 4 (* 1.5 rx) (* 1.5 rz))]
+       (lp x 31.0 z 0.0 5.0 2.0 1.5 :box :white 0.0)))))
+
+(defmethod landmark-shapes :mall [_ hx hz r]
+  [(apron hx hz :tarmac)
+   ;; Car park stripes, then the shed itself set back from the road.
+   (lp 0.0 0.10 (* 0.55 hz) 0.0 (* 1.7 hx) 0.2 (* 0.7 hz) :box :dark 0.0)
+   (lp 0.0 5.5 (* -0.25 hz) 0.0 (* 1.5 hx) 11.0 (* 1.0 hz) :box :concrete 1.0)
+   (lp 0.0 11.6 (* -0.25 hz) 0.0 (* 1.52 hx) 1.2 (* 1.02 hz) :box :metal 1.0)
+   ;; Entrance canopy and the pylon sign that makes it visible three blocks off.
+   (lp 0.0 3.4 (* 0.28 hz) 0.0 (* 0.45 hx) 6.8 6.0 :box :white 1.0)
+   (lp (* -0.7 hx) 9.0 (* 0.7 hz) 0.0 1.0 18.0 1.0 :cylinder :metal 1.0)
+   (lp (* -0.7 hx) 18.5 (* 0.7 hz) 0.0 4.0 3.0 1.2 :box :red 0.0)])
+
+(defmethod landmark-shapes :park [_ hx hz r]
+  (concat
+   [(apron hx hz :grass)
+    (lp 0.0 0.14 0.0 0.0 (* 1.85 hx) 0.28 (* 1.85 hz) :box :grass 0.0)
+    ;; A pond, a path across it, and a bandstand to aim at.
+    (lp (* 0.42 hx) 0.20 (* -0.35 hz) 0.0 (* 0.55 hx) 0.3 (* 0.5 hz)
+        :cylinder :water 0.0)
+    (lp 0.0 0.22 0.0 0.0 (* 1.8 hx) 0.32 3.0 :box :stone 0.0)
+    (lp (* -0.45 hx) 2.2 (* 0.4 hz) 0.0 6.0 4.4 6.0 :cylinder :white 1.0)
+    (lp (* -0.45 hx) 5.4 (* 0.4 hz) 0.0 7.0 3.0 7.0 :pyramid :roof 0.0)]
+   (mapcat (fn [[x z _]] (tree-at x z (+ 6.0 (prng/next-range! r 0.0 4.0))))
+           (ring 9 (* 0.78 hx) (* 0.78 hz)))))
+
+(defmethod landmark-shapes :plaza [_ hx hz r]
+  (concat
+   [(apron hx hz :stone)
+    (lp 0.0 0.16 0.0 0.0 (* 1.85 hx) 0.32 (* 1.85 hz) :box :stone 0.0)
+    ;; An obelisk, because a plaza with nothing in the middle is a car park.
+    (lp 0.0 1.0 0.0 0.0 7.0 2.0 7.0 :box :white 1.0)
+    (lp 0.0 11.0 0.0 0.0 2.6 20.0 2.6 :box :white 1.0)
+    (lp 0.0 23.0 0.0 0.0 2.8 4.0 2.8 :pyramid :white 0.0)
+    (lp 0.0 0.7 (* 0.62 hz) 0.0 14.0 1.4 4.0 :box :water 1.0)]
+   (mapcat (fn [[x z _]] (tree-at x z 7.0))
+           (ring 8 (* 0.82 hx) (* 0.82 hz)))))
+
+(defmethod landmark-shapes :works [_ hx hz r]
+  (concat
+   [(apron hx hz :tarmac)
+    (lp (* -0.45 hx) 6.0 0.0 0.0 (* 0.85 hx) 12.0 (* 1.3 hz) :box :metal 1.0)
+    (lp (* -0.45 hx) 14.0 0.0 0.0 (* 0.87 hx) 5.0 (* 1.32 hz) :gable :roof 0.0)
+    (lp (* 0.5 hx) 4.5 (* -0.4 hz) 0.0 (* 0.6 hx) 9.0 (* 0.6 hz) :box :brick 1.0)]
+   ;; Chimneys, which is what makes it readable from the other side of town.
+   (for [[x z _] (ring 2 (* 0.55 hx) (* 0.55 hz))]
+     (lp x 18.0 z 0.0 3.0 36.0 3.0 :cylinder :brick 1.0))
+   ;; Tanks.
+   (for [[x z _] (ring 3 (* 0.62 hx) (* 0.62 hz))]
+     (lp x 4.0 z 0.0 9.0 8.0 9.0 :cylinder :metal 1.0))))
+
+(defmethod landmark-shapes :silos [_ hx hz r]
+  (concat
+   [(apron hx hz :concrete)
+    (lp (* 0.4 hx) 5.0 (* 0.35 hz) 0.0 (* 0.7 hx) 10.0 (* 0.7 hz) :box :timber 1.0)
+    (lp (* 0.4 hx) 12.0 (* 0.35 hz) 0.0 (* 0.72 hx) 5.0 (* 0.72 hz) :gable :roof 0.0)
+    ;; The conveyor, running from the barn to the silos.
+    (lp 0.0 11.0 0.0 0.0 (* 1.2 hx) 1.2 1.2 :box :metal 1.0)]
+   (for [i (range 5)]
+     (lp (+ (* -0.55 hx) (* i 8.5)) 11.0 (* -0.35 hz) 0.0
+         7.5 22.0 7.5 :cylinder :white 1.0))))
+
+(defmethod landmark-shapes :church [_ hx hz r]
+  [(apron hx hz :grass)
+   (lp 0.0 0.14 0.0 0.0 (* 1.8 hx) 0.28 (* 1.8 hz) :box :grass 0.0)
+   ;; Nave, roof, tower, spire. A spire is the one shape that says church at
+   ;; four hundred metres.
+   (lp 0.0 5.0 (* 0.15 hz) 0.0 12.0 10.0 (* 1.1 hz) :box :stone 1.0)
+   (lp 0.0 12.0 (* 0.15 hz) 0.0 12.5 4.0 (* 1.12 hz) :gable :roof 0.0)
+   (lp 0.0 9.0 (* -0.62 hz) 0.0 8.0 18.0 8.0 :box :stone 1.0)
+   (lp 0.0 24.0 (* -0.62 hz) 0.0 8.5 12.0 8.5 :pyramid :roof 0.0)
+   ;; The churchyard wall, which is what you actually hit.
+   (lp 0.0 0.7 (* 0.92 hz) 0.0 (* 1.8 hx) 1.4 0.8 :box :stone 1.0)
+   (lp 0.0 0.7 (* -0.92 hz) 0.0 (* 1.8 hx) 1.4 0.8 :box :stone 1.0)])
+
+(defmethod landmark-shapes :monument [_ hx hz r]
+  (concat
+   [(lp 0.0 -0.8 0.0 0.0 (* 1.5 hx) 2.4 (* 1.5 hz) :cylinder :grass 0.0)]
+   ;; A ring of stones, each leaning its own way. It is the only landmark that
+   ;; belongs in open country, and the only one with no straight lines in it.
+   (mapcat (fn [[x z a]]
+             (let [h (prng/next-range! r 5.0 8.0)]
+               [(lp x (* 0.5 h) z (+ a (prng/next-range! r -0.3 0.3))
+                    2.6 h 1.4 :box :stone 1.0)]))
+           (ring 9 (* 0.5 hx) (* 0.5 hz)))
+   ;; Two lintels across the nearest pair, so it reads as built rather than
+   ;; scattered.
+   (for [[x z a] (take 2 (ring 9 (* 0.5 hx) (* 0.5 hz)))]
+     (lp (* 0.94 x) 8.4 (* 0.94 z) a 6.0 1.2 1.4 :box :stone 1.0))))
+
+(defmethod landmark-shapes :mast [_ hx hz r]
+  (concat
+   [(lp 0.0 0.3 0.0 0.0 14.0 1.0 14.0 :box :concrete 0.0)
+    ;; A lattice mast: three legs and a stack of platforms. Nothing else in the
+    ;; catalogue is visible from a district away in flat country.
+    (lp 0.0 45.0 0.0 0.0 1.4 90.0 1.4 :cylinder :metal 1.0)
+    (lp 0.0 92.0 0.0 0.0 0.7 6.0 0.7 :cylinder :red 0.0)
+    ;; The compound: a hut and a fence you can drive through the middle of.
+    (lp (* 0.4 hx) 2.0 (* 0.4 hz) 0.0 8.0 4.0 6.0 :box :white 1.0)]
+   (for [[x z a] (ring 3 5.5 5.5)]
+     (lp x 22.0 z a 0.8 44.0 0.8 :box :metal 1.0))
+   (for [y [18.0 40.0 66.0]]
+     (lp 0.0 y 0.0 0.0 7.0 0.8 7.0 :box :metal 0.0))))
+
+(defn chunk-landmarks
+  "The landmark this chunk owns, as a flat parts array in the same layout as
+  `chunk-bridges`. Empty for the fifteen chunks in a district that do not own
+  one, which is most of them.
+
+  Ownership is by the landmark's centre, the same rule streets use, so exactly
+  one chunk builds it however the districts and the chunk grid line up."
+  [seed cx cz]
+  (let [[dx dz] (district-of cx cz)
+        out (transient [])]
+    (doseq [ddx [-1 0 1], ddz [-1 0 1]
+            :let [lm (landmark seed (+ dx ddx) (+ dz ddz))]
+            :when lm
+            :let [[ox oz] (chunk-of (:x lm) (:z lm))]
+            :when (and (= ox cx) (= oz cz))]
+      (let [{:keys [kind x z half-x half-z]} lm
+            y0 (height-at seed x z)
+            ;; Its own generator, so adding a landmark kind cannot shift the
+            ;; trees in the next district.
+            r  (prng/chunk-rng seed cx cz (+ 97 (:landmarks k/salt)))]
+        (doseq [{:keys [x y z yaw sx sy sz prim tint solid]}
+                (remove nil? (flatten (landmark-shapes kind half-x half-z r)))]
+          (doseq [v [(+ (:x lm) x) (+ y0 y) (+ (:z lm) z) yaw 0.0 sx sy sz
+                     (double (prim-index prim)) (double tint) solid]]
+            (conj! out v)))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a)))
+
 (defn chunk-lots
   "The plots this chunk owns -- those whose centre lands inside it."
   [seed cx cz]
@@ -1306,9 +1597,15 @@
         gx0 (dec (grid-floor x0 street-spacing))
         gx1 (inc (grid-floor x1 street-spacing))
         gz0 (dec (grid-floor z0 street-spacing))
-        gz1 (inc (grid-floor z1 street-spacing))]
+        gz1 (inc (grid-floor z1 street-spacing))
+        ;; A landmark takes the whole cell, so no lots are cut in it. Computed
+        ;; once for the chunk rather than per cell: the answer is a property of
+        ;; the district, and asking it twenty-five times would mean rerunning
+        ;; the same district search twenty-five times.
+        claimed (landmark-cells seed gx0 gx1 gz0 gz1)]
     (vec (for [gx (range gx0 (inc gx1))
                gz (range gz0 (inc gz1))
+               :when (not (contains? claimed [gx gz]))
                lot (cell-lots seed gx gz)
                :when (and (<= x0 (:x lot)) (< (:x lot) x1)
                           (<= z0 (:z lot)) (< (:z lot) z1))]
@@ -1983,6 +2280,7 @@
           furniture (chunk-furniture seed cx cz field owned ground)
           bridges (chunk-bridges seed cx cz owned)
           flora (chunk-flora seed cx cz field)
+          landmarks (chunk-landmarks seed cx cz)
           traffic (chunk-traffic seed cx cz owned)]
     {:cx cx :cz cz :verts n :size k/chunk-size
      :origin [x0 z0]
@@ -1995,6 +2293,7 @@
      :furniture furniture
      :bridges bridges
      :flora flora
+     :landmarks landmarks
      :traffic traffic
      :biome (biome seed cx cz)})))
 
