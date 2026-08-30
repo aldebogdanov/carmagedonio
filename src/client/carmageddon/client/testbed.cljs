@@ -13,6 +13,8 @@
             [carmageddon.client.sim :as sim]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.client.chunks :as chunks]
+            [carmageddon.client.parts :as parts]
+            ["three" :as three]
             ["@dimforge/rapier3d-compat" :as RAPIER]
             [carmageddon.shared.worldgen :as worldgen]
             [carmageddon.shared.constants :as k]))
@@ -276,6 +278,87 @@
     {:max-error-m (round 3 (apply max errs))
      :mean-error-m (round 3 (mean errs))}))
 
+(defn- load-around!
+  "Terrain and bridge colliders for the 3x3 block of chunks around (cx,cz).
+
+  The browser does this from a worker and a chunk manager; here it is done
+  directly, because what is being measured is the physics, not the streaming."
+  [^js world parts-state seed cx cz]
+  (doseq [dx [-1 0 1], dz [-1 0 1]]
+    (let [c (+ cx dx) z (+ cz dz)
+          data (worldgen/chunk-data seed c z)]
+      (chunks/add-collider! world data (dec (:verts data)))
+      (parts/add-chunk! parts-state [c z] (:bridges data)))))
+
+(defn- find-bridge
+  "The nearest chunk to the origin that owns a span, and the middle of it."
+  [seed]
+  (first
+   (for [d (range 0 10)
+         cx (range (- d) (inc d)), cz (range (- d) (inc d))
+         :when (= d (max (abs cx) (abs cz)))
+         :let [spans (filter :bridge? (worldgen/chunk-lines seed cx cz))]
+         :when (seq spans)
+         :let [{:keys [points ya yb]} (first spans)
+               [ax az] (first points)
+               [bx bz] (peek points)]]
+     {:chunk [cx cz]
+      :mid   [(* 0.5 (+ ax bx)) (* 0.5 (+ ya yb)) (* 0.5 (+ az bz))]
+      :yaw   (js/Math.atan2 (- (- bx ax)) (- (- bz az)))
+      :len   (js/Math.hypot (- bx ax) (- bz az))})))
+
+(defn bridge-run
+  "Put a car on a bridge deck, drive it along the span, then steer it off.
+
+  Two things are being asked, and they are not the same question. First,
+  whether the deck is a thing rather than a picture: a car placed on it should
+  be held up by it, with the river or the ravine still down there. Second,
+  whether the sides can be left: a parapet that cannot be crossed makes the
+  bridge a corridor, and the fall is half the point of building the thing."
+  []
+  (let [seed 20260823
+        {:keys [chunk mid yaw]} (find-bridge seed)
+        [cx cz] chunk
+        [mx my mz] mid
+        s  (sim/create! {:seed seed})
+        ^js world (:world @s)
+        ps (parts/create world (three/Scene.))
+        _  (load-around! world ps seed cx cz)
+        ;; The same wiring `main` does, and for the same reason: without it a
+        ;; parapet is a wall.
+        _  (swap! s assoc :on-impact
+                  (fn [h1 h2 _]
+                    (let [[vx vy vz] (:vel (sim/telemetry s))]
+                      (parts/smash! ps h1 [vx vy vz])
+                      (parts/smash! ps h2 [vx vy vz]))))
+        ;; The riverbed under the span -- how far there is to fall.
+        bed (worldgen/height-at seed mx mz)
+        _  (sim/place-vehicle! s 0 [mx (+ my 1.0) mz] yaw)
+        ;; Settle, then drive along the span.
+        t  (step-n! s 0 120 {})
+        on (loop [t t, i 0, low ##Inf, down 0]
+             (if (= i 240)
+               {:lowest-y (round 2 low) :wheels-down down}
+               (let [tel (sim/telemetry s)
+                     [_ y _] (:pos tel)]
+                 (sim/step! s (command t {:throttle 0.45}))
+                 (recur (inc t) (inc i) (min low y)
+                        (max down (sim/wheels-on-ground s))))))
+        ;; Now off the side: full lock and full throttle.
+        off (loop [t t, i 0]
+              (if (= i 420)
+                (round 2 (second (:pos (sim/telemetry s))))
+                (do (sim/step! s (command t {:throttle 1.0 :steer 1.0}))
+                    (recur (inc t) (inc i)))))]
+    {:deck-y (round 2 my)
+     :riverbed-y (round 2 bed)
+     :drop-available (round 1 (- my bed))
+     :held-up-at (:lowest-y on)
+     :wheels-down (:wheels-down on)
+     :panels-smashed (:smashed (parts/stats ps))
+     :y-after-driving-off off
+     :fell (< off (- my 2.0))}))
+
 ;; --- report -----------------------------------------------------------------
 
 (defn- line [label v] (println (str "  " label) (pr-str v)))
@@ -296,6 +379,8 @@
   (line "from 60    " (handbrake-slide 60))
   (println "\nstability (30 s of throttle, steering and handbrake)")
   (line "           " (stability))
+  (println "\nbridges")
+  (line "drive over " (bridge-run))
   (println "\nworldgen")
   (line "chunk cost " (worldgen-cost))
   (line "heightfield" (heightfield-orientation))

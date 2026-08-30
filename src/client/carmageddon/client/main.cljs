@@ -66,7 +66,7 @@
 (defn- apply-inbound!
   "Drain the transport. Everything the network can say about the world arrives
   here: who moved, who left, and what got destroyed."
-  [transport remotes props-state peds-state traffic-state now]
+  [transport remotes props-state peds-state traffic-state bridges now]
   (doseq [msg (net/-poll! transport)]
     (case (:type msg)
       :welcome (remote/set-self! remotes (:player-id msg))
@@ -78,16 +78,17 @@
                  ;; shared world stays shared -- and record the delta so it
                  ;; survives the chunk unloading and coming back.
                  (case kind
-                   :prop (props/destroy-index! props-state key index)
-                   :ped  (peds/kill-index! peds-state key index [0.0 0.0 0.0])
-                   :car  (traffic/wreck-index! traffic-state key index)
+                   :prop    (props/destroy-index! props-state key index)
+                   :ped     (peds/kill-index! peds-state key index [0.0 0.0 0.0])
+                   :car     (traffic/wreck-index! traffic-state key index)
+                   :barrier (parts/smash-index! bridges key index [0.0 0.0 0.0])
                    nil))
       nil)))
 
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  rvs remotes]}]
+                                  bridges rvs remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -113,7 +114,7 @@
           (when (zero? (mod tick snap-every))
             (net/-send! transport (wire/encode-state tick [(car-snapshot sim)])))
           (apply-inbound! transport remotes props-state peds-state traffic-state
-                          (js/Date.now))))
+                          bridges (js/Date.now))))
 
       :on-frame
       (fn [alpha dt]
@@ -131,6 +132,7 @@
         (overlay/set-vehicle! overlay (car-snapshot sim))
         (overlay/save! overlay (js/Date.now))
         (props/sync! props-state)
+        (parts/sync! bridges)
         (traffic/sync! traffic-state)
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
@@ -211,7 +213,7 @@
         ps        (props/create (:world @s) (:scene rs) ov)
         bs        (buildings/create (:world @s) (:scene rs) (:textures rs))
         fu        (furniture/create (:world @s) (:scene rs))
-        br        (parts/create (:world @s) (:scene rs))
+        br        (parts/create (:world @s) (:scene rs) ov)
         fl        (parts/create (:world @s) (:scene rs))
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
@@ -296,7 +298,17 @@
                                   (game/car-wrecked! gm)
                                   (net/-send! transport
                                               (wire/encode-delta
-                                               (assoc d :kind :car))))))))
+                                               (assoc d :kind :car))))))
+                            ;; Bridge parapets. Scored as clutter, because what
+                            ;; they are worth is not the points -- it is the
+                            ;; hole, and what is on the other side of it.
+                            (when (parts/breakable? br hit)
+                              (let [[vx vy vz] (:vel (sim/telemetry s))]
+                                (when-let [d (parts/smash! br hit [vx vy vz])]
+                                  (game/prop-wrecked! gm)
+                                  (net/-send! transport
+                                              (wire/encode-delta
+                                               (assoc d :kind :barrier))))))))
                         ;; Damage lands on every car in the collision, which is
                         ;; how a rival gets written off at all. This used to be
                         ;; applied to `(:vehicle @s)` -- a key the sim stopped
@@ -333,6 +345,7 @@
                                                  :props-state ps :buildings-state bs
                                                  :furniture-state fu
                                                  :traffic-state tf
+                                                 :bridges br
                                                  :birds-state bd
                                                  :overlay ov
                                                  :minimap mm

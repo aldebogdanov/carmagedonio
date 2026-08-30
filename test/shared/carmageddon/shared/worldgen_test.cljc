@@ -746,9 +746,23 @@
       ;; stopped being flat slabs, and this is the test that noticed.
       (is (every? (fn [i] (and (<= 0 (at i 8)) (< (at i 8) (count w/part-prims))
                                (<= 0 (at i 9) 0xffffff)
-                               (contains? #{0.0 1.0} (at i 10))
+                               (contains? #{0.0 1.0 2.0} (at i 10))
                                (> (at i 5) 0.0) (> (at i 6) 0.0) (> (at i 7) 0.0)))
                   (range n))))
+    (testing "the parapets can be knocked out and the deck cannot"
+      ;; A bridge you cannot leave the sides of is a corridor with a view, so
+      ;; the sides have to be breakable -- and the deck has to not be, or the
+      ;; road itself would come away under the wheels.
+      (let [rails (filter #(= 2.0 (at % 10)) (range n))
+            decks (filter #(= 1.0 (at % 10)) (range n))]
+        (is (seq rails) "no breakable parapet panels")
+        (is (seq decks) "no fixed deck")
+        (is (> (count rails) (* 2 (count decks)))
+            "parapets should come in panels, not one slab per deck segment")
+        ;; Every panel is thin and short: that is what makes a hole in the side
+        ;; rather than the whole side coming away at once.
+        (is (every? (fn [i] (and (< (at i 5) 1.0) (< (at i 6) 1.5))) rails))))
+
     (testing "the deck carries the collider and the piers do not: a pier stands
               underneath where nothing can reach it"
       (let [box (part-index-of w/part-prims :box)

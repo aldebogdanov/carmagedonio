@@ -763,7 +763,8 @@
 
 (def ^:private deck-thickness 0.55)
 (def ^:private deck-margin 1.1)     ; deck overhangs the carriageway either side
-(def ^:private rail-height 1.15)
+(def ^:private rail-height 0.9)
+(def ^:private rail-panel 4.0)      ; metres of parapet per breakable panel
 (def ^:private pier-spacing 15.0)
 (def ^:private pier-min 2.0)        ; below this a pier is a stub, not worth it
 
@@ -774,10 +775,15 @@
   "Deck, parapets and piers for every bridge this chunk owns, as
   [x y z yaw pitch sx sy sz prim tint solid ...].
 
-  `solid` marks the parts a car can land on. The deck and its parapets are
-  collidable and the piers are not: a pier stands under the deck where nothing
-  can reach it, and giving each one a collider would pay for a broad-phase entry
-  per pier for nothing.
+  `solid` is three-valued: 0 for parts with no collider at all, 1 for fixed
+  scenery, 2 for scenery that can be knocked out of the way. The deck is 1 and
+  the parapets are 2, which is the difference between a bridge and a corridor:
+  a car that cannot leave the sides of a span is driving down a tube with a
+  view. Piers are 0 -- a pier stands under the deck where nothing can reach it,
+  and a collider each would pay for a broad-phase entry for nothing.
+
+  Parapets come in short panels rather than one slab per segment, so what a car
+  takes out is a gap rather than the whole side of the bridge.
 
   The deck follows the chord the street's endpoint heights were taken from, so
   it meets the road exactly at both ends -- the approach is flattened terrain
@@ -821,9 +827,22 @@
                 off (- (* 0.5 width) 0.15)]
             (emit mx (- my sink) mz yaw pitch
                   width deck-thickness span :box (:deck bridge-tint) 1.0)
-            (doseq [sgn [1.0 -1.0]]
-              (emit (+ mx (* rx off sgn)) (+ my (* 0.5 rail-height)) (+ mz (* rz off sgn))
-                    yaw pitch 0.3 rail-height span :box (:rail bridge-tint) 1.0))))
+            (let [panels (max 1 (long (floor (/ span rail-panel))))
+                  plen   (/ span panels)
+                  ;; Along the span, in world terms. The deck is pitched, so
+                  ;; the panels have to step up it rather than around it.
+                  ax (/ dx horiz) az (/ dz horiz)
+                  ay (/ dy span)
+                  step (/ (* plen horiz) span)]
+              (dotimes [p panels]
+                (let [u (- (+ p 0.5) (* 0.5 panels))       ; panels either side of centre
+                      cxp (+ mx (* ax step u))
+                      czp (+ mz (* az step u))
+                      cyp (+ my (* ay plen u))]
+                  (doseq [sgn [1.0 -1.0]]
+                    (emit (+ cxp (* rx off sgn)) (+ cyp (* 0.5 rail-height)) (+ czp (* rz off sgn))
+                          yaw pitch 0.3 rail-height (* 0.92 plen)
+                          :box (:rail bridge-tint) 2.0)))))))
         ;; Piers, spaced along the whole span rather than per segment.
         (let [[ax az] (first points)
               [bx bz] (peek points)
