@@ -19,11 +19,10 @@
   genuinely be too slow."
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
+            [carmageddon.client.figures :as fig]
             [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
-(def ^:private half [0.82 0.58 1.85])
-(def ^:private ride 0.62)          ; body centre above the road surface
 (def ^:private lane 0.45)          ; share of the carriageway half-width to sit off
 (def ^:private stop-line 0.86)     ; how far along a street a red light holds a car
 (def ^:private follow-gap 7.5)     ; metres to leave to the car in front
@@ -32,9 +31,51 @@
 (def ^:private colours
   [0x9fa4ab 0x3d4b63 0x8c3a34 0xd8d2c4 0x2f4f3a 0x6b5a3e 0x1f2833 0xb08a3c])
 
-(deftype Car [body collider handle key idx colour
+(def ^:private glass 0x1d2733)
+(def ^:private rubber 0x1b1b1e)
+
+;; Local +Z is forward here, not -Z: `place!` yaws by atan2(nx, nz), which maps
+;; local +Z onto the direction of travel. It never mattered while a car was a
+;; symmetrical box; it matters the moment one has a windscreen.
+;;
+;; `parts` are the shapes bolted to the body, `wheel` where the four go. The
+;; collider is still one cuboid -- what the player hits is the shape of the
+;; vehicle, not the shape of its cab.
+(def ^:private types
+  [{:name :saloon
+    :half [0.82 0.55 1.95] :ride 0.60
+    :wheel {:r 0.32 :w 0.22 :track 0.80 :base 1.32}
+    :parts [{:at [0.0 0.46 -0.10] :size [1.42 0.50 1.90] :tint :glass}]}
+   {:name :hatch
+    :half [0.76 0.52 1.62] :ride 0.56
+    :wheel {:r 0.29 :w 0.20 :track 0.74 :base 1.10}
+    :parts [{:at [0.0 0.44 -0.06] :size [1.34 0.48 1.60] :tint :glass}]}
+   {:name :van
+    :half [0.88 0.86 2.35] :ride 0.90
+    :wheel {:r 0.35 :w 0.24 :track 0.84 :base 1.60}
+    :parts [{:at [0.0 0.30 1.70] :size [1.66 1.00 0.70] :tint :glass}
+            {:at [0.0 0.94 -0.30] :size [1.70 0.14 3.60] :tint :body}]}
+   {:name :pickup
+    :half [0.86 0.60 2.25] :ride 0.66
+    :wheel {:r 0.36 :w 0.26 :track 0.84 :base 1.55}
+    :parts [{:at [0.0 0.52 0.70] :size [1.52 0.62 1.50] :tint :glass}
+            {:at [-0.82 0.34 -0.85] :size [0.10 0.44 2.00] :tint :body}
+            {:at [0.82 0.34 -0.85] :size [0.10 0.44 2.00] :tint :body}]}
+   {:name :lorry
+    :half [1.05 1.20 3.30] :ride 1.28
+    :wheel {:r 0.46 :w 0.32 :track 0.98 :base 2.20}
+    :parts [{:at [0.0 0.60 2.40] :size [2.00 1.30 1.40] :tint :glass}
+            {:at [0.0 0.40 -0.90] :size [2.16 2.20 4.60] :tint :body}]}])
+
+;; Most of what is on a road is a car. One vehicle in six being a van and one in
+;; twelve a lorry is roughly a city street; drawing the type uniformly makes
+;; every junction look like a depot.
+(def ^:private type-mix [0 0 1 0 1 0 3 2 0 1 0 4])
+
+(deftype Car [body collider handle key idx colour type ti meshes slots
               ^:mutable from ^:mutable to ^:mutable t ^:mutable speed
-              ^:mutable leg ^:mutable alive? ^:mutable rnd ^:mutable ekey]
+              ^:mutable leg ^:mutable alive? ^:mutable rnd ^:mutable ekey
+              ^:mutable dist]
   ;; A record would allocate a new one of these per car per tick. Traffic is the
   ;; one place in the client where state is genuinely mutated in place, and
   ;; deftype fields are munged by the ClojureScript compiler rather than left to
@@ -42,20 +83,62 @@
   Object
   (toString [_] (str "Car " idx " " from "->" to)))
 
+(def ^:private box-slots 2600)     ; bodies and bodywork
+(def ^:private wheel-slots 3200)
+
+(defn- type-rig
+  "One vehicle as a rig: hull, bodywork, four wheels.
+
+  The wheels are `spin?` parts, which turn continuously rather than leaning
+  back and forth the way a pedestrian's leg does. Everything else is rigid and
+  its transform is built once, here, rather than sixty times a second."
+  [{:keys [half parts wheel]}]
+  (let [[hx hy hz] half
+        {wr :r ww :w track :track base :base} wheel
+        y (+ (- hy) (* 0.35 wr))]
+    (fig/rig
+     (concat
+      [{:shape :box :at [0.0 0.0 0.0] :size [(* 2 hx) (* 2 hy) (* 2 hz)]}]
+      (for [{:keys [at size]} parts] {:shape :box :at at :size size})
+      (for [j (range 4)]
+        {:shape :wheel :spin? true
+         :at [(if (even? j) (- track) track) y (if (< j 2) base (- base))]
+         :size [ww (* 2 wr) (* 2 wr)]})))))
+
 (defn create [world scene seed ov]
-  (atom {:world world :scene scene :seed seed :overlay ov
-         :geometry (three/BoxGeometry. (* 2 (nth half 0)) (* 2 (nth half 1))
-                                       (* 2 (nth half 2)))
-         :material (three/MeshPhongMaterial. #js {:color 0xffffff :shininess 24
-                                                  :flatShading true})
-         :scratch (three/Object3D.)
-         :colour (three/Color.)
+  (let [material (three/MeshPhongMaterial. #js {:color 0xffffff :shininess 26
+                                                :flatShading true})
+        ;; Two pools for the whole road network. It was one InstancedMesh per
+        ;; chunk before, which was already cheap -- the reason to change is that
+        ;; a car is now six pieces, and per-chunk meshes would have made that
+        ;; six meshes a chunk.
+        pools {:box (fig/pool scene (three/BoxGeometry. 1 1 1) material
+                              box-slots {:receive? true})
+               ;; Axis along X, so the rotation the rig applies about X spins
+               ;; the wheel rather than tipping it over.
+               :wheel (fig/pool scene
+                                (doto (three/CylinderGeometry. 0.5 0.5 1 10)
+                                  (.rotateZ (/ js/Math.PI 2)))
+                                material wheel-slots {})}
+        rigs (mapv type-rig types)]
+    (atom {:world world :scene scene :seed seed :overlay ov
+         :pools pools
+         :rigs rigs
+         :rig-meshes (mapv (fn [r] (into-array (map #(:mesh (get pools (:shape %)))
+                                                    (:parts r))))
+                           rigs)
+         :body-m (three/Matrix4.)
+         :local-m (three/Matrix4.)
+         :out-m (three/Matrix4.)
+         :qpos (three/Vector3.)
+         :quat (three/Quaternion.)
+         :one (three/Vector3. 1 1 1)
          ;; One placement object for the whole simulation. `place!` writes into
          ;; it rather than returning, so driving allocates nothing per tick.
          :place #js {:x 0.0 :y 0.0 :z 0.0 :h 0.0}
-         :chunks {}          ; [cx cz] -> {:mesh :cars}
+         :chunks {}          ; [cx cz] -> {:cars}
          :by-collider {}     ; handle -> car
-         :wrecked 0}))
+         :wrecked 0})))
 
 ;; --- geometry along a street ------------------------------------------------
 
@@ -106,9 +189,10 @@
 
 (defn- place!
   "Write the world position and heading `t` of the way along a leg into `out`,
-  offset into its lane. Writes rather than returns: this runs per car per tick
-  and the object would otherwise be garbage every time."
-  [^js out ^Leg lg t]
+  offset into its lane, `ride` metres above the carriageway. Writes rather than
+  returns: this runs per car per tick and the object would otherwise be garbage
+  every time."
+  [^js out ^Leg lg t ride]
   (let [segs (.-segs lg)
         n (/ (.-length segs) 5)
         want (* t (.-total lg))]
@@ -157,11 +241,25 @@
 
 ;; --- spawning ---------------------------------------------------------------
 
+(defn- claim-slots!
+  "One box slot for the body, one for each piece of bodywork, four wheels."
+  [pools type]
+  (let [nb (inc (count (:parts type)))
+        slots (js/Int32Array. (+ nb 4))]
+    (dotimes [i nb] (aset slots i (fig/claim! (:box pools))))
+    (dotimes [i 4] (aset slots (+ nb i) (fig/claim! (:wheel pools))))
+    slots))
+
 (defn- spawn-one! [ts key idx from to t0 speed]
-  (let [{:keys [^js world seed]} @ts
+  (let [{:keys [^js world seed pools]} @ts
+        ;; Which vehicle, drawn from a fixed mix rather than uniformly: a road
+        ;; where a fifth of the traffic is lorries is a depot, not a street.
+        ti (nth type-mix (mod (+ idx (* 3 (nth from 0)) (* 5 (nth from 1)))
+                              (count type-mix)))
+        type (nth types ti)
         lg (leg seed from to)
-        p (place! #js {:x 0.0 :y 0.0 :z 0.0 :h 0.0} lg t0)
-        [hx hy hz] half
+        p (place! #js {:x 0.0 :y 0.0 :z 0.0 :h 0.0} lg t0 (:ride type))
+        [hx hy hz] (:half type)
         ^js body (.createRigidBody
                   world
                   (-> (.kinematicPositionBased RAPIER/RigidBodyDesc)
@@ -174,16 +272,27 @@
                           (.setRestitution 0.1)
                           (.setActiveEvents (.-CONTACT_FORCE_EVENTS RAPIER/ActiveEvents))
                           (.setContactForceEventThreshold 1500.0))
-                      body)]
-    (->Car body collider (.-handle collider) key idx
-           (nth colours (mod (+ idx (nth from 0) (nth from 1)) (count colours)))
+                      body)
+        colour (nth colours (mod (+ idx (nth from 0) (nth from 1)) (count colours)))
+        slots (claim-slots! pools type)
+        meshes (nth (:rig-meshes @ts) ti)]
+    ;; Paint is written once. A car's colour does not change until it is a wreck.
+    (let [nb (inc (count (:parts type)))]
+      (fig/set-colour! (:box pools) (aget slots 0) colour)
+      (dotimes [i (count (:parts type))]
+        (fig/set-colour! (:box pools) (aget slots (inc i))
+                         (case (:tint (nth (:parts type) i))
+                           :glass glass
+                           colour)))
+      (dotimes [i 4] (fig/set-colour! (:wheel pools) (aget slots (+ nb i)) rubber)))
+    (->Car body collider (.-handle collider) key idx colour type ti meshes slots
            from to t0 speed lg true
            (js/Math.abs (js/Math.sin (+ (* 12.9898 idx) (* 0.017 (nth from 0)))))
-           (edge-key from to))))
+           (edge-key from to) 0.0)))
 
 (defn add-chunk! [ts key arr]
   (when (and arr (pos? (.-length arr)))
-    (let [{:keys [^js scene ^js geometry ^js material overlay]} @ts
+    (let [{:keys [overlay]} @ts
           gone (overlay/destroyed overlay key :cars)
           st worldgen/traffic-stride
           n (/ (.-length arr) st)
@@ -196,25 +305,24 @@
                   (spawn-one! ts key i
                               [(int (aget arr (+ o 0))) (int (aget arr (+ o 1)))]
                               [(int (aget arr (+ o 2))) (int (aget arr (+ o 3)))]
-                              (aget arr (+ o 4)) (aget arr (+ o 5)))))
-          ^js mesh (three/InstancedMesh. geometry material (max 1 (alength cars)))]
-      (set! (.-frustumCulled mesh) false)
-      (set! (.-castShadow mesh) true)
-      (set! (.-receiveShadow mesh) true)
-      (.add scene mesh)
+                              (aget arr (+ o 4)) (aget arr (+ o 5)))))]
       (swap! ts (fn [s]
                   (-> s
-                      (assoc-in [:chunks key] {:mesh mesh :cars cars})
+                      (assoc-in [:chunks key] {:cars cars})
                       (update :by-collider into
                               (map (fn [c] [(.-handle c) c]) cars)))))
       cars)))
 
 (defn remove-chunk! [ts key]
-  (let [{:keys [^js world ^js scene chunks]} @ts]
-    (when-let [{:keys [^js mesh cars]} (get chunks key)]
-      (.remove scene mesh)
-      (.dispose mesh)
-      (doseq [c0 cars] (let [^Car c c0] (.removeRigidBody world ^js (.-body c))))
+  (let [{:keys [^js world chunks pools]} @ts]
+    (when-let [{:keys [cars]} (get chunks key)]
+      (doseq [c0 cars]
+        (let [^Car c c0
+              nb (inc (count (:parts (.-type c))))
+              ^js slots (.-slots c)]
+          (dotimes [i nb] (fig/release! (:box pools) (aget slots i)))
+          (dotimes [i 4] (fig/release! (:wheel pools) (aget slots (+ nb i))))
+          (.removeRigidBody world ^js (.-body c))))
       (swap! ts (fn [s]
                   (-> s
                       (update :chunks dissoc key)
@@ -283,7 +391,10 @@
                   (set! (.-rnd c) (mod (+ (* 1.61803 (.-rnd c)) 0.31831) 1.0)))
               (set! (.-t c) 1.0)))
           (set! (.-t c) (max 0.0 t')))
-        (let [p (place! place (.-leg c) (.-t c))
+        ;; Distance travelled, kept because the wheels are drawn turning and
+        ;; `t` restarts at every junction.
+        (set! (.-dist c) (+ (.-dist c) (* (.-speed c) dt)))
+        (let [p (place! place (.-leg c) (.-t c) (:ride (.-type c)))
               ^js body (.-body c)]
           (.setNextKinematicTranslation body p)
           (.setNextKinematicRotation body
@@ -291,26 +402,25 @@
                                           :z 0.0 :w (js/Math.cos (* 0.5 (.-h p)))}))))))
 
 (defn sync!
-  "Copy every car's transform onto its chunk's instanced mesh. Wrecks are read
-  from the body like anything else -- once a car is debris the physics is the
-  only thing that knows where it is."
+  "Place every car's body, bodywork and wheels.
+
+  Wrecks are read from the body like anything else -- once a car is debris the
+  physics is the only thing that knows where it is, and its wheels stop turning
+  because it has stopped covering ground."
   [ts]
-  (let [{:keys [chunks ^js scratch ^js colour]} @ts]
-    (doseq [[_ {:keys [^js mesh cars]}] chunks]
+  (let [{:keys [chunks pools rigs ^js body-m ^js local-m ^js out-m
+                ^js qpos ^js quat ^js one]} @ts]
+    (doseq [[_ {:keys [cars]}] chunks]
       (dotimes [i (alength cars)]
         (let [^Car c (aget cars i)
-              ^js body (.-body c)
-              t (.translation body)
-              r (.rotation body)]
-          (.set (.-position scratch) (.-x t) (.-y t) (.-z t))
-          (.set (.-quaternion scratch) (.-x r) (.-y r) (.-z r) (.-w r))
-          (.set (.-scale scratch) 1 1 1)
-          (.updateMatrix scratch)
-          (.setMatrixAt mesh i (.-matrix scratch))
-          (.setHex colour (.-colour c))
-          (.setColorAt mesh i colour)))
-      (set! (.-needsUpdate (.-instanceMatrix mesh)) true)
-      (when-let [ic (.-instanceColor mesh)] (set! (.-needsUpdate ic) true)))))
+              rig (nth rigs (.-ti c))]
+          (fig/body-matrix! body-m qpos quat one ^js (.-body c))
+          ;; The wheels are told how far the car has come, not how long it has
+          ;; been going: a car held at a red light stands with its wheels still.
+          (fig/place-rig! rig (.-meshes c) (.-slots c) body-m local-m out-m
+                          (/ (.-dist c) (:r (:wheel (.-type c))))))))
+    (fig/flush! (:box pools))
+    (fig/flush! (:wheel pools))))
 
 (defn traffic? [ts handle] (contains? (:by-collider @ts) handle))
 
@@ -347,4 +457,5 @@
   (let [all (mapcat (fn [[_ v]] (seq (:cars v))) (:chunks @ts))]
     {:cars (count all)
      :driving (count (filter (fn [^Car c] (.-alive? c)) all))
-     :wrecked (:wrecked @ts)}))
+     :wrecked (:wrecked @ts)
+     :parts (+ (fig/used (:box (:pools @ts))) (fig/used (:wheel (:pools @ts))))}))

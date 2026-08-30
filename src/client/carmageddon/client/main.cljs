@@ -140,7 +140,7 @@
         ;; Lights are a pure function of the clock, so this only has to repaint
         ;; instance colours -- there is no signal state to advance.
         (furniture/sync-signals! furniture-state (js/Date.now))
-        (peds/sync! peds-state)
+        (peds/sync! peds-state dt)
         (remote/sync! remotes (js/Date.now))
         ;; The cluster repaints every frame. A needle that moves twice a second
         ;; is not a speedometer, it is a readout with extra steps -- and the
