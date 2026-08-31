@@ -26,7 +26,10 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: DeLaGuardo/setup-clojure@v13
+      # Pinned to an exact tag: this action publishes bare version tags
+      # (13.6.1), not the `v13` major alias every other action here uses, so
+      # `@v13` does not resolve at all.
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
