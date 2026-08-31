@@ -64,7 +64,8 @@
     (.set (.-position mesh) x (+ y hy) z)
     (.set (.-quaternion mesh) 0.0 (js/Math.sin (/ yaw 2)) 0.0 (js/Math.cos (/ yaw 2)))
     (.add scene mesh)
-    {:body body :mesh mesh :collider collider :handle (.-handle collider) :idx idx}))
+    {:body body :mesh mesh :collider collider :handle (.-handle collider)
+     :idx idx :kind kind}))
 
 (defn sync!
   "Copy every prop's physics transform onto its mesh.
@@ -125,13 +126,20 @@
   delta is recorded unconditionally."
   [ps key idx]
   (overlay/record! (:overlay @ps) key :props idx)
-  (when-let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))]
-    (despawn! ps p)
-    (swap! ps (fn [st]
-                (-> st
-                    (update-in [:chunks key] #(vec (remove (fn [q] (= idx (:idx q))) %)))
-                    (update :wrecked inc)))))
-  {:cx (first key) :cz (second key) :index idx})
+  (let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))
+        ;; Read where it was before it stops existing. A gas cylinder's whole
+        ;; contribution is what happens at the place it was standing.
+        pos (when p (let [t (.translation ^js (:body p))]
+                      [(.-x t) (.-y t) (.-z t)]))
+        vol? (when p (boolean (:volatile? (nth worldgen/prop-kinds (:kind p)))))]
+    (when p
+      (despawn! ps p)
+      (swap! ps (fn [st]
+                  (-> st
+                      (update-in [:chunks key] #(vec (remove (fn [q] (= idx (:idx q))) %)))
+                      (update :wrecked inc)))))
+    (cond-> {:cx (first key) :cz (second key) :index idx}
+      pos (assoc :pos pos :volatile? vol?))))
 
 (defn destroy!
   "Remove the prop owning `handle`. Returns the delta describing what was
@@ -146,6 +154,24 @@
   (when-let [{:keys [key idx]} (get (:by-collider @ps) handle)]
     (when (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))
       (destroy-index! ps key idx))))
+
+(defn destroy-near!
+  "Everything within `r` metres of (x, z), destroyed.
+
+  This is what makes one gas cylinder worth more than its own points: the blast
+  takes out its neighbours, and any of those that were gas take out theirs. The
+  chain terminates because a destroyed prop is gone from the chunk before the
+  next round looks, so nothing can be counted twice."
+  [ps x z r]
+  (let [r2 (* r r)]
+    (->> (for [[key ps'] (:chunks @ps)
+               p ps'
+               :let [t (.translation ^js (:body p))
+                     dx (- (.-x t) x) dz (- (.-z t) z)]
+               :when (< (+ (* dx dx) (* dz dz)) r2)]
+           [key (:idx p)])
+         vec
+         (mapv (fn [[key idx]] (destroy-index! ps key idx))))))
 
 (defn prop? [ps handle] (contains? (:by-collider @ps) handle))
 

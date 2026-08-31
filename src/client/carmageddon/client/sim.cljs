@@ -286,6 +286,31 @@
 
 (defn vehicle-body ^js [sim i] (aget (:bodies @sim) i))
 
+(defn blast!
+  "Shove every vehicle near a point away from it.
+
+  Only vehicles: props and pedestrians near an explosion are destroyed by it
+  rather than thrown by it, and iterating the whole rigid-body set to push a
+  crate that is about to stop existing is work for nothing. Falls off with
+  distance, so standing next to a tanker and standing across the street from
+  one are different mistakes."
+  [sim [x y z] radius strength]
+  (let [{:keys [bodies vehicles]} @sim]
+    (dotimes [i (count vehicles)]
+      (let [^js b (aget bodies i)
+            t (.translation b)
+            dx (- (.-x t) x) dy (- (.-y t) y) dz (- (.-z t) z)
+            d (js/Math.sqrt (+ (* dx dx) (* dy dy) (* dz dz)))]
+        (when (< d radius)
+          (let [f (* strength (- 1.0 (/ d radius)))
+                n (max 0.5 d)]
+            (.applyImpulse b #js {:x (* f (/ dx n))
+                                  ;; Always some lift: a blast that only pushes
+                                  ;; sideways reads as a gust, not a bang.
+                                  :y (+ (* 0.45 f) (* f (/ (max 0.0 dy) n)))
+                                  :z (* f (/ dz n))}
+                           true)))))))
+
 (defn place-vehicle!
   "Put vehicle `i` down at `[x y z]` facing `yaw`, stationary.
 

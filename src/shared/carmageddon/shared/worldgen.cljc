@@ -1043,10 +1043,35 @@
 
 (def prop-kinds
   "Smashable roadside clutter. Shared so the server can reason about what a
-  chunk contains without rendering it."
+  chunk contains without rendering it.
+
+  `volatile?` is the one that matters to play: a gas cylinder goes up when it
+  is hit hard, taking its neighbours and anything standing near them with it."
   [{:name :crate  :half [0.60 0.60 0.60] :density 40.0 :colour 0xc9a86a}
    {:name :barrel :half [0.45 0.75 0.45] :density 55.0 :colour 0x8a6a3a}
-   {:name :sign   :half [0.12 1.10 0.80] :density 26.0 :colour 0xa8a49c}])
+   {:name :sign   :half [0.12 1.10 0.80] :density 26.0 :colour 0xa8a49c}
+   {:name :gas-barrel :half [0.46 0.80 0.46] :density 60.0 :colour 0xc4442e
+    :volatile? true}])
+
+(def gas-barrel-kind 3)
+
+(defn prop-kind-at
+  "Which piece of clutter stands at (x, z), given a uniform roll.
+
+  Gas follows the works. A red cylinder outside a florist is a joke; outside a
+  chemical plant it is a warning, and the player learns to read the district by
+  what is stacked at the kerb. `roll` is drawn by the caller so the random
+  stream advances identically wherever the barrel turns out to belong."
+  [seed x z roll]
+  (let [ind (industrialness seed x z)
+        gas (cond (> ind 0.62) 0.38
+                  (> ind 0.42) 0.16
+                  (> ind 0.28) 0.05
+                  :else 0.01)]
+    (if (< roll gas)
+      gas-barrel-kind
+      (let [t (/ (- roll gas) (max 1e-6 (- 1.0 gas)))]
+        (cond (< t 0.45) 0 (< t 0.80) 1 :else 2)))))
 
 (def props-per-chunk 14)
 (def prop-stride 6)          ; x y z yaw kind scale
@@ -1081,7 +1106,10 @@
                 t     (prng/next-double! r)
                 side  (if (prng/next-bool! r) 1.0 -1.0)
                 off   (+ (:half line) (prng/next-range! r 0.8 6.5))
-                kind  (prng/next-int! r (count prop-kinds))
+                ;; Drawn here rather than after the position so the stream
+                ;; advances the same amount however the placement turns out;
+                ;; what it *means* is decided below, once there is a place.
+                roll  (prng/next-double! r)
                 yaw   (prng/next-range! r 0.0 6.2831853)
                 scale (prng/next-range! r 0.8 1.35)
                 [ax az] (nth pts i)
@@ -1111,7 +1139,9 @@
                             (recur (rest ms)))))
                 y (ground x z)]
             (conj! out x) (conj! out y) (conj! out z)
-            (conj! out yaw) (conj! out (double kind)) (conj! out scale)))
+            (conj! out yaw)
+            (conj! out (double (prop-kind-at seed x z roll)))
+            (conj! out scale)))
         (let [v (persistent! out)
               a (farray (count v))]
           (dotimes [i (count v)] (fput! a i (nth v i)))

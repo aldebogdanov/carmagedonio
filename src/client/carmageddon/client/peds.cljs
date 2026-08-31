@@ -24,6 +24,7 @@
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
             [carmageddon.client.figures :as fig]
+            [carmageddon.client.fire :as fire]
             [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
@@ -335,6 +336,33 @@
     (let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))]
       (when (and p (:alive? p))
         (kill-index! ps key idx impulse)))))
+
+(def ^:private burn-every 6)     ; ticks between checking the crowd for fire
+
+(defn burn!
+  "Kill anyone standing in fire.
+
+  Checked ten times a second rather than sixty. Four hundred pedestrians
+  against twenty pools is eight thousand distance tests, and nobody can tell
+  the difference between catching fire now and catching fire a tenth of a
+  second from now.
+
+  Returns `[[delta owner] ...]` -- the caller scores the ones whose fire was
+  the player's. Without that attribution the strongest play in the game would
+  be to set an industrial estate alight and drive away from it."
+  [ps fs tick]
+  (when (and (zero? (mod tick burn-every))
+             (pos? (:pools (fire/stats fs))))
+    (let [victims (for [[key chunk] (:chunks @ps)
+                        p chunk
+                        :when (:alive? p)
+                        :let [t (.translation ^js (:body p))
+                              h (fire/heat-at fs (.-x t) (.-z t))]
+                        :when h]
+                    [key (:idx p) (:owner h)])]
+      (mapv (fn [[key idx owner]]
+              [(kill-index! ps key idx [0.0 6.0 0.0]) owner])
+            (vec victims)))))
 
 (defn ped? [ps handle] (contains? (:by-collider @ps) handle))
 

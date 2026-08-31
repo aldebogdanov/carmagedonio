@@ -8,6 +8,7 @@
             [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
             [carmageddon.client.cockpit :as cockpit]
+            [carmageddon.client.fire :as fire]
             [carmageddon.client.clock :as clock]
             [carmageddon.client.furniture :as furniture]
             [carmageddon.client.game :as game]
@@ -40,6 +41,13 @@
 (def ^:private min-smash-speed 4.0)     ; m/s
 (def ^:private max-damage-per-hit 0.02)
 (def ^:private opponent-count 3)
+
+;; What a gas cylinder and a tanker are worth, as fire.
+(def ^:private barrel-fire {:r 4.2 :life 12.0 :seeds 0 :blast 9.0 :push 2400.0})
+(def ^:private tanker-fire {:r 8.5 :life 25.0 :seeds 2 :blast 16.0 :push 7000.0})
+;; Damage per second at the centre of a pool. Ten seconds parked in one writes
+;; a car off; driving through the edge of one costs a few per cent.
+(def ^:private burn-rate 0.11)
 
 ;; Contact force below this is scraping, not crashing. Set high deliberately:
 ;; the chassis grinds along terrain constantly when bottoming out or rolling,
@@ -93,7 +101,7 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges rvs cock remotes]}]
+                                  bridges rvs cock fire-state remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -108,6 +116,20 @@
           (traffic/drive! traffic-state k/dt (js/Date.now))
           (peds/walk! peds-state tick (sim/player-x sim) (sim/player-z sim))
           (game/tick! game)
+          ;; Fire ages on the fixed step like everything else that changes.
+          (fire/tick! fire-state k/dt)
+          (let [px (sim/player-x sim) pz (sim/player-z sim)]
+            (when-let [{:keys [heat]} (fire/heat-at fire-state px pz)]
+              (vehicle/add-damage! (sim/player-vehicle sim) (* burn-rate heat k/dt)))
+            ;; Rivals burn too, which is what makes driving one into a pool a
+            ;; tactic rather than a waste of a barrel.
+            (doseq [v (rest (sim/vehicles sim))]
+              (let [[vx _ vz] (vehicle/chassis-position v)]
+                (when-let [{:keys [heat]} (fire/heat-at fire-state vx vz)]
+                  (vehicle/add-damage! v (* burn-rate heat k/dt))))))
+          (doseq [[d owner] (peds/burn! peds-state fire-state tick)]
+            (when (= :player owner) (game/ped-killed! game))
+            (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))
           ;; Rivals that have lost touch are brought back. Checked every tick,
           ;; but only acts after a few seconds out of contact.
           (let [[fx _ fz] (sim/forward-vector sim)]
@@ -138,6 +160,7 @@
         (overlay/save! overlay (js/Date.now))
         (props/sync! props-state)
         (parts/sync! bridges)
+        (fire/sync! fire-state (* 0.001 (js/Date.now)))
         (traffic/sync! traffic-state)
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
@@ -197,6 +220,8 @@
                      "   cars " (:driving (traffic/stats traffic-state))
                      "   props " (:live (props/stats props-state))
                      "   panels " (:smashed (parts/stats bridges))
+                     (let [f (fire/stats fire-state)]
+                       (if (pos? (:pools f)) (str "   fires " (:pools f)) ""))
                      "   saved " (:bytes (overlay/stats overlay)) "B"))))})))
 
 (defn- boot!
@@ -225,6 +250,7 @@
         lm        (parts/create (:world @s) (:scene rs))
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
+        fr        (fire/create (:scene rs))
         mm        (minimap/create seed)
         ck        (cockpit/create)
         ;; Outbreak is a property of the world, with a query parameter for
@@ -297,7 +323,26 @@
                                 (game/prop-wrecked! gm)
                                 ;; Tell the room: this is the only world state
                                 ;; that ever crosses the network.
-                                (net/-send! transport (wire/encode-delta (assoc d :kind :prop)))))
+                                (net/-send! transport (wire/encode-delta (assoc d :kind :prop)))
+                                ;; A gas cylinder is not scenery. It goes up,
+                                ;; takes its neighbours with it, and leaves the
+                                ;; street on fire -- and any of those neighbours
+                                ;; that were gas do the same. The chain
+                                ;; terminates because each is gone from the
+                                ;; chunk before the next round looks at it.
+                                (when (:volatile? d)
+                                  (loop [seeds [d], depth 0]
+                                    (when (and (seq seeds) (< depth 4))
+                                      (recur
+                                       (vec (mapcat
+                                             (fn [{[bx by bz] :pos}]
+                                               (let [{:keys [r life blast push]} barrel-fire]
+                                                 (fire/ignite! fr bx by bz r life :player)
+                                                 (sim/blast! s [bx by bz] blast push)
+                                                 (filter :volatile?
+                                                         (props/destroy-near! ps bx bz blast))))
+                                             seeds))
+                                       (inc depth)))))))
                             (when (peds/ped? pd hit)
                               (let [[vx vy vz] (:vel (sim/telemetry s))]
                                 (when-let [d (peds/kill! pd hit [vx vy vz])]
@@ -309,7 +354,19 @@
                                   (game/car-wrecked! gm)
                                   (net/-send! transport
                                               (wire/encode-delta
-                                               (assoc d :kind :car))))))
+                                               (assoc d :kind :car)))
+                                  ;; A tanker is the largest thing a player can
+                                  ;; set off without a power-up.
+                                  (when (:volatile? d)
+                                    (let [[bx by bz] (:pos d)
+                                          {:keys [r life seeds blast push]} tanker-fire]
+                                      (fire/ignite! fr bx by bz r life :player seeds)
+                                      (sim/blast! s [bx by bz] blast push)
+                                      (doseq [{:keys [pos]} (filter :volatile?
+                                                                    (props/destroy-near! ps bx bz blast))]
+                                        (fire/ignite! fr (nth pos 0) (nth pos 1) (nth pos 2)
+                                                      (:r barrel-fire) (:life barrel-fire)
+                                                      :player)))))))
                             ;; Bridge parapets. Scored as clutter, because what
                             ;; they are worth is not the points -- it is the
                             ;; hole, and what is on the other side of it.
@@ -358,6 +415,7 @@
                                                  :traffic-state tf
                                                  :bridges br
                                                  :cock ck
+                                                 :fire-state fr
                                                  :birds-state bd
                                                  :overlay ov
                                                  :minimap mm
@@ -366,7 +424,7 @@
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
-                                 :landmarks lm :traffic tf :birds bd :peds pd
+                                 :landmarks lm :traffic tf :birds bd :peds pd :fire fr
                                  :overlay ov :minimap mm :cockpit ck :game gm
                                  :rivals rvs :remotes remotes
                                  :stop stop :detach detach}))

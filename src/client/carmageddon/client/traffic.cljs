@@ -37,8 +37,10 @@
 (def ^:private tail 0x8e2820)
 (def ^:private trim 0x2b2b2e)
 
+(def ^:private hazard 0xd8d2c4)
+
 (def ^:private tints
-  {:glass glass :lamp lamp :tail tail :trim trim})
+  {:glass glass :lamp lamp :tail tail :trim trim :hazard hazard})
 
 ;; Local +Z is forward here, not -Z: `place!` yaws by atan2(nx, nz), which maps
 ;; local +Z onto the direction of travel. It never mattered while a car was a
@@ -119,6 +121,21 @@
              {:at [0.0 0.36 -2.18] :size [1.68 0.48 0.12]}]
             (lamps 0.86 0.60 2.25))}
 
+   {:name :tanker
+    ;; The one civilian vehicle worth going out of your way for. Marked
+    ;; volatile: wrecking it does not score much more than a lorry, it changes
+    ;; the street for the next twenty-five seconds.
+    :volatile? true
+    :half [1.05 1.20 3.40] :ride 1.28
+    :wheel {:r 0.46 :w 0.32 :track 0.98 :base 2.30}
+    :parts (concat
+            [{:at [0.0 0.86 2.72] :size [2.02 1.10 0.90] :tilt 0.10 :tint :glass}
+             {:at [0.0 1.44 2.60] :size [1.92 0.20 1.10]}
+             {:shape :tank :at [0.0 1.10 -0.70] :size [1.90 1.90 4.40] :tint :hazard}
+             {:at [0.0 0.10 -0.70] :size [1.20 0.90 4.40] :tint :trim}
+             {:at [0.0 0.02 3.38] :size [2.08 0.34 0.14] :tint :trim}]
+            (lamps 1.05 1.20 3.40))}
+
    {:name :lorry
     :half [1.05 1.20 3.30] :ride 1.28
     :wheel {:r 0.46 :w 0.32 :track 0.98 :base 2.20}
@@ -130,7 +147,26 @@
              {:at [0.0 0.02 3.28] :size [2.08 0.34 0.14] :tint :trim}]
             (lamps 1.05 1.20 3.30))}])
 
-(def ^:private type-mix [0 0 1 0 1 0 3 2 0 1 0 4])
+(def ^:private type-index (zipmap (map :name types) (range)))
+
+(def ^:private type-mix
+  ;; Written as names and looked up, not as indices. The first version was a
+  ;; literal list of numbers and referred to index 6 of a six-element vector --
+  ;; every chunk that happened to draw that slot threw during generation and
+  ;; quietly failed to load. A name that does not exist is a nil in this vector
+  ;; and shows up the moment anything uses it; a number that does not exist
+  ;; looks exactly like one that does.
+  ;;
+  ;; One vehicle in twelve is a lorry and one in twenty-four a tanker. Rare
+  ;; enough that finding a tanker is an opportunity rather than the scenery,
+  ;; common enough that a drive across a city turns one up.
+  (mapv type-index
+        [:saloon :saloon :hatch  :saloon :hatch  :lorry
+         :pickup :van    :saloon :hatch  :saloon :lorry
+         :saloon :saloon :hatch  :saloon :hatch  :saloon
+         :pickup :van    :saloon :hatch  :saloon :tanker]))
+
+(assert (every? some? type-mix) "traffic type-mix names a vehicle that does not exist")
 
 (deftype Car [body collider handle key idx colour type ti meshes slots
               ^:mutable from ^:mutable to ^:mutable t ^:mutable speed
@@ -145,6 +181,7 @@
 
 (def ^:private box-slots 6400)     ; bodies and bodywork
 (def ^:private wheel-slots 3200)
+(def ^:private tank-slots 96)
 
 (defn- type-rig
   "One vehicle as a rig: hull, bodywork, four wheels.
@@ -159,8 +196,8 @@
     (fig/rig
      (concat
       [{:shape :box :at [0.0 0.0 0.0] :size [(* 2 hx) (* 2 hy) (* 2 hz)]}]
-      (for [{:keys [at size tilt]} parts]
-        {:shape :box :at at :size size :tilt (or tilt 0.0)})
+      (for [{:keys [at size tilt shape]} parts]
+        {:shape (or shape :box) :at at :size size :tilt (or tilt 0.0)})
       (for [j (range 4)]
         {:shape :wheel :spin? true
          :at [(if (even? j) (- track) track) y (if (< j 2) base (- base))]
@@ -180,7 +217,14 @@
                :wheel (fig/pool scene
                                 (doto (three/CylinderGeometry. 0.5 0.5 1 10)
                                   (.rotateZ (/ js/Math.PI 2)))
-                                material wheel-slots {})}
+                                material wheel-slots {})
+               ;; Axis along Z, so a scaled one is a tank lying down the length
+               ;; of a lorry. Its own pool because it is the only round thing on
+               ;; the road and there are never many of them.
+               :tank (fig/pool scene
+                               (doto (three/CylinderGeometry. 0.5 0.5 1 14)
+                                 (.rotateX (/ js/Math.PI 2)))
+                               material tank-slots {:receive? true})}
         rigs (mapv type-rig types)]
     (atom {:world world :scene scene :seed seed :overlay ov
          :pools pools
@@ -303,12 +347,14 @@
 ;; --- spawning ---------------------------------------------------------------
 
 (defn- claim-slots!
-  "One box slot for the body, one for each piece of bodywork, four wheels."
-  [pools type]
-  (let [nb (inc (count (:parts type)))
-        slots (js/Int32Array. (+ nb 4))]
-    (dotimes [i nb] (aset slots i (fig/claim! (:box pools))))
-    (dotimes [i 4] (aset slots (+ nb i) (fig/claim! (:wheel pools))))
+  "A slot per part, from whichever pool that part's shape belongs to: the hull
+  and the bodywork out of `:box`, a tanker's barrel out of `:tank`, the wheels
+  out of `:wheel`."
+  [pools type rig]
+  (let [parts (:parts rig)
+        slots (js/Int32Array. (count parts))]
+    (dotimes [i (count parts)]
+      (aset slots i (fig/claim! (get pools (:shape (nth parts i))))))
     slots))
 
 (defn- spawn-one! [ts key idx from to t0 speed]
@@ -335,14 +381,18 @@
                           (.setContactForceEventThreshold 1500.0))
                       body)
         colour (nth colours (mod (+ idx (nth from 0) (nth from 1)) (count colours)))
-        slots (claim-slots! pools type)
+        rig (nth (:rigs @ts) ti)
+        slots (claim-slots! pools type rig)
         meshes (nth (:rig-meshes @ts) ti)]
     ;; Paint is written once. A car's colour does not change until it is a wreck.
-    (let [nb (inc (count (:parts type)))]
+    (let [parts (:parts rig)
+          n (count parts)
+          nb (inc (count (:parts type)))]
       (fig/set-colour! (:box pools) (aget slots 0) colour)
       (dotimes [i (count (:parts type))]
-        (fig/set-colour! (:box pools) (aget slots (inc i))
-                         (get tints (:tint (nth (:parts type) i)) colour)))
+        (let [{:keys [tint shape]} (nth (:parts type) i)]
+          (fig/set-colour! (get pools (or shape :box)) (aget slots (inc i))
+                           (get tints tint colour))))
       (dotimes [i 4] (fig/set-colour! (:wheel pools) (aget slots (+ nb i)) rubber)))
     (->Car body collider (.-handle collider) key idx colour type ti meshes slots
            from to t0 speed lg true
@@ -377,10 +427,10 @@
     (when-let [{:keys [cars]} (get chunks key)]
       (doseq [c0 cars]
         (let [^Car c c0
-              nb (inc (count (:parts (.-type c))))
+              parts (:parts (nth (:rigs @ts) (.-ti c)))
               ^js slots (.-slots c)]
-          (dotimes [i nb] (fig/release! (:box pools) (aget slots i)))
-          (dotimes [i 4] (fig/release! (:wheel pools) (aget slots (+ nb i))))
+          (dotimes [i (count parts)]
+            (fig/release! (get pools (:shape (nth parts i))) (aget slots i)))
           (.removeRigidBody world ^js (.-body c))))
       (swap! ts (fn [s]
                   (-> s
@@ -479,7 +529,8 @@
           (fig/place-rig! rig (.-meshes c) (.-slots c) body-m local-m out-m
                           (/ (.-dist c) (:r (:wheel (.-type c))))))))
     (fig/flush! (:box pools))
-    (fig/flush! (:wheel pools))))
+    (fig/flush! (:wheel pools))
+    (fig/flush! (:tank pools))))
 
 (defn traffic? [ts handle] (contains? (:by-collider @ts) handle))
 
@@ -499,7 +550,11 @@
                             :z (* 90.0 (nth impulse 2))}
                        true))
       (swap! ts update :wrecked inc)
-      {:cx (first (.-key c)) :cz (second (.-key c)) :index (.-idx c)})))
+      (let [t (.translation ^js (.-body c))]
+        {:cx (first (.-key c)) :cz (second (.-key c)) :index (.-idx c)
+         ;; The caller decides what a wreck means. A tanker means fire.
+         :pos [(.-x t) (.-y t) (.-z t)]
+         :volatile? (boolean (:volatile? (.-type c)))}))))
 
 (defn wreck-index!
   "Wreck car `idx` of chunk `key` because someone else did. Recorded even when
