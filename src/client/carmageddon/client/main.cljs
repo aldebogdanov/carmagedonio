@@ -12,6 +12,7 @@
             [carmageddon.client.furniture :as furniture]
             [carmageddon.client.game :as game]
             [carmageddon.client.input :as input]
+            [carmageddon.client.menu :as menu]
             [carmageddon.client.minimap :as minimap]
             [carmageddon.client.net :as net]
             [carmageddon.client.overlay :as overlay]
@@ -201,17 +202,12 @@
 (defn- boot!
   "Build the world and start playing. `world` is the server's record of it, or
   nil when running without a backend."
-  [world profile]
+  [world profile car]
   (let [seed      (:seed world fallback-seed)
         canvas    (js/document.getElementById "game")
         params    (js/URLSearchParams. (.-search js/location))
         mode      (or (:mode world)
                       (if (.has params "outbreak") :outbreak :normal))
-        ;; Which car the player drives. A query parameter rather than a key,
-        ;; because swapping vehicles means rebuilding a rigid body and its mesh
-        ;; tree -- reasonable at boot, not mid-corner.
-        car       (let [k (keyword (.get params "car"))]
-                    (if (contains? cars/catalogue k) k cars/default-kind))
         ;; One record of everything the seed does not already say. Restored
         ;; before anything spawns, so a chunk that was cleared out stays cleared.
         ov        (overlay/create seed mode)
@@ -411,16 +407,21 @@
 
 (defn init! []
   (-> (sim/init!)
-      (.then (fn [_]
-               (let [params (js/URLSearchParams. (.-search js/location))]
-                 (js/Promise.all #js [(api/ensure-world! (.get params "world"))
-                                      (api/ensure-profile! "player")]))))
-      (.then (fn [^js pair]
-               (let [world   (aget pair 0)
-                     profile (aget pair 1)]
-                 (-> (boot! world profile)
-                     (.then (fn [_]
-                              (watch-for-end! (:game @app) world profile (:overlay @app))))))))
+      (.then (fn [_] (api/ensure-profile! "player")))
+      (.then (fn [profile]
+               ;; The lobby answers the two questions the URL used to: which
+               ;; room, and which car. `?world=` still works and is what a
+               ;; shared link is -- it arrives preselected rather than skipping
+               ;; the screen, so an invited player still picks a car.
+               (let [params (js/URLSearchParams. (.-search js/location))
+                     car0   (keyword (.get params "car"))]
+                 (-> (menu/show! {:preselect (.get params "world")
+                                  :car (when (contains? cars/catalogue car0) car0)})
+                     (.then (fn [{:keys [world car]}]
+                              (-> (boot! world profile car)
+                                  (.then (fn [_]
+                                           (watch-for-end! (:game @app) world profile
+                                                           (:overlay @app)))))))))))
       (.catch (fn [e] (js/console.error "boot failed" e)))))
 
 

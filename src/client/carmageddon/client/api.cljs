@@ -75,6 +75,36 @@
                     w
                     (post-edn "/api/worlds" {:name "carmagedonio"}))))))))
 
+(defn list-worlds
+  "Every room the server knows about, or nil when there is no server.
+
+  The callback is a `fn`, not the keyword itself. `.then` accepts any value and
+  *ignores* a non-callable one, passing the resolved value straight through --
+  and a ClojureScript keyword is an object, not a JS function. So `(.then
+  :worlds)` silently yielded the whole `{:worlds [...]}` map, which `vec` then
+  turned into a list containing one map entry: the lobby showed a single
+  nameless, seedless room on a server with no rooms at all."
+  []
+  (-> (get-edn "/api/worlds")
+      (.then (fn [r] (when (map? r) (:worlds r))))))
+
+(defn create-world!
+  "Start a new room. `seed` may be nil, in which case the server picks one --
+  which is the normal case: a seed is a world, and nobody has an opinion about
+  which world until they have seen one."
+  [{:keys [name seed mode]}]
+  (post-edn "/api/worlds"
+            (cond-> {:name (or name "carmagedonio") :mode (or mode :normal)}
+              seed (assoc :seed seed))))
+
+(defn world-players
+  "How many people are in a room right now, from the server's own live session
+  list rather than anything a client reported."
+  [id]
+  (-> (get-edn (str "/api/worlds/" id "/scoreboard"))
+      (.then (fn [r] (count (:players r))))
+      (.catch (fn [_] 0))))
+
 (defn submit-run! [world-id profile-id result]
   (when (and world-id profile-id)
     (post-edn "/api/runs" (assoc result :world-id world-id :profile-id profile-id))))

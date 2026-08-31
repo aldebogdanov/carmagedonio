@@ -18,7 +18,8 @@
             [malli.core :as m]
             [malli.error :as me]
             [org.httpkit.server :as http]
-            [reitit.ring :as ring]))
+            [reitit.ring :as ring]
+            [ring.util.response :as resp]))
 
 ;; --- wire ------------------------------------------------------------------
 
@@ -147,7 +148,16 @@
                   (send-frame! (:ch other) (wire/encode-bye (:id p)))))))})))))
 
 (defn routes [st sessions]
-  [["/api/health"
+  [["/"
+    ;; Served, not redirected. The resource handler's answer for "/" is a 302
+    ;; to /index.html built without the query string, so an invite link --
+    ;; http://host/?world=w_6d562e17 -- arrived at the lobby with the room it
+    ;; names thrown away. Which is the entire purpose of the link.
+    {:get (fn [_]
+            (-> (resp/resource-response "public/index.html")
+                (resp/content-type "text/html; charset=utf-8")))}]
+
+   ["/api/health"
     {:get (fn [_] (edn-response {:ok true :service "carmagedonio"}))}]
 
    ["/api/rules"

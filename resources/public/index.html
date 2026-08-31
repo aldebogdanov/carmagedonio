@@ -34,6 +34,75 @@
         box-shadow: 0 2px 10px rgba(0,0,0,.45);
         pointer-events: none; user-select: none;
       }
+      /* --- lobby ------------------------------------------------------- */
+      #menu {
+        position: fixed; inset: 0; z-index: 10;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(10,12,16,.82);
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #e8e4d8;
+        overflow: auto;
+      }
+      #menu[hidden] { display: none; }
+      #menu .sheet {
+        width: min(560px, calc(100vw - 32px));
+        margin: 24px;
+        padding: 22px 24px 24px;
+        background: rgba(18,20,26,.96);
+        border: 1px solid rgba(232,228,216,.14);
+        border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0,0,0,.55);
+      }
+      #menu h1 { margin: 0 0 18px; font-size: 22px; letter-spacing: .06em; }
+      #menu h2 {
+        margin: 18px 0 8px; font-size: 10px; font-weight: 600;
+        letter-spacing: .18em; text-transform: uppercase; opacity: .5;
+      }
+      #menu .note { margin: 4px 0; opacity: .55; font-size: 12px; }
+      #menu .rooms { display: flex; flex-direction: column; gap: 4px; }
+      #menu .room {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; width: 100%; padding: 9px 12px; text-align: left;
+        font: inherit; color: inherit; cursor: pointer;
+        background: rgba(232,228,216,.05);
+        border: 1px solid transparent; border-radius: 7px;
+      }
+      #menu .room:hover { background: rgba(232,228,216,.10); }
+      #menu .room.picked { border-color: #f0a830; background: rgba(240,168,48,.12); }
+      #menu .room-main { display: flex; flex-direction: column; min-width: 0; }
+      #menu .room-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #menu .room-meta { font-size: 11px; opacity: .45; }
+      #menu .room-online { font-size: 11px; opacity: .4; white-space: nowrap; }
+      #menu .room-online.live { opacity: 1; color: #57b85b; }
+      #menu .newroom { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+      #menu input[type=text], #menu input:not([type]) {
+        flex: 1 1 120px; min-width: 0; padding: 7px 10px;
+        font: inherit; color: inherit;
+        background: rgba(0,0,0,.35);
+        border: 1px solid rgba(232,228,216,.16); border-radius: 6px;
+      }
+      #menu .check { display: flex; align-items: center; gap: 5px; font-size: 12px; opacity: .7; }
+      #menu .share {
+        margin: 10px 0 0; font-size: 11px; opacity: .5;
+        overflow-wrap: anywhere; user-select: all;
+      }
+      #menu .cars { display: flex; gap: 6px; flex-wrap: wrap; }
+      #menu .car, #menu .ghost {
+        padding: 8px 13px; font: inherit; color: inherit; cursor: pointer;
+        background: rgba(232,228,216,.05);
+        border: 1px solid transparent; border-radius: 7px;
+      }
+      #menu .car:hover, #menu .ghost:hover { background: rgba(232,228,216,.10); }
+      #menu .car.picked { border-color: #f0a830; background: rgba(240,168,48,.12); }
+      #menu .carline { margin: 8px 0 0; font-size: 12px; opacity: .55; }
+      #menu .drive {
+        display: block; width: 100%; margin-top: 22px; padding: 13px;
+        font: 600 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: .12em; text-transform: uppercase;
+        color: #12141a; background: #f0a830; cursor: pointer;
+        border: 0; border-radius: 8px;
+      }
+      #menu .drive:hover { background: #ffbe4d; }
       #where {
         position: fixed; right: 12px; bottom: 204px;
         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -44,9 +113,10 @@
   </head>
   <body>
     <canvas id="game"></canvas>
+    <div id="menu" hidden></div>
     <div id="hud">loading physics&hellip;</div>
     <canvas id="cockpit"></canvas>
-    <div id="help">WASD drive &middot; S reverses from a stop &middot; space handbrake &middot; R reset &middot; C camera &middot; B look back &middot; M rivals on map &middot; ?car=muscle|hatchback|pickup|truck|tractor &middot; ?world=&lt;id&gt; to join a friend</div>
+    <div id="help">WASD drive &middot; S reverses from a stop &middot; space handbrake &middot; R reset &middot; C camera &middot; B look back &middot; M rivals on map </div>
     <div id="where"></div>
     <canvas id="map" width="372" height="372"></canvas>
     <!-- shared holds the code the page and the chunk worker both use -->
