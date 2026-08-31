@@ -48,7 +48,8 @@
 
   `state` is {:x :z :forward [fx _ fz] :speed}. Kept as plain numbers rather
   than a telemetry map because this runs per opponent per tick."
-  [ctl {:keys [x z forward speed]} [tx _ tz]]
+  ([ctl state target] (drive-toward ctl state target nil))
+  ([ctl {:keys [x z forward speed]} [tx _ tz] {:keys [commit?]}]
   (let [[fx _ fz] forward
         dx (- tx x) dz (- tz z)
         dist (js/Math.hypot dx dz)
@@ -79,15 +80,21 @@
               {:throttle 0.0 :brake 1.0 :steer 0.0 :reverse? true})
           ;; Ask for a speed the corner can actually be taken at. A target 90
           ;; degrees off wants walking pace; dead ahead wants everything.
-          (let [want (* max-speed (clamp (- 1.0 (/ abs-ang 2.2)) 0.15 1.0))
-                want (min want (+ 4.0 (* 0.9 dist)))   ; and slow down on arrival
+          ;;
+          ;; Unless it is committed. A ramming run is the one time a driver
+          ;; should not be sensible about the corner or lift off on arrival --
+          ;; arriving slowly is the whole failure mode this exists to fix.
+          (let [want (if commit?
+                       max-speed
+                       (min (* max-speed (clamp (- 1.0 (/ abs-ang 2.2)) 0.15 1.0))
+                            (+ 4.0 (* 0.9 dist))))
                 err  (- want speed)
                 steer (clamp (* ang 1.6) -1.0 1.0)]
             {:throttle (if (pos? err) (clamp (* err 0.35) 0.0 1.0) 0.0)
              :brake    (if (neg? err) (clamp (* (- err) 0.25) 0.0 1.0) 0.0)
              :steer    steer
              ;; A hard turn while sliding is worth a stab of handbrake.
-             :handbrake (and (> abs-ang 1.5) (> speed 16.0))}))))))
+             :handbrake (and (not commit?) (> abs-ang 1.5) (> speed 16.0))})))))))
 
 (defn ->command
   "Turn an input map into the Command the simulation consumes."

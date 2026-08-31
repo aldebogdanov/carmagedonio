@@ -383,6 +383,14 @@
 
 (defn damage [sim] (vehicle/damage (player-vehicle sim)))
 
+(defn player-velocity
+  "The player's world velocity, without allocating a telemetry map. The AI
+  needs it every tick to aim where the player is going."
+  [sim]
+  (let [^js b (chassis-body sim)
+        v (.linvel b)]
+    [(.-x v) (.-y v) (.-z v)]))
+
 (defn player-x [sim] (let [^js b (chassis-body sim)] (.-x (.translation b))))
 (defn player-z [sim] (let [^js b (chassis-body sim)] (.-z (.translation b))))
 

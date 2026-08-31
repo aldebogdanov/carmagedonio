@@ -23,6 +23,32 @@
             [carmageddon.shared.worldgen :as worldgen]))
 
 (def ^:private hunt-radius 130.0)   ; m -- inside this, forget the crowd
+
+;; --- how a rival fights -----------------------------------------------------
+;;
+;; Driving at the player and holding the throttle down produces a car that
+;; arrives, fails to kill anybody, and then grinds along the player's flank at
+;; walking pace for the rest of the run. It is not threatening and it is not
+;; interesting.
+;;
+;; So a rival runs a three-state loop instead: get room, charge through, peel
+;; off, repeat. The charge is the point -- it commits, aims where the player is
+;; *going* rather than where they are, and does not lift off for the corner.
+;;
+;;   :approach  too far to strike. Close normally, sensibly.
+;;   :charge    inside striking range. Full commit at an intercept point.
+;;   :peel      just struck, or ground to a halt. Drive away for a moment to
+;;              make room for the next one.
+(def ^:private charge-from 62.0)   ; m -- start a run from about here
+(def ^:private peel-until 11.0)    ; m -- got this close, so break off
+(def ^:private peel-secs 2.4)
+;; Closer than this and going nowhere means jammed against the player rather
+;; than driving away from them. Steering out of that does not work -- there is
+;; a car in the way -- so it reverses.
+(def ^:private jam-dist 9.0)
+(def ^:private jam-speed 3.0)
+(def ^:private charge-secs 6.0)    ; a run that has not landed by now has missed
+(def ^:private lead-speed 22.0)    ; m/s assumed closing speed when aiming ahead
 (def ^:private leash 300.0)         ; m -- beyond this a rival is out of the game
 (def ^:private leash-ticks 180)     ; ... for three seconds before it is moved
 (def ^:private respawn-min 70.0)    ; m -- far enough to be off-camera behind
@@ -35,7 +61,19 @@
   {:seed        seed
    :controllers (vec (repeatedly n ai/controller))
    :lost        (js/Int32Array. n)     ; ticks each rival has been out of contact
+   ;; Tactical state per rival, and how long it has been in it. Two typed
+   ;; arrays rather than a map: this is read and written for every rival on
+   ;; every tick, and the alternative allocates.
+   :mode        (js/Int8Array. n)      ; 0 approach, 1 charge, 2 peel
+   :mode-t      (js/Float32Array. n)
+   ;; Nobody drives like anybody else. Derived from the index rather than
+   ;; drawn, so a rival behaves the same way every time you meet it.
+   :nerve       (mapv #(+ 0.75 (* 0.5 (mod (* 0.6180339 (inc %)) 1.0))) (range n))
    :wrecked     (atom #{})})
+
+(def ^:const mode-approach 0)
+(def ^:const mode-charge 1)
+(def ^:const mode-peel 2)
 
 (defn count-of [{:keys [controllers]}] (count controllers))
 
@@ -43,34 +81,103 @@
 
 (defn- dist [ax az bx bz] (js/Math.hypot (- ax bx) (- az bz)))
 
+(defn- advance-mode!
+  "Move rival `i` between approach, charge and peel, and say which it is in.
+
+  Transitions are on distance and on the clock, never on having actually
+  connected: a rival that misses has to break off and line up again, and a
+  rival that hits is in the same position as one that missed."
+  [{:keys [^js mode ^js mode-t nerve]} i d dt]
+  (let [m (aget mode i)
+        t (+ (aget mode-t i) dt)
+        n (nth nerve i)
+        go (fn [m'] (aset mode i m') (aset mode-t i 0.0) m')]
+    (aset mode-t i t)
+    (cond
+      (= m mode-peel)
+      ;; Room made, or long enough spent trying. The distance test comes first
+      ;; because a peel that ends on the clock while still on the player's
+      ;; bumper goes straight back into a charge it has no room for.
+      (if (or (> d (* 2.2 peel-until)) (> t (* n peel-secs 2.0)))
+        (go mode-approach)
+        m)
+
+      (= m mode-charge)
+      ;; Broken off either because the run is spent or because it is now close
+      ;; enough that anything further is a shunting match.
+      (if (or (> t (* n charge-secs)) (< d peel-until)) (go mode-peel) m)
+
+      :else
+      (if (< d (* n charge-from)) (go mode-charge) m))))
+
 (defn commands
   "One `Command` per rival, in vehicle order.
 
   Target priority is the whole point: the player first if they are anywhere
   near, then the nearest pedestrian, then just keep driving. Without the first
   clause a rival that has caught up with the player still ignores them."
-  [{:keys [controllers]} sim peds-state tick]
+  [{:keys [controllers] :as rs} sim peds-state tick]
   (let [vs (sim/vehicles sim)
         px (sim/player-x sim)
-        pz (sim/player-z sim)]
+        pz (sim/player-z sim)
+        [pvx _ pvz] (sim/player-velocity sim)]
     (mapv (fn [i]
             (let [v   (nth vs (inc i))
                   [x _ z] (vehicle/chassis-position v)
                   ctl (nth controllers i)
+                  d   (dist x z px pz)
+                  far? (>= d hunt-radius)
+                  m   (if far?
+                        mode-approach
+                        (advance-mode! rs i d (/ 1.0 60.0)))
                   tgt (cond
-                        (< (dist x z px pz) hunt-radius) [px 0.0 pz]
-                        :else
+                        far?
                         (or (ai/target ctl tick (* 7 i)
                                        #(peds/nearest-alive peds-state x z))
                             (let [[fx _ fz] (vehicle/heading v)]
-                              [(+ x (* 60 fx)) 0.0 (+ z (* 60 fz))])))]
-              (ai/->command tick
-                            (ai/drive-toward ctl
-                                             {:x x :z z
-                                              :forward (vehicle/heading v)
-                                              :speed (vehicle/forward-speed v)}
-                                             tgt))))
+                              [(+ x (* 60 fx)) 0.0 (+ z (* 60 fz))]))
+
+                        ;; Where the player will be, not where they are. A car
+                        ;; aimed at a moving target's current position always
+                        ;; arrives behind it, which is exactly what tailgating
+                        ;; looks like.
+                        (= m mode-charge)
+                        (let [t (/ d lead-speed)]
+                          [(+ px (* pvx t)) 0.0 (+ pz (* pvz t))])
+
+                        ;; Away, and to one side, so the next run comes in at
+                        ;; an angle rather than back down the same line.
+                        (= m mode-peel)
+                        (let [ax (- x px) az (- z pz)
+                              len (max 1e-3 (js/Math.hypot ax az))]
+                          [(+ px (* (/ ax len) 60.0) (* (/ (- az) len) 25.0))
+                           0.0
+                           (+ pz (* (/ az len) 60.0) (* (/ ax len) 25.0))])
+
+                        :else [px 0.0 pz])]
+              (if (and (= m mode-peel)
+                       (< d jam-dist)
+                       (< (js/Math.abs (vehicle/forward-speed v)) jam-speed))
+                ;; Back out. Measured: without this the rival that starts the
+                ;; run directly behind the player never escapes -- it sat at a
+                ;; median of three metres and two km/h for forty seconds,
+                ;; cycling peel and charge against the player's bumper, which
+                ;; is the exact behaviour the tactics were added to end.
+                (ai/->command tick {:throttle 0.0 :brake 1.0 :reverse? true
+                                    :steer (if (pos? (- x px)) 1.0 -1.0)})
+                (ai/->command tick
+                              (ai/drive-toward ctl
+                                               {:x x :z z
+                                                :forward (vehicle/heading v)
+                                                :speed (vehicle/forward-speed v)}
+                                               tgt
+                                               {:commit? (= m mode-charge)})))))
           (range (count controllers)))))
+
+(defn modes
+  "What each rival is doing, for the HUD and for tests."
+  [{:keys [^js mode]}]
+  (mapv #(nth [:approach :charge :peel] (aget mode %)) (range (.-length mode))))
 
 (defn- respawn-spot
   "Somewhere on a road `respawn-min`..`respawn-max` behind the player.
@@ -112,8 +219,19 @@
         vs (sim/vehicles sim)]
     (dotimes [i (count controllers)]
       (when-not (contains? @wrecked i)
-        (let [[x _ z] (vehicle/chassis-position (nth vs (inc i)))]
-          (if (> (dist x z px pz) leash)
+        (let [v (nth vs (inc i))
+              [x _ z] (vehicle/chassis-position v)
+              d (dist x z px pz)
+              ;; Welded to the player counts as out of contact, and is fed into
+              ;; the same counter. Measured: one rival in three spent its whole
+              ;; run at a median of four metres and two km/h, grinding along
+              ;; the player's flank -- it could not steer out (there is a car
+              ;; in the way) and could not reverse out (the player was driving
+              ;; into it). Being picked up and put back sixty metres away is
+              ;; the only exit, and it is the one that produces another charge.
+              jammed? (and (< d jam-dist)
+                           (< (js/Math.abs (vehicle/forward-speed v)) jam-speed))]
+          (if (or (> d leash) jammed?)
             (aset lost i (inc (aget lost i)))
             (aset lost i 0))
           (when (> (aget lost i) leash-ticks)
