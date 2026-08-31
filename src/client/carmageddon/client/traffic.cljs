@@ -33,43 +33,103 @@
 
 (def ^:private glass 0x1d2733)
 (def ^:private rubber 0x1b1b1e)
+(def ^:private lamp 0xf2e6b8)
+(def ^:private tail 0x8e2820)
+(def ^:private trim 0x2b2b2e)
+
+(def ^:private tints
+  {:glass glass :lamp lamp :tail tail :trim trim})
 
 ;; Local +Z is forward here, not -Z: `place!` yaws by atan2(nx, nz), which maps
 ;; local +Z onto the direction of travel. It never mattered while a car was a
 ;; symmetrical box; it matters the moment one has a windscreen.
 ;;
-;; `parts` are the shapes bolted to the body, `wheel` where the four go. The
+;; `parts` are the shapes bolted to the hull, `wheel` where the four go. The
 ;; collider is still one cuboid -- what the player hits is the shape of the
 ;; vehicle, not the shape of its cab.
+;;
+;; Each of these was two boxes and read as a brick with wheels. What separates a
+;; car from a cube is not detail, it is three things: a bonnet lower than the
+;; roof, a greenhouse narrower and shorter than the body, and both of them
+;; *sloped*. `:tilt` bakes the angle into the part's matrix at build time, so
+;; the slope is free at runtime.
+;;
+;; A positive tilt drops the +Z (front) end: `write-local!`'s third column is
+;; (0, -sin a, cos a), so the nose goes down.
+(defn- lamps
+  "Headlights and tail lights, as pairs. Cheap, and the single clearest signal
+  that the thing in the mirror is facing you rather than away."
+  [hx hy hz]
+  (let [x (* 0.62 hx)]
+    [{:at [(- x) (* 0.30 hy) (* 0.99 hz)] :size [(* 0.42 hx) 0.16 0.05] :tint :lamp}
+     {:at [x (* 0.30 hy) (* 0.99 hz)] :size [(* 0.42 hx) 0.16 0.05] :tint :lamp}
+     {:at [(- x) (* 0.42 hy) (* -0.99 hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}
+     {:at [x (* 0.42 hy) (* -0.99 hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}]))
+
 (def ^:private types
   [{:name :saloon
     :half [0.82 0.55 1.95] :ride 0.60
     :wheel {:r 0.32 :w 0.22 :track 0.80 :base 1.32}
-    :parts [{:at [0.0 0.46 -0.10] :size [1.42 0.50 1.90] :tint :glass}]}
+    :parts (concat
+            [;; bonnet, sloping away from the windscreen
+             {:at [0.0 0.60 1.06] :size [1.54 0.16 1.55] :tilt 0.10}
+             ;; greenhouse: inset on every side, and raked
+             {:at [0.0 0.80 -0.24] :size [1.38 0.46 1.72] :tilt 0.05 :tint :glass}
+             {:at [0.0 1.02 -0.38] :size [1.26 0.10 1.10]}
+             ;; boot, dropping the other way
+             {:at [0.0 0.58 -1.38] :size [1.52 0.14 1.06] :tilt -0.07}
+             {:at [0.0 0.02 1.92] :size [1.60 0.20 0.10] :tint :trim}]
+            (lamps 0.82 0.55 1.95))}
+
    {:name :hatch
     :half [0.76 0.52 1.62] :ride 0.56
     :wheel {:r 0.29 :w 0.20 :track 0.74 :base 1.10}
-    :parts [{:at [0.0 0.44 -0.06] :size [1.34 0.48 1.60] :tint :glass}]}
+    :parts (concat
+            [{:at [0.0 0.56 1.00] :size [1.42 0.14 1.10] :tilt 0.12}
+             {:at [0.0 0.76 -0.18] :size [1.30 0.44 1.66] :tilt 0.04 :tint :glass}
+             {:at [0.0 0.96 -0.30] :size [1.20 0.10 1.20]}
+             ;; A hatchback has no boot: the back of the roof runs straight down
+             ;; to the tail, which is the whole silhouette.
+             {:at [0.0 0.70 -1.42] :size [1.28 0.60 0.30] :tilt -0.30 :tint :glass}]
+            (lamps 0.76 0.52 1.62))}
+
    {:name :van
     :half [0.88 0.86 2.35] :ride 0.90
     :wheel {:r 0.35 :w 0.24 :track 0.84 :base 1.60}
-    :parts [{:at [0.0 0.30 1.70] :size [1.66 1.00 0.70] :tint :glass}
-            {:at [0.0 0.94 -0.30] :size [1.70 0.14 3.60] :tint :body}]}
+    :parts (concat
+            [;; Short nose, then a slab. A van is a box, but it is a box with a
+             ;; face on the front of it.
+             {:at [0.0 0.62 2.02] :size [1.66 0.34 0.66] :tilt 0.22}
+             {:at [0.0 0.72 1.44] :size [1.62 0.70 0.42] :tilt 0.26 :tint :glass}
+             {:at [0.0 0.94 -0.30] :size [1.74 0.16 3.60]}
+             {:at [-0.89 0.30 -0.40] :size [0.06 0.70 3.20] :tint :glass}
+             {:at [0.89 0.30 -0.40] :size [0.06 0.70 3.20] :tint :glass}]
+            (lamps 0.88 0.86 2.35))}
+
    {:name :pickup
     :half [0.86 0.60 2.25] :ride 0.66
     :wheel {:r 0.36 :w 0.26 :track 0.84 :base 1.55}
-    :parts [{:at [0.0 0.52 0.70] :size [1.52 0.62 1.50] :tint :glass}
-            {:at [-0.82 0.34 -0.85] :size [0.10 0.44 2.00] :tint :body}
-            {:at [0.82 0.34 -0.85] :size [0.10 0.44 2.00] :tint :body}]}
+    :parts (concat
+            [{:at [0.0 0.64 1.52] :size [1.60 0.18 1.20] :tilt 0.14}
+             {:at [0.0 0.86 0.56] :size [1.48 0.52 1.34] :tilt 0.06 :tint :glass}
+             {:at [0.0 1.10 0.48] :size [1.38 0.10 1.02]}
+             ;; the bed
+             {:at [-0.80 0.36 -0.95] :size [0.12 0.48 2.30]}
+             {:at [0.80 0.36 -0.95] :size [0.12 0.48 2.30]}
+             {:at [0.0 0.36 -2.18] :size [1.68 0.48 0.12]}]
+            (lamps 0.86 0.60 2.25))}
+
    {:name :lorry
     :half [1.05 1.20 3.30] :ride 1.28
     :wheel {:r 0.46 :w 0.32 :track 0.98 :base 2.20}
-    :parts [{:at [0.0 0.60 2.40] :size [2.00 1.30 1.40] :tint :glass}
-            {:at [0.0 0.40 -0.90] :size [2.16 2.20 4.60] :tint :body}]}])
+    :parts (concat
+            [;; Cab over the front axle, then the container behind it.
+             {:at [0.0 0.86 2.62] :size [2.02 1.10 0.90] :tilt 0.10 :tint :glass}
+             {:at [0.0 1.44 2.50] :size [1.92 0.20 1.10]}
+             {:at [0.0 0.50 -0.90] :size [2.16 2.30 4.60]}
+             {:at [0.0 0.02 3.28] :size [2.08 0.34 0.14] :tint :trim}]
+            (lamps 1.05 1.20 3.30))}])
 
-;; Most of what is on a road is a car. One vehicle in six being a van and one in
-;; twelve a lorry is roughly a city street; drawing the type uniformly makes
-;; every junction look like a depot.
 (def ^:private type-mix [0 0 1 0 1 0 3 2 0 1 0 4])
 
 (deftype Car [body collider handle key idx colour type ti meshes slots
@@ -83,7 +143,7 @@
   Object
   (toString [_] (str "Car " idx " " from "->" to)))
 
-(def ^:private box-slots 2600)     ; bodies and bodywork
+(def ^:private box-slots 6400)     ; bodies and bodywork
 (def ^:private wheel-slots 3200)
 
 (defn- type-rig
@@ -99,7 +159,8 @@
     (fig/rig
      (concat
       [{:shape :box :at [0.0 0.0 0.0] :size [(* 2 hx) (* 2 hy) (* 2 hz)]}]
-      (for [{:keys [at size]} parts] {:shape :box :at at :size size})
+      (for [{:keys [at size tilt]} parts]
+        {:shape :box :at at :size size :tilt (or tilt 0.0)})
       (for [j (range 4)]
         {:shape :wheel :spin? true
          :at [(if (even? j) (- track) track) y (if (< j 2) base (- base))]
@@ -281,9 +342,7 @@
       (fig/set-colour! (:box pools) (aget slots 0) colour)
       (dotimes [i (count (:parts type))]
         (fig/set-colour! (:box pools) (aget slots (inc i))
-                         (case (:tint (nth (:parts type) i))
-                           :glass glass
-                           colour)))
+                         (get tints (:tint (nth (:parts type) i)) colour)))
       (dotimes [i 4] (fig/set-colour! (:wheel pools) (aget slots (+ nb i)) rubber)))
     (->Car body collider (.-handle collider) key idx colour type ti meshes slots
            from to t0 speed lg true

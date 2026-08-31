@@ -121,7 +121,7 @@
         shapes (make-array n)
         locals (make-array n)]
     (dotimes [i n]
-      (let [{:keys [shape at size drop swing phase spin?]} (nth parts i)
+      (let [{:keys [shape at size drop swing phase spin? tilt]} (nth parts i)
             [px py pz] at
             [sx sy sz] size
             o (* i part-stride)]
@@ -134,9 +134,14 @@
         (aset nums (+ o 7) (or swing 0.0))
         (aset nums (+ o 8) (or phase 0.0))
         (aset shapes i shape)
+        ;; A rigid part may still be *tilted*: baked into its prebuilt matrix,
+        ;; so it costs nothing per frame. This is what stops a car being a pile
+        ;; of cubes -- a bonnet that slopes and a windscreen that rakes are the
+        ;; two angles the eye reads a car by, and both are a box turned a few
+        ;; degrees about X.
         (aset locals i
               (when (zero? (aget modes i))
-                (write-local! (three/Matrix4.) 0.0 (or drop 0.0)
+                (write-local! (three/Matrix4.) (or tilt 0.0) (or drop 0.0)
                               sx sy sz px py pz)))))
     {:n n :nums nums :modes modes :shapes shapes :locals locals :parts (vec parts)}))
 
