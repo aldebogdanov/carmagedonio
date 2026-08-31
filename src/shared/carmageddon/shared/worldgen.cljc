@@ -1845,12 +1845,26 @@
 (def ^:private kind-index (zipmap ped-kinds (range)))
 
 (defn peds-per-chunk
-  "Cities are busy, countryside is not."
-  [seed cx cz]
-  (if (= :city (biome seed cx cz)) 18 5))
+  "How busy a chunk's pavements are.
 
-(def ^:private herds-per-chunk 3)
-(def ^:private herd-size 6)
+  Graded off `urbanness` rather than the city/not-city switch this was. One
+  threshold and two numbers made a suburb as empty as a moor and downtown no
+  busier than an industrial estate, and the whole point of the crowd is that it
+  is thicker where the streets are."
+  [seed cx cz]
+  (let [x (* (+ cx 0.5) k/chunk-size)
+        z (* (+ cz 0.5) k/chunk-size)
+        u (urbanness seed x z)]
+    (cond
+      (> u 0.82) 34
+      (> u 0.58) 26
+      (> u 0.34) 16
+      (> u 0.16) 9
+      (> u 0.05) 4
+      :else 2)))
+
+(def ^:private herds-per-chunk 4)
+(def ^:private herd-size 7)
 
 (defn- grazer-for
   "What, if anything, is grazing at a point. Livestock follow the crop, deer the

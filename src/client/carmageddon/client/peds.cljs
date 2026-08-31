@@ -30,6 +30,12 @@
 (def ^:private walk-every 3)     ; ticks between walk updates; velocity persists
 
 (def ^:private notice 20.0)      ; how far away a car is worth reacting to
+;; Past this, a pedestrian is left alone entirely and Rapier puts it to sleep.
+;; A sleeping body costs the solver almost nothing, and a person standing still
+;; a hundred metres away is a person standing still. This is what makes a crowd
+;; of four hundred affordable: with everyone walking, the physics step was 3.4 ms
+;; of a 16 ms frame.
+(def ^:private active 95.0)
 (def ^:private panic 2.6)        ; multiplier on walking speed when it is
 (def ^:private shamble 1.5)      ; zombies are quicker than a walk, slower than fear
 
@@ -50,8 +56,8 @@
 
 ;; Room for every figure in the streaming radius with its limbs, and a little
 ;; over. A full pool draws nothing extra rather than failing.
-(def ^:private box-slots 4200)
-(def ^:private sphere-slots 900)
+(def ^:private box-slots 8000)
+(def ^:private sphere-slots 1600)
 
 ;; How fast the limbs swing per metre travelled. Two steps a metre reads as a
 ;; walk; much more and everyone is scurrying.
@@ -275,8 +281,9 @@
               tr (.translation body)
               dx (- (.-x tr) px)
               dz (- (.-z tr) pz)
-              d  (js/Math.hypot dx dz)
-              person? (zero? (:kind p))
+              d  (js/Math.hypot dx dz)]
+         (when (< d active)
+          (let [person? (zero? (:kind p))
               chase? (and outbreak? person?)
               [h sp] (if (< d notice)
                        ;; Toward or away, and quicker either way.
@@ -284,10 +291,10 @@
                                        (if chase? (- dx) dx))
                         (* (:speed p) (if chase? shamble panic))]
                        [(+ (:heading p) (* (:turn p) t)) (:speed p)])
-              v (.linvel body)]
-          (.setLinvel body #js {:x (* sp (js/Math.cos h))
-                                :y (.-y v)
-                                :z (* sp (js/Math.sin h))} true))))))
+                v (.linvel body)]
+            (.setLinvel body #js {:x (* sp (js/Math.cos h))
+                                  :y (.-y v)
+                                  :z (* sp (js/Math.sin h))} true))))))))
 
 (defn kill-index!
   "Kill pedestrian `idx` of chunk `key`, recording the delta.
