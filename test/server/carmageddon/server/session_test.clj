@@ -83,14 +83,43 @@
     (dotimes [i 3]
       (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :ped :index i}))
     (s/handle-delta! sessions :a {:cx 1 :cz 0 :kind :prop :index 9})
+    (s/handle-delta! sessions :a {:cx 1 :cz 0 :kind :car :index 4})
+    ;; A bridge parapet is clutter, here as on the client.
+    (s/handle-delta! sessions :a {:cx 1 :cz 0 :kind :barrier :index 7})
     (testing "tally is derived from accepted deltas, never reported"
-      (is (= {:peds 3 :props 1 :wrecks 0} (s/tally sessions :a))))
+      (is (= {:peds 3 :props 2 :cars 1 :wrecks 0} (s/tally sessions :a))))
+    (testing "every field the rules can score is present from the start"
+      ;; Otherwise adding a category silently scores nil for everyone who
+      ;; joined before the first one of them happened.
+      (is (= (set (keys rules/tally-fields)) (set (keys (s/tally sessions :a))))))
     (testing "and the score comes from the same shared rules the client uses"
       (let [board (s/scoreboard sessions "w1")]
-        (is (= (rules/score-for {:peds 3 :props 1}) (:score (first board))))
+        (is (= (rules/score-for {:peds 3 :props 2 :cars 1}) (:score (first board))))
         (is (= 2 (count board)))))
-    (testing "peers are told about every destruction"
-      (is (= 4 (count (filter #(= :b (first %)) @inbox)))))))
+    (testing "peers are told about every destruction, scored or not"
+      (is (= 6 (count (filter #(= :b (first %)) @inbox)))))))
+
+(deftest an-unknown-delta-kind-is-relayed-but-not-scored
+  ;; A client newer than this process will send kinds it has never heard of.
+  ;; Relaying them keeps the room consistent; scoring them would be inventing
+  ;; points for something the rules do not describe.
+  (let [sessions (s/create)
+        inbox (atom [])
+        send! (fake-socket inbox)]
+    (s/join! sessions "w1" :a send!)
+    (s/join! sessions "w1" :b send!)
+    ;; A frame from the future: a delta whose kind byte this build has no name
+    ;; for. Built by poking a real one, because that is exactly what a newer
+    ;; client would put on the wire.
+    (let [^bytes frame (wire/encode-delta {:cx 4 :cz -2 :kind :prop :index 7})]
+      (aset-byte frame 9 (byte 99))
+      (let [msg (wire/decode frame)]
+        (is (nil? (:kind msg)) "this build should not recognise it")
+        (s/handle-delta! sessions :a msg frame)))
+    (is (= 0 (rules/score-for (s/tally sessions :a))) "and should not score it")
+    (testing "but the peer still hears it, byte for byte"
+      (is (= 1 (count (filter #(= :b (first %)) @inbox))))
+      (is (= 99 (bit-and 0xff (aget ^bytes (second (first @inbox)) 9)))))))
 
 (deftest scoreboard-is-per-world-and-ranked
   (let [sessions (s/create)

@@ -53,14 +53,27 @@
           (.then (fn [p] (when p (remember-profile! (:id p))) p))))))
 
 (defn ensure-world!
-  "Use the first world the server knows about, or create one. The seed it hands
-  back is the entire world-sync protocol: everything else is derived."
-  []
-  (-> (get-edn "/api/worlds")
-      (.then (fn [res]
-               (if-let [w (first (:worlds res))]
-                 w
-                 (post-edn "/api/worlds" {:name "carmagedonio"}))))))
+  "The world to play in. The seed it hands back is the entire world-sync
+  protocol: everything else is derived.
+
+  With an `id`, that world and no other -- which is how two people arrange to
+  be in the same one: whoever starts it shares the link. Without, the first
+  world the server knows about, or a new one."
+  ([] (ensure-world! nil))
+  ([id]
+   (if id
+     (-> (get-edn (str "/api/worlds/" id))
+         (.then (fn [w]
+                  ;; A link to a world this server has never heard of is worth
+                  ;; saying so about rather than silently dropping the player
+                  ;; into a different one.
+                  (when-not w (js/console.warn "no such world:" id))
+                  w)))
+     (-> (get-edn "/api/worlds")
+         (.then (fn [res]
+                  (if-let [w (first (:worlds res))]
+                    w
+                    (post-edn "/api/worlds" {:name "carmagedonio"}))))))))
 
 (defn submit-run! [world-id profile-id result]
   (when (and world-id profile-id)

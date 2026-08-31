@@ -146,7 +146,7 @@
   "Repaint the cluster. Called every frame: it is a speedometer."
   [{:keys [^js ctx]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
-           rivals wheels drift? handbrake? car state]}]
+           rivals wheels drift? handbrake? online car state]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -190,6 +190,11 @@
     (text! ctx "rivals left" 422 74 (str "9px " mono) dim "left")
 
     (text! ctx car (- w 14) 22 (str "600 12px " mono) dim "right")
+    ;; Who else is here. Only when there is somebody: an instrument that always
+    ;; reads zero is a label.
+    (when (pos? (or online 0))
+      (text! ctx (str "\u25cf " online " online") (- w 14) 38
+             (str "600 11px " mono) good "right"))
 
     (case state
       :won  (text! ctx "WON" (- w 14) 140 (str "700 16px " mono) good "right")
@@ -202,7 +207,8 @@
   Assembled by the caller rather than reached for here: the cockpit knows how
   to draw a dashboard and deliberately nothing about where a simulation keeps
   its wheels."
-  [{:keys [speed top-speed panels damage game rivals wheels slip handbrake? car]}]
+  [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
+           online car]}]
   (let [{:keys [remaining score peds state]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
@@ -219,5 +225,6 @@
      :wheels    wheels
      :drift?    (> slip 22.0)
      :handbrake? handbrake?
+     :online    online
      :car       car
      :state     state}))

@@ -62,7 +62,10 @@
      :pos [(.-x t) (.-y t) (.-z t)]
      :quat [(.-x r) (.-y r) (.-z r) (.-w r)]
      :vel [(.-x v) (.-y v) (.-z v)]
-     :damage (sim/damage sim)}))
+     :damage (sim/damage sim)
+     ;; Which vehicle, so a remote lorry arrives in someone's mirror as a
+     ;; lorry. It rides in the byte the car frame always had spare.
+     :kind (cars/kind-index (sim/kind-of sim 0) 0)}))
 
 (defn- apply-inbound!
   "Drain the transport. Everything the network can say about the world arrives
@@ -160,6 +163,7 @@
              :wheels     (sim/wheels-on-ground sim)
              :slip       (js/Math.abs (sim/sideslip-now sim))
              :handbrake? (input/handbrake-held?)
+             :online     (remote/count-players remotes)
              :car        (cars/display-name kind)})))
         (render/draw! rs sim alpha dt))
 
@@ -175,7 +179,8 @@
           (minimap/draw! minimap (sim/player-x sim) (sim/player-z sim)
                          (js/Math.atan2 fx fz)
                          (when (minimap/rivals-shown? minimap)
-                           (rivals/blips rvs sim))))
+                           (rivals/blips rvs sim))
+                         (remote/blips remotes)))
         ;; Everything the cluster does not show. This is diagnostics -- counts,
         ;; frame rate, how much of the world is loaded -- and it is deliberately
         ;; small, dim and out of the way, because it used to sit in the same
@@ -191,8 +196,6 @@
                      "   cars " (:driving (traffic/stats traffic-state))
                      "   props " (:live (props/stats props-state))
                      "   panels " (:smashed (parts/stats bridges))
-                     (let [n (remote/count-players remotes)]
-                       (if (pos? n) (str "   online " n) ""))
                      "   saved " (:bytes (overlay/stats overlay)) "B"))))})))
 
 (defn- boot!
@@ -408,8 +411,10 @@
 
 (defn init! []
   (-> (sim/init!)
-      (.then (fn [_] (js/Promise.all #js [(api/ensure-world!)
-                                          (api/ensure-profile! "player")])))
+      (.then (fn [_]
+               (let [params (js/URLSearchParams. (.-search js/location))]
+                 (js/Promise.all #js [(api/ensure-world! (.get params "world"))
+                                      (api/ensure-profile! "player")]))))
       (.then (fn [^js pair]
                (let [world   (aget pair 0)
                      profile (aget pair 1)]

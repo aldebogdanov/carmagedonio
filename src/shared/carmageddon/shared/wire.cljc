@@ -89,7 +89,7 @@
 
 ;; --- car snapshot -----------------------------------------------------------
 
-(defn- put-car! [b o {:keys [id pos quat vel damage]}]
+(defn- put-car! [b o {:keys [id pos quat vel damage kind]}]
   (let [[px py pz] pos
         [qx qy qz qw] quat
         [vx vy vz] vel]
@@ -105,7 +105,10 @@
     (put-i16! b (+ o 24) (js-round (* vel-scale (clamp vy -120.0 120.0))))
     (put-i16! b (+ o 26) (js-round (* vel-scale (clamp vz -120.0 120.0))))
     (put-u8!  b (+ o 28) (js-round (* 255.0 (clamp (or damage 0.0) 0.0 1.0))))
-    (put-u8!  b (+ o 29) 0)))
+    ;; The spare byte, spent: which vehicle out of the catalogue this is, so a
+    ;; remote lorry is drawn as a lorry. It was reserved padding, so the frame
+    ;; is the same size it always was.
+    (put-u8!  b (+ o 29) (or kind 0))))
 
 (defn- get-car [b o]
   {:id   (get-u16 b o)
@@ -117,7 +120,8 @@
    :vel  [(/ (get-i16 b (+ o 22)) vel-scale)
           (/ (get-i16 b (+ o 24)) vel-scale)
           (/ (get-i16 b (+ o 26)) vel-scale)]
-   :damage (/ (get-u8 b (+ o 28)) 255.0)})
+   :damage (/ (get-u8 b (+ o 28)) 255.0)
+   :kind (get-u8 b (+ o 29))})
 
 ;; --- messages ---------------------------------------------------------------
 

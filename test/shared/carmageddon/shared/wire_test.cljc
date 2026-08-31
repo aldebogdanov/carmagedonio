@@ -46,6 +46,17 @@
       (is (every? #(< (abs %) 0.01) (map - (:vel c) (:vel sample-car)))))
     (is (< (abs (- 0.42 (:damage c))) 0.005))))
 
+(deftest the-vehicle-kind-rides-in-the-spare-byte
+  (testing "a car frame is still thirty bytes, and it now says what it is"
+    ;; The last byte was reserved padding. Spending it on the catalogue index
+    ;; is what stops every remote player being drawn as the reference saloon.
+    (let [frame (w/encode-state 1 [(assoc sample-car :kind 4)])
+          c (first (:cars (w/decode frame)))]
+      (is (= (+ 6 30) (w/byte-length frame)))
+      (is (= 4 (:kind c)))))
+  (testing "and a frame from something that does not set it decodes as zero"
+    (is (= 0 (:kind (first (:cars (w/decode (w/encode-state 1 [sample-car])))))))))
+
 (deftest several-cars-survive-together
   (let [cars (mapv #(assoc sample-car :id % :pos [(* % 10.0) 1.0 (* % -5.0)]) (range 6))
         decoded (:cars (w/decode (w/encode-state 5 cars)))]

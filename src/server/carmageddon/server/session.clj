@@ -65,7 +65,11 @@
              (-> s
                  (assoc-in [:players ch] {:id id :world-id world-id :ch ch
                                           :send send-fn :last nil
-                                          :tally {:peds 0 :props 0 :wrecks 0}})
+                                          ;; Every countable thing the rules
+                                          ;; know about, so a tally is never
+                                          ;; missing a field the scorer walks.
+                                          :tally (zipmap (keys rules/tally-fields)
+                                                         (repeat 0))})
                  (assoc :next-id (inc id)))))
     (get-in @sessions [:players ch])))
 
@@ -111,18 +115,30 @@
             :relayed))))
     :unknown-player))
 
+(def ^:private scored-as
+  "Which tally field each kind of destruction counts towards. Barriers score as
+  clutter, here exactly as on the client."
+  {:ped :peds :prop :props :barrier :props :car :cars})
+
 (defn handle-delta!
   "Record a destruction event against the sender's tally and tell everyone else.
 
   The tally lives here, which is the point: at the end of a run the server
-  already knows the score and does not have to take the client's word for it."
-  [sessions ch {:keys [kind] :as msg}]
-  (when-let [me (get-in @sessions [:players ch])]
-    (let [field (case kind :ped :peds :prop :props nil)]
-      (when field
-        (swap! sessions update-in [:players ch :tally field] inc))
-      (broadcast! sessions ch (wire/encode-delta msg))
-      (get-in @sessions [:players ch :tally]))))
+  already knows the score and does not have to take the client's word for it.
+
+  The *original frame* is relayed rather than a re-encoded one. That is not
+  only cheaper: a client newer than this process will send kinds it has never
+  heard of, and re-encoding one threw -- `wire/encode-delta` has no byte to
+  write for a kind it does not know. Passing the bytes through keeps the room
+  consistent with whatever the newest client in it understands, while the tally
+  still only counts what the rules describe."
+  ([sessions ch msg] (handle-delta! sessions ch msg (wire/encode-delta msg)))
+  ([sessions ch {:keys [kind]} frame]
+   (when (get-in @sessions [:players ch])
+     (when-let [field (scored-as kind)]
+       (swap! sessions update-in [:players ch :tally field] inc))
+     (broadcast! sessions ch frame)
+     (get-in @sessions [:players ch :tally]))))
 
 (defn tally [sessions ch] (get-in @sessions [:players ch :tally]))
 

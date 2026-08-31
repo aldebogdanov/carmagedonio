@@ -30,6 +30,8 @@
    :city     "#8e8b86"
    :downtown "#adaaa4"})
 
+(def ^:private online-colour "#38b6d8")
+
 (def ^:private landmark-colours
   {:stadium "#e0d24a" :mall "#d97fd0" :park "#6fd66f" :plaza "#e0e0e0"
    :works "#d9803a" :silos "#e8dcae" :church "#c6c0f0" :monument "#a8a29a"
@@ -284,14 +286,39 @@
             (.stroke ctx)))
       (.restore ctx))))
 
+(defn- draw-players!
+  "Everyone else in the world, as a ring.
+
+  Deliberately not an arrowhead: a rival is something to avoid or to wreck and
+  a player is neither, and the two have to be distinguishable at four pixels."
+  [{:keys [^js ctx]} px pz per-m size players]
+  (let [half (* 0.5 (/ size per-m))
+        x0 (- px half) z0 (- pz half)]
+    (doseq [{:keys [x z]} players
+            :let [sx (* (- x x0) per-m)
+                  sz (* (- z z0) per-m)]
+            :when (and (<= 0 sx size) (<= 0 sz size))]
+      (set! (.-strokeStyle ctx) online-colour)
+      (set! (.-lineWidth ctx) 2.5)
+      (.beginPath ctx)
+      (.arc ctx sx sz 5 0 6.2832)
+      (.stroke ctx)
+      (set! (.-strokeStyle ctx) "rgba(0,0,0,0.7)")
+      (set! (.-lineWidth ctx) 1)
+      (.beginPath ctx)
+      (.arc ctx sx sz 6.6 0 6.2832)
+      (.stroke ctx))))
+
 (defn draw!
   "Redraw the map. `heading` is the car's yaw, in the same convention
-  `camera/heading` uses. `blips` is where the rivals are, or nil.
+  `camera/heading` uses. `blips` is where the rivals are, `players` where the
+  other people in the world are; either may be nil.
 
   Called at HUD rate, not per frame -- a map that updates twice a second is
   indistinguishable from one that updates sixty times."
-  ([ms x z heading] (draw! ms x z heading nil))
-  ([{:keys [^js canvas ^js label at show-rivals] :as ms} x z heading blips]
+  ([ms x z heading] (draw! ms x z heading nil nil))
+  ([ms x z heading blips] (draw! ms x z heading blips nil))
+  ([{:keys [^js canvas ^js label at show-rivals] :as ms} x z heading blips players]
   (when canvas
     (let [size (.-width canvas)
           per-m (/ size (* span k/chunk-size))]
@@ -300,6 +327,8 @@
       (draw-landmarks! ms x z per-m size)
       (when (and @show-rivals (seq blips))
         (draw-rivals! ms x z per-m size blips))
+      (when (seq players)
+        (draw-players! ms x z per-m size players))
       (draw-player! ms size heading)
       ;; The label says where you are and what is nearby, which between them
       ;; are the two things a place needs before it is somewhere rather than

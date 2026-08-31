@@ -186,6 +186,17 @@
 
 (def default-kind :muscle)
 
+(def kind-index
+  "Catalogue position, which is how a vehicle travels over the wire: one byte
+  rather than a keyword, in the byte the car frame had spare."
+  (zipmap kinds (range)))
+
+(defn kind-at
+  "The catalogue entry at wire index `i`, falling back to the reference car so
+  a frame from a build with more vehicles in it still draws something."
+  [i]
+  (get kinds i default-kind))
+
 (defn spec [kind] (get catalogue kind (get catalogue default-kind)))
 
 (defn half [kind] (:half (spec kind)))

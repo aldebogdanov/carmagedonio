@@ -132,7 +132,9 @@
               (when-let [msg (and ba (wire/decode ba))]
                 (case (:type msg)
                   :state (session/handle-state! sessions ch msg)
-                  :delta (session/handle-delta! sessions ch msg)
+                  ;; The bytes that arrived, not a re-encoding of them: see
+                  ;; `session/handle-delta!`.
+                  :delta (session/handle-delta! sessions ch msg ba)
                   nil))))
 
           :on-close
