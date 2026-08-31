@@ -103,7 +103,20 @@
    ;; Deriving it means a car that has been hit hard in one place only and a car
    ;; that has been hit everywhere lightly can come out the same, and they
    ;; should not: the first still drives.
-   :damage    (js/Float64Array. 5)})
+   :damage    (js/Float64Array. 5)
+   ;; [engine grip armour], all 1.0 at rest. Power-ups multiply these rather
+   ;; than editing the tuning atom: the reference car's tuning is shared with
+   ;; the measurement harness, and a boost that leaked into it would quietly
+   ;; change what every published number means.
+   :boost     (doto (js/Float64Array. 3) (.fill 1.0))})
+
+(def ^:const boost-engine 0)
+(def ^:const boost-grip 1)
+(def ^:const boost-armour 2)
+
+(defn set-boost! [{:keys [^js boost]} i v] (aset boost i v))
+(defn boost-of [{:keys [^js boost]} i] (aget boost i))
+(defn clear-boosts! [{:keys [^js boost]}] (.fill boost 1.0))
 
 (def ^:const dmg-front 0)
 (def ^:const dmg-rear  1)
@@ -164,10 +177,20 @@
   the car was moving into takes half again as much, so a driver who only ever
   hits things nose-first cooks the engine well before the car is finished. A
   car that has only ever been rear-ended still pulls."
-  [{:keys [^js damage] :as veh} amount]
-  (let [p (impact-panel veh)]
+  [{:keys [^js damage ^js boost] :as veh} amount]
+  ;; Armour divides what arrives, so a plated car takes the same hits and keeps
+  ;; more of itself.
+  (let [amount (/ amount (max 0.05 (aget boost boost-armour)))
+        p (impact-panel veh)]
     (aset damage dmg-total (min 1.0 (+ (aget damage dmg-total) amount)))
     (aset damage p (min 1.0 (+ (aget damage p) (* 1.5 amount))))))
+
+(defn repair!
+  "Undo `amount` of every kind of damage. Panels come back faster than the
+  total, so a repair visibly un-bends the car before it fully restores it."
+  [{:keys [^js damage]} amount]
+  (dotimes [i 5]
+    (aset damage i (max 0.0 (- (aget damage i) (if (= i dmg-total) amount (* 1.4 amount)))))))
 
 (defn set-damage!
   "Force the damage state: four panels and a total.
@@ -209,6 +232,10 @@
         ;; terminal speed, because past the tyres the only things resisting are
         ;; rolling resistance and body damping and neither knows what it is
         ;; pushing.
+        ;; The limiter moves with the boost. Without this a nitro would add
+        ;; torque the gearing immediately took back, and top speed would be
+        ;; exactly what it was before.
+        top  (* top (:boost-top cmd 1.0))
         gear (let [r (/ (js/Math.abs v) top)]
                (max 0.0 (- 1.0 (* r r r))))
         throttle (* throttle gear)]
@@ -228,10 +255,11 @@
 
 (defn- step-wheel!
   [{:keys [^js world ^js body layout tuning omega susp susp-prev fz fx fy
-           slip-a slip-r contact spin steer ^js damage]}
+           slip-a slip-r contact spin steer ^js damage] :as veh}
    i dt {:keys [drive brake handbrake]}]
   (let [{:keys [connections radii steered driven handbraked]} layout
         radius (nth radii i)
+        ^js boost (:boost veh)
         {:keys [suspension-rest spring-rate damper-compression damper-rebound
                 max-load nominal-load grip grip-rear-bias load-sensitivity
                 lat-B lat-C lat-E long-B long-C long-E
@@ -248,13 +276,15 @@
         ;; power. Broad damage costs some anyway -- a bent shell drags.
         engine-torque (* engine-torque
                          (- 1.0 (* 0.35 dmg))
-                         (- 1.0 (* 0.40 front)))
+                         (- 1.0 (* 0.40 front))
+                         (aget boost boost-engine))
         ;; Brake lines and discs are behind the same bumper.
         brake-torque  (* brake-torque (- 1.0 (* 0.30 front)))
         ;; Wheels 0 and 2 are the left pair; a caved-in flank ruins the
         ;; geometry on that side and the tyres on it stop working properly.
         side   (aget damage (if (even? i) dmg-left dmg-right))
-        grip          (* grip (- 1.0 (* 0.22 dmg)) (- 1.0 (* 0.28 side)))
+        grip          (* grip (- 1.0 (* 0.22 dmg)) (- 1.0 (* 0.28 side))
+                         (aget boost boost-grip))
         ^js q  (.rotation body)
         ^js p  (.translation body)
         theta  (if (steered i) (aget steer 0) 0.0)
@@ -415,7 +445,9 @@
                        (< target (- cur d)) (- cur d)
                        :else target)]
     (aset steer 0 next)
-    (dotimes [i 4] (step-wheel! veh i dt (gear-for veh cmd)))))
+    (dotimes [i 4]
+      (step-wheel! veh i dt
+                   (gear-for veh (assoc cmd :boost-top (boost-of veh boost-engine)))))))
 
 (defn clear-motion!
   "Everything about how the car is moving, zeroed. Damage is not motion and is

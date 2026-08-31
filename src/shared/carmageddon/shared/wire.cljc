@@ -157,7 +157,7 @@
     (put-u16! b 1 player-id)
     (bytes-of b)))
 
-(def delta-kinds {:prop 0 :ped 1 :car 2 :barrier 3})
+(def delta-kinds {:prop 0 :ped 1 :car 2 :barrier 3 :pickup 4})
 (def delta-kind-of (into {} (map (fn [[k v]] [v k]) delta-kinds)))
 
 (defn encode-delta

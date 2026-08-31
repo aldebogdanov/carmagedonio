@@ -1911,6 +1911,51 @@
       (= crop :scrub) :sheep
       :else nil)))
 
+(def pickup-kinds
+  "What is worth driving over. Order is the wire format: a pickup travels as an
+  index, and reordering these renames every crate in every saved world."
+  [:repair :nitro :grip :armour :flame :shock])
+
+(def pickup-stride 4)          ; x y z kind
+(def ^:private pickups-per-chunk 3)
+
+(defn chunk-pickups
+  "Crates of something useful, sitting on the carriageway.
+
+  On the road rather than beside it, unlike props: the whole point is that they
+  are collected by driving, and a bonus you have to stop and aim at is a bonus
+  nobody takes at speed. Placed on the centre line for the same reason.
+
+  Deterministic per chunk like everything else, so two players in one world
+  drive over the same crates -- and the overlay records which have been taken,
+  so they do not come back when the chunk does."
+  ([seed cx cz] (chunk-pickups seed cx cz (chunk-lines seed cx cz)))
+  ([seed cx cz owned]
+   (let [lines (remove :bridge? owned)
+         r (prng/chunk-rng seed cx cz (:pickups k/salt))
+         out (transient [])]
+     (when (seq lines)
+       (dotimes [_ pickups-per-chunk]
+         (let [line (nth lines (prng/next-int! r (count lines)))
+               pts (:points line)
+               i (prng/next-int! r (dec (count pts)))
+               t (prng/next-range! r 0.2 0.8)
+               kind (prng/next-int! r (count pickup-kinds))
+               [ax az] (nth pts i)
+               [bx bz] (nth pts (inc i))
+               x (+ ax (* t (- bx ax)))
+               z (+ az (* t (- bz az)))]
+           (conj! out x)
+           ;; A metre up: high enough to be seen over a kerb, low enough that
+           ;; any car drives through it rather than under it.
+           (conj! out (+ 1.0 (height-at seed x z)))
+           (conj! out z)
+           (conj! out (double kind)))))
+     (let [v (persistent! out)
+           a (farray (count v))]
+       (dotimes [i (count v)] (fput! a i (nth v i)))
+       a))))
+
 (defn chunk-peds
   "Deterministic pedestrian and animal spawns, as
   [x y z heading speed kind ...].
@@ -2326,6 +2371,7 @@
           bridges (chunk-bridges seed cx cz owned)
           flora (chunk-flora seed cx cz field)
           landmarks (chunk-landmarks seed cx cz)
+          pickups (chunk-pickups seed cx cz owned)
           traffic (chunk-traffic seed cx cz owned)]
     {:cx cx :cz cz :verts n :size k/chunk-size
      :origin [x0 z0]
@@ -2339,6 +2385,7 @@
      :bridges bridges
      :flora flora
      :landmarks landmarks
+     :pickups pickups
      :traffic traffic
      :biome (biome seed cx cz)})))
 

@@ -28,7 +28,7 @@
 (def kinds
   "What can be destroyed, and therefore what a chunk's delta can record. Adding
   a kind is safe; renaming one invalidates every saved world."
-  #{:props :peds :cars :parts})
+  #{:props :peds :cars :parts :pickups})
 
 (defn empty-overlay
   ([seed] (empty-overlay seed :normal))

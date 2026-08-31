@@ -19,6 +19,7 @@
             [carmageddon.client.overlay :as overlay]
             [carmageddon.client.parts :as parts]
             [carmageddon.client.peds :as peds]
+            [carmageddon.client.powerups :as powerups]
             [carmageddon.client.props :as props]
             [carmageddon.client.traffic :as traffic]
             [carmageddon.client.remote :as remote]
@@ -79,7 +80,7 @@
 (defn- apply-inbound!
   "Drain the transport. Everything the network can say about the world arrives
   here: who moved, who left, and what got destroyed."
-  [transport remotes props-state peds-state traffic-state bridges now]
+  [transport remotes props-state peds-state traffic-state bridges powerups now]
   (doseq [msg (net/-poll! transport)]
     (case (:type msg)
       :welcome (remote/set-self! remotes (:player-id msg))
@@ -95,13 +96,14 @@
                    :ped     (peds/kill-index! peds-state key index [0.0 0.0 0.0])
                    :car     (traffic/wreck-index! traffic-state key index)
                    :barrier (parts/smash-index! bridges key index [0.0 0.0 0.0])
+                   :pickup  (powerups/take-index-remote! powerups key index)
                    nil))
       nil)))
 
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges rvs cock fire-state remotes]}]
+                                  bridges rvs cock fire-state powerups-state remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -118,6 +120,29 @@
           (game/tick! game)
           ;; Fire ages on the fixed step like everything else that changes.
           (fire/tick! fire-state k/dt)
+          ;; Anything driven over, and whatever holding it does this tick.
+          (let [v (sim/player-vehicle sim)]
+            (when-let [{:keys [kind delta]} (powerups/collect! powerups-state
+                                                              (sim/player-x sim)
+                                                              (sim/player-z sim))]
+              (cockpit/flash! cock (powerups/apply! powerups-state v kind))
+              (net/-send! transport (wire/encode-delta (assoc delta :kind :pickup))))
+            (powerups/tick!
+             powerups-state v tick k/dt
+             (fn [[what x y z r life]]
+               (case what
+                 ;; The trail is the player's, so anyone who runs into it is
+                 ;; worth points to them.
+                 :fire (fire/ignite! fire-state x y z r life :player)
+                 :shock (doseq [d (concat
+                                   (map #(assoc % :kind :car)
+                                        (traffic/wreck-near! traffic-state x z r
+                                                             [0.0 60.0 0.0]))
+                                   (map #(assoc % :kind :ped)
+                                        (peds/kill-near! peds-state x z (* 0.6 r))))]
+                          (if (= :car (:kind d)) (game/car-wrecked! game) (game/ped-killed! game))
+                          (net/-send! transport (wire/encode-delta d)))
+                 nil))))
           (let [px (sim/player-x sim) pz (sim/player-z sim)]
             (when-let [{:keys [heat]} (fire/heat-at fire-state px pz)]
               (vehicle/add-damage! (sim/player-vehicle sim) (* burn-rate heat k/dt)))
@@ -141,7 +166,7 @@
           (when (zero? (mod tick snap-every))
             (net/-send! transport (wire/encode-state tick [(car-snapshot sim)])))
           (apply-inbound! transport remotes props-state peds-state traffic-state
-                          bridges (js/Date.now))))
+                          bridges powerups-state (js/Date.now))))
 
       :on-frame
       (fn [alpha dt]
@@ -161,6 +186,7 @@
         (props/sync! props-state)
         (parts/sync! bridges)
         (fire/sync! fire-state (* 0.001 (js/Date.now)))
+        (powerups/sync! powerups-state (* 0.001 (js/Date.now)))
         (traffic/sync! traffic-state)
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
@@ -188,6 +214,7 @@
              :slip       (js/Math.abs (sim/sideslip-now sim))
              :handbrake? (input/handbrake-held?)
              :online     (remote/count-players remotes)
+             :powerups   (powerups/active powerups-state)
              :car        (cars/display-name kind)})))
         (render/draw! rs sim alpha dt))
 
@@ -222,6 +249,7 @@
                      "   panels " (:smashed (parts/stats bridges))
                      (let [f (fire/stats fire-state)]
                        (if (pos? (:pools f)) (str "   fires " (:pools f)) ""))
+                     "   crates " (:live (powerups/stats powerups-state))
                      "   saved " (:bytes (overlay/stats overlay)) "B"))))})))
 
 (defn- boot!
@@ -251,6 +279,7 @@
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
         fr        (fire/create (:scene rs))
+        pu        (powerups/create (:scene rs) ov)
         mm        (minimap/create seed)
         ck        (cockpit/create)
         ;; Outbreak is a property of the world, with a query parameter for
@@ -271,6 +300,7 @@
                                      (parts/add-chunk! br key (:bridges data))
                                      (parts/add-chunk! fl key (:flora data))
                                      (parts/add-chunk! lm key (:landmarks data))
+                                     (powerups/add-chunk! pu key (:pickups data))
                                      (traffic/add-chunk! tf key (:traffic data))
                                      (peds/add-chunk! pd key (:peds data)))
                     :on-physics-remove (fn [key]
@@ -280,6 +310,7 @@
                                      (parts/remove-chunk! br key)
                                      (parts/remove-chunk! fl key)
                                      (parts/remove-chunk! lm key)
+                                     (powerups/remove-chunk! pu key)
                                      (traffic/remove-chunk! tf key)
                                      (peds/remove-chunk! pd key))})
         ;; One seam, two implementations. Nothing below this line knows
@@ -416,6 +447,7 @@
                                                  :bridges br
                                                  :cock ck
                                                  :fire-state fr
+                                                 :powerups-state pu
                                                  :birds-state bd
                                                  :overlay ov
                                                  :minimap mm
@@ -424,7 +456,7 @@
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
-                                 :landmarks lm :traffic tf :birds bd :peds pd :fire fr
+                                 :landmarks lm :traffic tf :birds bd :peds pd :fire fr :powerups pu
                                  :overlay ov :minimap mm :cockpit ck :game gm
                                  :rivals rvs :remotes remotes
                                  :stop stop :detach detach}))

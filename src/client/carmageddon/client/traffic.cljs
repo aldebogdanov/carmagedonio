@@ -556,6 +556,22 @@
          :pos [(.-x t) (.-y t) (.-z t)]
          :volatile? (boolean (:volatile? (.-type c)))}))))
 
+(defn wreck-near!
+  "Wreck every living car within `r` of (x, z). Returns their deltas.
+
+  This is what a weapon does: it does not hit one thing, it clears a space."
+  [ts x z r impulse]
+  (let [r2 (* r r)
+        hits (for [[_ {:keys [cars]}] (:chunks @ts)
+                   i (range (alength cars))
+                   :let [^Car c (aget cars i)]
+                   :when (.-alive? c)
+                   :let [t (.translation ^js (.-body c))
+                         dx (- (.-x t) x) dz (- (.-z t) z)]
+                   :when (< (+ (* dx dx) (* dz dz)) r2)]
+               (.-handle c))]
+    (vec (keep #(wreck! ts % impulse) (vec hits)))))
+
 (defn wreck-index!
   "Wreck car `idx` of chunk `key` because someone else did. Recorded even when
   that chunk is not loaded here, so it stays wrecked when it arrives."

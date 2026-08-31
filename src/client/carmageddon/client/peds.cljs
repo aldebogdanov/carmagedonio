@@ -364,6 +364,19 @@
               [(kill-index! ps key idx [0.0 6.0 0.0]) owner])
             (vec victims)))))
 
+(defn kill-near!
+  "Kill everyone within `r` of (x, z). Returns their deltas."
+  [ps x z r]
+  (let [r2 (* r r)
+        victims (for [[key chunk] (:chunks @ps)
+                      p chunk
+                      :when (:alive? p)
+                      :let [t (.translation ^js (:body p))
+                            dx (- (.-x t) x) dz (- (.-z t) z)]
+                      :when (< (+ (* dx dx) (* dz dz)) r2)]
+                  [key (:idx p)])]
+    (mapv (fn [[key idx]] (kill-index! ps key idx [0.0 5.0 0.0])) (vec victims))))
+
 (defn ped? [ps handle] (contains? (:by-collider @ps) handle))
 
 (defn person? [ps handle]

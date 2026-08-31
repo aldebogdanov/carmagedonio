@@ -55,6 +55,7 @@
      :bridges (unchecked-get r "bridges")
      :flora (unchecked-get r "flora")
      :landmarks (unchecked-get r "landmarks")
+     :pickups (unchecked-get r "pickups")
      :traffic (unchecked-get r "traffic")
      :peds (unchecked-get r "peds")
      :furniture (unchecked-get r "furniture")}))

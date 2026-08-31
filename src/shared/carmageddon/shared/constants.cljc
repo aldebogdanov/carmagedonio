@@ -34,7 +34,8 @@
    :blocks  2
    :props   3
    :peds    4
-   :landmarks 5})
+   :landmarks 5
+   :pickups 6})
 
 ;; --- Network ----------------------------------------------------------------
 

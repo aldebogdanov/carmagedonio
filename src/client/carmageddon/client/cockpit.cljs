@@ -39,7 +39,15 @@
           ;; written in the 560x152 design space and stays crisp on a retina
           ;; display without a single number changing.
           (.scale ctx dpr dpr)
-          {:canvas canvas :ctx ctx})))))
+          ;; A line that appears for a moment when something happens. Held
+          ;; here rather than passed in: it is about the *dashboard*, not about
+          ;; the simulation, and nothing else needs to know it exists.
+          {:canvas canvas :ctx ctx :flash (volatile! nil)})))))
+
+(defn flash!
+  "Show `text` on the cluster for a couple of seconds."
+  [{:keys [flash]} text]
+  (when flash (vreset! flash {:text text :until (+ (js/Date.now) 2200)})))
 
 (defn- text!
   [^js ctx s x y font colour align]
@@ -142,11 +150,14 @@
   (text! ctx label (+ x 22) (+ y 11) (str "600 9px " mono)
          (if on? "#12141a" dim) "center"))
 
+(def ^:private powerups-label
+  {:nitro "NITRO" :grip "GRIP" :armour "ARMOUR" :flame "FIRETRAIL" :shock "SHOCK"})
+
 (defn draw!
   "Repaint the cluster. Called every frame: it is a speedometer."
-  [{:keys [^js ctx]}
+  [{:keys [^js ctx flash]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
-           rivals wheels drift? handbrake? online car state]}]
+           rivals wheels drift? handbrake? online car state powerups]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -196,6 +207,24 @@
       (text! ctx (str "\u25cf " online " online") (- w 14) 38
              (str "600 11px " mono) good "right"))
 
+    ;; Whatever is being held, and for how much longer. Bars rather than
+    ;; numbers: what matters is that it is about to run out, not that it has
+    ;; 3.4 seconds left.
+    (let [ps (seq powerups)]
+      (dotimes [i (count ps)]
+        (let [[k secs] (nth ps i)
+              x (+ 300 (* i 86))]
+          (set! (.-fillStyle ctx) "rgba(232,228,216,0.10)")
+          (.fillRect ctx x 128 78 12)
+          (set! (.-fillStyle ctx) amber)
+          (.fillRect ctx x 128 (* 78 (min 1.0 (/ secs 14.0))) 12)
+          (text! ctx (or (powerups-label k) (str k)) (+ x 39) 137
+                 (str "600 8px " mono) "#12141a" "center"))))
+
+    (when-let [{:keys [text until]} (and flash @flash)]
+      (when (> until (js/Date.now))
+        (text! ctx text 74 148 (str "700 13px " mono) amber "center")))
+
     (case state
       :won  (text! ctx "WON" (- w 14) 140 (str "700 16px " mono) good "right")
       :lost (text! ctx "OUT OF TIME" (- w 14) 140 (str "700 16px " mono) bad "right")
@@ -208,7 +237,7 @@
   to draw a dashboard and deliberately nothing about where a simulation keeps
   its wheels."
   [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
-           online car]}]
+           online car powerups]}]
   (let [{:keys [remaining score peds state]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
@@ -226,5 +255,6 @@
      :drift?    (> slip 22.0)
      :handbrake? handbrake?
      :online    online
+     :powerups  powerups
      :car       car
      :state     state}))
