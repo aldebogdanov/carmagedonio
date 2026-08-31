@@ -125,8 +125,23 @@
           ;; them, so nothing in the tyre model has to know the sky exists.
           (let [g (weather/grip-scale weather-state)]
             (doseq [v (sim/vehicles sim)] (vehicle/set-surface! v g)))
-          ;; Fire ages on the fixed step like everything else that changes.
-          (fire/tick! fire-state k/dt)
+          ;; Fire ages on the fixed step like everything else that changes --
+          ;; faster when it is raining on it.
+          (fire/tick! fire-state k/dt (:rain (weather/stats weather-state)))
+          ;; Twice a second, fire eats what it is standing on. A cylinder in a
+          ;; burning pool goes up, which lights another pool, which reaches the
+          ;; next cylinder: an industrial estate is genuinely dangerous to set
+          ;; alight, and it is dangerous by itself rather than by a rule that
+          ;; says so.
+          (when (zero? (mod tick 30))
+            (doseq [{:keys [x z r owner]} (fire/pools fire-state)
+                    d (props/destroy-near! props-state x z (* 0.8 r))]
+              (game/prop-wrecked! game)
+              (net/-send! transport (wire/encode-delta (assoc d :kind :prop)))
+              (when (:volatile? d)
+                (let [[bx by bz] (:pos d)]
+                  (fire/ignite! fire-state bx by bz
+                                (:r barrel-fire) (:life barrel-fire) owner)))))
           ;; Anything driven over, and whatever holding it does this tick.
           (let [v (sim/player-vehicle sim)]
             (when-let [{:keys [kind delta]} (powerups/collect! powerups-state

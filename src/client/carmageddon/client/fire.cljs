@@ -107,13 +107,19 @@
    nil))
 
 (defn tick!
-  "Age every pool, spread the ones with fuel behind them, and drop the dead."
-  [fs dt]
+  "Age every pool, spread the ones with fuel behind them, and drop the dead.
+
+  `douse` is how hard it is raining, 0 to 1. Rain does not put a fuel fire out
+  -- it ages it, three times faster in a downpour. Which means a tanker lit in
+  a storm is a very different proposition from one lit on a dry afternoon, and
+  that is a decision worth having."
+  ([fs dt] (tick! fs dt 0.0))
+  ([fs dt douse]
   (let [^js ps (:pools @fs)
         out #js []]
     (dotimes [i (.-length ps)]
       (let [^Pool p (aget ps i)]
-        (set! (.-t p) (+ (.-t p) dt))
+        (set! (.-t p) (+ (.-t p) (* dt (+ 1.0 (* 2.2 douse)))))
         ;; Children come early, while there is still something to run. A pool
         ;; that seeded at the end of its life would look like fire appearing
         ;; from nowhere next to embers.
@@ -136,7 +142,7 @@
                                0))))
         (when (< (.-t p) (.-life p)) (.push out p))))
     (swap! fs assoc :pools out)
-    nil))
+    nil)))
 
 (defn heat-at
   "How fiercely (x, z) is burning, 0 to 1, and who owns the worst of it.
@@ -250,6 +256,18 @@
     (fig/flush! flames)
     (fig/flush! smoke)
     (fig/flush! slick)))
+
+(defn pools
+  "Every live pool as `{:x :y :z :r :owner}`. Allocates, so it is asked a
+  couple of times a second by the one caller that needs to know what the fire
+  is touching -- not per tick and not per frame."
+  [fs]
+  (let [^js ps (:pools @fs)]
+    (vec (for [i (range (.-length ps))
+               :let [^Pool p (aget ps i)
+                     r (* (envelope (.-t p) (.-life p)) (.-r0 p))]
+               :when (pos? r)]
+           {:x (.-x p) :y (.-y p) :z (.-z p) :r r :owner (.-owner p)}))))
 
 (defn stats [fs]
   {:pools (.-length (:pools @fs)) :lit (:lit @fs)})
