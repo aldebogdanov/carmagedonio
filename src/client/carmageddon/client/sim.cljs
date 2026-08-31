@@ -392,6 +392,7 @@
     [(.-x v) (.-y v) (.-z v)]))
 
 (defn player-x [sim] (let [^js b (chassis-body sim)] (.-x (.translation b))))
+(defn player-y [sim] (let [^js b (chassis-body sim)] (.-y (.translation b))))
 (defn player-z [sim] (let [^js b (chassis-body sim)] (.-z (.translation b))))
 
 (defn sideslip-now

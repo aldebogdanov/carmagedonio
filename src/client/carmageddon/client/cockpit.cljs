@@ -157,7 +157,7 @@
   "Repaint the cluster. Called every frame: it is a speedometer."
   [{:keys [^js ctx flash]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
-           rivals wheels drift? handbrake? online car state powerups]}]
+           rivals wheels drift? handbrake? online car state powerups weather grip]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -201,6 +201,13 @@
     (text! ctx "rivals left" 422 74 (str "9px " mono) dim "left")
 
     (text! ctx car (- w 14) 22 (str "600 12px " mono) dim "right")
+    ;; What the sky is doing, and what it has left on the road. The grip figure
+    ;; is the one that matters: it is why the corner you took last lap does not
+    ;; work this one.
+    (when weather
+      (text! ctx (str weather " \u00b7 grip " (.toFixed (* 100 (or grip 1.0)) 0) "%")
+             (- w 14) 54 (str "600 11px " mono)
+             (if (< (or grip 1.0) 0.9) bad dim) "right"))
     ;; Who else is here. Only when there is somebody: an instrument that always
     ;; reads zero is a label.
     (when (pos? (or online 0))
@@ -237,7 +244,7 @@
   to draw a dashboard and deliberately nothing about where a simulation keeps
   its wheels."
   [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
-           online car powerups]}]
+           online car powerups weather grip]}]
   (let [{:keys [remaining score peds state]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
@@ -256,5 +263,7 @@
      :handbrake? handbrake?
      :online    online
      :powerups  powerups
+     :weather   weather
+     :grip      grip
      :car       car
      :state     state}))

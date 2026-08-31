@@ -108,13 +108,19 @@
    ;; than editing the tuning atom: the reference car's tuning is shared with
    ;; the measurement harness, and a boost that leaked into it would quietly
    ;; change what every published number means.
-   :boost     (doto (js/Float64Array. 3) (.fill 1.0))})
+   :boost     (doto (js/Float64Array. 3) (.fill 1.0))
+   ;; What the road is worth today. A property of the world acting on the car,
+   ;; not of the driver -- which is why it lives here beside the damage rather
+   ;; than in the Command.
+   :surface   (doto (js/Float64Array. 1) (.fill 1.0))})
 
 (def ^:const boost-engine 0)
 (def ^:const boost-grip 1)
 (def ^:const boost-armour 2)
 
 (defn set-boost! [{:keys [^js boost]} i v] (aset boost i v))
+(defn set-surface! [{:keys [^js surface]} v] (aset surface 0 v))
+(defn surface-of [{:keys [^js surface]}] (aget surface 0))
 (defn boost-of [{:keys [^js boost]} i] (aget boost i))
 (defn clear-boosts! [{:keys [^js boost]}] (.fill boost 1.0))
 
@@ -260,6 +266,7 @@
   (let [{:keys [connections radii steered driven handbraked]} layout
         radius (nth radii i)
         ^js boost (:boost veh)
+        ^js surface (:surface veh)
         {:keys [suspension-rest spring-rate damper-compression damper-rebound
                 max-load nominal-load grip grip-rear-bias load-sensitivity
                 lat-B lat-C lat-E long-B long-C long-E
@@ -284,7 +291,7 @@
         ;; geometry on that side and the tyres on it stop working properly.
         side   (aget damage (if (even? i) dmg-left dmg-right))
         grip          (* grip (- 1.0 (* 0.22 dmg)) (- 1.0 (* 0.28 side))
-                         (aget boost boost-grip))
+                         (aget boost boost-grip) (aget surface 0))
         ^js q  (.rotation body)
         ^js p  (.translation body)
         theta  (if (steered i) (aget steer 0) 0.0)

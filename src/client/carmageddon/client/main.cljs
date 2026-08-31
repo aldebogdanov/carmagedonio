@@ -27,6 +27,7 @@
             [carmageddon.client.rivals :as rivals]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.vehicle :as vehicle]
+            [carmageddon.client.weather :as weather]
             [carmageddon.shared.constants :as k]
             [carmageddon.shared.wire :as wire]))
 
@@ -103,7 +104,8 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges rvs cock fire-state powerups-state remotes]}]
+                                  bridges rvs cock fire-state powerups-state
+                                  weather-state remotes]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -118,6 +120,11 @@
           (traffic/drive! traffic-state k/dt (js/Date.now))
           (peds/walk! peds-state tick (sim/player-x sim) (sim/player-z sim))
           (game/tick! game)
+          ;; Weather, and what it is doing to the road under every car. The
+          ;; grip multiplier is pushed onto the vehicles rather than read by
+          ;; them, so nothing in the tyre model has to know the sky exists.
+          (let [g (weather/grip-scale weather-state)]
+            (doseq [v (sim/vehicles sim)] (vehicle/set-surface! v g)))
           ;; Fire ages on the fixed step like everything else that changes.
           (fire/tick! fire-state k/dt)
           ;; Anything driven over, and whatever holding it does this tick.
@@ -187,6 +194,10 @@
         (parts/sync! bridges)
         (fire/sync! fire-state (* 0.001 (js/Date.now)))
         (powerups/sync! powerups-state (* 0.001 (js/Date.now)))
+        (let [t (* 0.001 (js/Date.now))]
+          (weather/update! weather-state t dt)
+          (weather/sync! weather-state (sim/player-x sim) (sim/player-y sim)
+                         (sim/player-z sim) t))
         (traffic/sync! traffic-state)
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
@@ -215,6 +226,8 @@
              :handbrake? (input/handbrake-held?)
              :online     (remote/count-players remotes)
              :powerups   (powerups/active powerups-state)
+             :weather    (weather/label weather-state)
+             :grip       (weather/grip-scale weather-state)
              :car        (cars/display-name kind)})))
         (render/draw! rs sim alpha dt))
 
@@ -250,6 +263,8 @@
                      (let [f (fire/stats fire-state)]
                        (if (pos? (:pools f)) (str "   fires " (:pools f)) ""))
                      "   crates " (:live (powerups/stats powerups-state))
+                     (let [w (weather/stats weather-state)]
+                       (str "   wet " (.toFixed (:wet w) 2)))
                      "   saved " (:bytes (overlay/stats overlay)) "B"))))})))
 
 (defn- boot!
@@ -280,6 +295,7 @@
         bd        (birds/create (:scene rs))
         fr        (fire/create (:scene rs))
         pu        (powerups/create (:scene rs) ov)
+        wx        (weather/create (:scene rs) (:sun rs) (:renderer rs) seed)
         mm        (minimap/create seed)
         ck        (cockpit/create)
         ;; Outbreak is a property of the world, with a query parameter for
@@ -448,6 +464,7 @@
                                                  :cock ck
                                                  :fire-state fr
                                                  :powerups-state pu
+                                                 :weather-state wx
                                                  :birds-state bd
                                                  :overlay ov
                                                  :minimap mm
@@ -456,7 +473,7 @@
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
-                                 :landmarks lm :traffic tf :birds bd :peds pd :fire fr :powerups pu
+                                 :landmarks lm :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
                                  :overlay ov :minimap mm :cockpit ck :game gm
                                  :rivals rvs :remotes remotes
                                  :stop stop :detach detach}))

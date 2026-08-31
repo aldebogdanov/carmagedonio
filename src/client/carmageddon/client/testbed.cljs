@@ -43,12 +43,19 @@
   exactly the kind of thing a binding is for."
   cars/default-kind)
 
+(def ^:dynamic *surface*
+  "What the road under the test is worth, as a multiple of dry grip. A dynamic
+  var for the same reason `*kind*` is: the manoeuvres are about what a car
+  does, not about what it is doing it on."
+  1.0)
+
 (defn- fresh!
   "A settled car on an empty plane. Long enough for the suspension to stop
   ringing, which for a lorry on 130 kN springs takes rather more than a
   hatchback."
   []
   (let [s (sim/create! {:flat? true :kind *kind*})]
+    (vehicle/set-surface! (sim/player-vehicle s) *surface*)
     (step-n! s 0 150 {})
     s))
 
@@ -444,6 +451,27 @@
                     (.padEnd (str (:from-kmh r)) 11)
                     (str (:stop-seconds r)))))))
 
+(defn wet!
+  "The same car on a dry road and a soaked one.
+
+  This is the whole justification for weather touching the physics rather than
+  only the picture: if these two rows are the same, rain is a filter."
+  []
+  (println "\n=== wet road ===")
+  (println "  surface   0-40s   brake-m   lat-g   radius-m   peak-slip")
+  (doseq [[label g] [["dry" 1.0] ["wet" 0.78]]]
+    (binding [*surface* g]
+      (let [acc (accelerate 40)
+            brk (brake-from 60)
+            pad (skidpad 50 1.0)
+            hb  (handbrake-slide 60)]
+        (println (str "  " (.padEnd label 10)
+                      (.padEnd (str (or (:seconds acc) "-")) 8)
+                      (.padEnd (str (:metres brk)) 10)
+                      (.padEnd (str (:lateral-g pad)) 8)
+                      (.padEnd (str (:radius-m pad)) 11)
+                      (str (:peak-sideslip-deg hb))))))))
+
 (defn catalogue!
   "Every vehicle in the catalogue, measured the same way.
 
@@ -501,6 +529,7 @@
                (run-all!)
                (catalogue!)
                (damage!)
+               (wet!)
                (sweep! :grip [0.9 1.15 1.35 1.6 1.9])
                (sweep! :grip-rear-bias [1.0 0.96 0.92 0.88 0.84])
                (println)
