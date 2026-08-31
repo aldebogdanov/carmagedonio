@@ -36,5 +36,11 @@
    @server))
 
 (defn -main [& args]
-  (start! (or (some-> (first args) edn/read-string) 3000))
+  ;; No argument means "whatever $PORT says, else 3000", which is what the
+  ;; three-arity `start!` already implements. Passing 3000 in here instead --
+  ;; which is what this did -- made $PORT dead for anyone running the jar,
+  ;; including the systemd unit that deploys it.
+  (if-let [p (some-> (first args) edn/read-string)]
+    (start! p)
+    (start!))
   @(promise))

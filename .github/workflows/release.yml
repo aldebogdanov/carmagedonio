@@ -1,0 +1,75 @@
+# Builds the one artifact reposado deploys: target/server.jar, carrying the
+# server, the shared world generator and the :advanced-compiled client.
+#
+# The servers flake fetches this by the fixed URL
+# .../releases/latest/download/server.jar, so the asset name is part of the
+# contract with the deploy and must not change. Same arrangement as
+# irij.online and saltrim.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: DeLaGuardo/setup-clojure@v13
+        with:
+          cli: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      # Maven and the shadow-cljs compile cache are both worth carrying between
+      # runs; a cold client build is most of the wall time here.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            .shadow-cljs
+          key: ${{ runner.os }}-deps-${{ hashFiles('deps.edn', 'package-lock.json') }}
+          restore-keys: ${{ runner.os }}-deps-
+
+      - run: npm ci
+
+      # Both suites before packaging. The world generator runs on the JVM and in
+      # the browser and has to agree with itself on both, so both are run --
+      # a release whose server and client generate different worlds is exactly
+      # the failure a single artifact is meant to make impossible.
+      - name: Test (JVM)
+        run: clojure -M:test
+
+      - name: Test (ClojureScript)
+        run: |
+          npx shadow-cljs compile test
+          node target/test/shared.js
+
+      - name: Build uberjar
+        run: clojure -T:build uber
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          # A tag push releases that tag; a manual run releases under a rolling
+          # `dev` tag, so `latest` always has an asset to point at.
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'dev build' }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          files: target/server.jar
+          fail_on_unmatched_files: true
