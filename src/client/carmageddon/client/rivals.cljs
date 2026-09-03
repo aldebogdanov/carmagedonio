@@ -76,7 +76,12 @@
    ;; rival's damage crossed the line, so a rival that drove itself into a wall
    ;; paid the player. A wreck is worth more than everything else in the game
    ;; put together and it was the one thing nobody had to earn.
-   :blame       (atom {})})
+   :blame       (atom {})
+   ;; How much of each rival's damage has already been paid for. Damage is
+   ;; continuous and a tally has to be countable -- the server recomputes the
+   ;; score from it, and a float there would make the arithmetic a matter of
+   ;; opinion -- so it is paid in tenths and the remainder stays on the books.
+   :credited    (js/Float32Array. n)})
 
 ;; How long a hit stays yours. Long enough that a rival you have worked over
 ;; and then lost sight of is still your wreck when it finally goes; short
@@ -250,6 +255,19 @@
             (aset lost i 0)
             (let [{:keys [pos yaw]} (respawn-spot seed px pz heading)]
               (sim/place-vehicle! sim (inc i) pos yaw))))))))
+
+;; A rival's health, in the units it is paid for.
+(def ^:private dent-step 0.1)
+
+(defn credit!
+  "How many fresh dents rival `i` owes, given its damage now. Remembers that
+  they have been paid, so the same tenth is never charged twice."
+  [{:keys [^js credited]} i damage]
+  (let [paid (aget credited i)
+        owed (long (/ (- damage paid) dent-step))]
+    (if (pos? owed)
+      (do (aset credited i (+ paid (* owed dent-step))) owed)
+      0)))
 
 (defn blame!
   "Remember who last did rival `i` real damage.

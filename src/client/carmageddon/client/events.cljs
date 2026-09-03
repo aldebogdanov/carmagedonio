@@ -28,6 +28,7 @@
    :prop   "clutter"
    :car    "traffic car"
    :wreck  "RIVAL WRECKED"
+   :dent   "rival damaged"
    :coin   "coin"
    :nugget "gold"})
 

@@ -27,6 +27,7 @@
          :props     0
          :cars      0
          :wrecks    0
+         :dents     0
          :coins     0
          :nuggets   0
          :state     :running
@@ -46,6 +47,7 @@
 (defn car-wrecked! [game] (award! game :car)  (swap! game update :cars inc))
 (defn prop-wrecked! [game] (award! game :prop) (swap! game update :props inc))
 (defn opponent-wrecked! [game] (award! game :wreck) (swap! game update :wrecks inc))
+(defn rival-dented! [game] (award! game :dent)   (swap! game update :dents inc))
 (defn coin-taken!   [game] (award! game :coin)   (swap! game update :coins inc))
 (defn nugget-taken! [game] (award! game :nugget) (swap! game update :nuggets inc))
 
@@ -78,7 +80,7 @@
 (defn running? [game] (= :running (:state @game)))
 
 (defn summary [game]
-  (let [{:keys [remaining score peds props cars wrecks coins nuggets state
+  (let [{:keys [remaining score peds props cars wrecks dents coins nuggets state
                 ending elapsed]} @game]
     {:state state
      :ending ending
@@ -90,6 +92,7 @@
      :props props
      :cars cars
      :wrecks wrecks
+     :dents dents
      :coins coins
      :nuggets nuggets}))
 

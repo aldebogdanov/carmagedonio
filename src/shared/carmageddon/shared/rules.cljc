@@ -21,11 +21,17 @@
   A coin is points and almost no time. That is the whole design of them: a
   line of coins down a carriageway is a reason to take that line, not a way to
   buy your way out of the clock -- the clock only moves for things that are
-  hard to hit."
+  hard to hit.
+
+  A dent is a tenth of a rival's health. Working one over from pristine to
+  wrecked pays 225 on the way and 900 at the end, so the kill is still very
+  clearly the prize -- but a fight you lose the last hit of is no longer worth
+  nothing at all."
   {:ped    {:points 230 :seconds 3.0}
    :prop   {:points 25  :seconds 0.4}
    :car    {:points 140 :seconds 1.6}
    :wreck  {:points 900 :seconds 12.0}
+   :dent   {:points 25  :seconds 0.25}
    :coin   {:points 45  :seconds 0.15}
    :nugget {:points 400 :seconds 2.0}})
 
@@ -41,7 +47,7 @@
   that adding a category cannot be half-done: score, clock and verification all
   walk this."
   {:peds :ped :props :prop :cars :car :wrecks :wreck
-   :coins :coin :nuggets :nugget})
+   :dents :dent :coins :coin :nuggets :nugget})
 
 (defn- earned [tally attr]
   (reduce + (for [[field entry] tally-fields]

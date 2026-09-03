@@ -255,7 +255,10 @@
                     ;; Burning a rival to death is a wreck like any other, and
                     ;; it belongs to whoever lit the fire.
                     (rivals/blame! rvs (dec i) owner (js/Date.now))
-                    (vehicle/add-damage! v (* burn-rate heat k/dt)))))))
+                    (vehicle/add-damage! v (* burn-rate heat k/dt))
+                    (when (= :player owner)
+                      (dotimes [_ (rivals/credit! rvs (dec i) (vehicle/damage v))]
+                        (game/rival-dented! game))))))))
           (doseq [[d owner] (peds/burn! peds-state fire-state tick)]
             (when (= :player owner) (game/ped-killed! game))
             (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))
@@ -563,14 +566,6 @@
                           (let [veh (nth (sim/vehicles s) vi)]
                             (when (> (js/Math.abs (vehicle/forward-speed veh))
                                      min-smash-speed)
-                              ;; Who hit whom. A rival the player has just put a
-                              ;; dent in is the player's to finish; a rival that
-                              ;; drives itself into a wall is nobody's. Recorded
-                              ;; where the damage is actually applied, so it is
-                              ;; a consequence of the hit rather than a guess
-                              ;; made afterwards about who was nearest.
-                              (when (and (pos? vi) (= 0 (sim/vehicle-of-collider s hit)))
-                                (rivals/blame! rvs (dec vi) :player (js/Date.now)))
                               ;; Pedestrians and clutter barely scratch the
                               ;; paint; terrain, buildings and other cars hit
                               ;; properly. Capped per event so one scrape spread
@@ -582,7 +577,20 @@
                                     (* (if (or (props/prop? ps hit) (peds/ped? pd hit))
                                          0.04 1.0)
                                        (/ (max 0.0 (- force damage-force-floor))
-                                          damage-force-scale))))))))))) 
+                                          damage-force-scale))))
+                              ;; Who hit whom. A rival the player has just put a
+                              ;; dent in is the player's to finish; a rival that
+                              ;; drives itself into a wall is nobody's. Recorded
+                              ;; where the damage is actually applied, so it is
+                              ;; a consequence of the hit rather than a guess
+                              ;; made afterwards about who was nearest -- and
+                              ;; *after* it, so the dents being paid for are the
+                              ;; ones just handed out.
+                              (when (and (pos? vi) (= 0 (sim/vehicle-of-collider s hit)))
+                                (rivals/blame! rvs (dec vi) :player (js/Date.now))
+                                (dotimes [_ (rivals/credit! rvs (dec vi)
+                                                            (vehicle/damage veh))]
+                                  (game/rival-dented! gm)))))))))) 
            (render/resize! rs canvas)
            ;; Wait for ground under the spawn before the first tick, or the car
            ;; falls through the world. Generation is in a worker, so this is a

@@ -95,6 +95,7 @@
    ;; counts as zero.
    [:coins {:optional true} :int]
    [:nuggets {:optional true} :int]
+   [:dents {:optional true} :int]
    [:elapsed number?]
    [:state [:enum :won :lost :running]]])
 
