@@ -157,7 +157,15 @@
     (put-u16! b 1 player-id)
     (bytes-of b)))
 
-(def delta-kinds {:prop 0 :ped 1 :car 2 :barrier 3 :pickup 4})
+(def delta-kinds
+  "What was destroyed, as one byte. Appending is safe and reordering is not:
+  these numbers are on the wire and in every saved world.
+
+  A coin is a pickup as far as the overlay is concerned -- same record, same
+  index -- but it is its own kind here, because the server tallies from these
+  bytes and one `:pickup` for everything left it unable to tell a crate of
+  nitro from forty-five points."
+  {:prop 0 :ped 1 :car 2 :barrier 3 :pickup 4 :coin 5 :nugget 6})
 (def delta-kind-of (into {} (map (fn [[k v]] [v k]) delta-kinds)))
 
 (defn encode-delta

@@ -118,7 +118,8 @@
 (def ^:private scored-as
   "Which tally field each kind of destruction counts towards. Barriers score as
   clutter, here exactly as on the client."
-  {:ped :peds :prop :props :barrier :props :car :cars})
+  {:ped :peds :prop :props :barrier :props :car :cars
+   :coin :coins :nugget :nuggets})
 
 (defn handle-delta!
   "Record a destruction event against the sender's tally and tell everyone else.

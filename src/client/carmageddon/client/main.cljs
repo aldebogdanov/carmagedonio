@@ -97,7 +97,11 @@
                    :ped     (peds/kill-index! peds-state key index [0.0 0.0 0.0])
                    :car     (traffic/wreck-index! traffic-state key index)
                    :barrier (parts/smash-index! bridges key index [0.0 0.0 0.0])
+                   ;; All three are the same record in the overlay -- what
+                   ;; differs is only what the server counts them as.
                    :pickup  (powerups/take-index-remote! powerups key index)
+                   :coin    (powerups/take-index-remote! powerups key index)
+                   :nugget  (powerups/take-index-remote! powerups key index)
                    nil))
       nil)))
 
@@ -167,11 +171,20 @@
               ;; score is recomputed from this tally by the rules and checked
               ;; against it by the server, so it has to be counted here rather
               ;; than added to a running total.
-              (case (powerups/kind-name kind)
-                :coin   (game/coin-taken! game)
-                :nugget (game/nugget-taken! game)
-                nil)
-              (net/-send! transport (wire/encode-delta (assoc delta :kind :pickup))))
+              (let [name (powerups/kind-name kind)]
+                (case name
+                  :coin   (game/coin-taken! game)
+                  :nugget (game/nugget-taken! game)
+                  nil)
+                ;; Coins travel as their own wire kind so the server can tally
+                ;; them. Everything else is a `:pickup`, which the server
+                ;; relays and does not count -- holding a nitro is not a score.
+                (net/-send! transport
+                            (wire/encode-delta
+                             (assoc delta :kind (case name
+                                                  :coin :coin
+                                                  :nugget :nugget
+                                                  :pickup))))))
             (powerups/tick!
              powerups-state v tick k/dt
              (fn [[what x y z r life]]

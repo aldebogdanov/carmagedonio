@@ -138,3 +138,25 @@
     (let [board (s/scoreboard sessions "w1")]
       (is (= [5 2] (mapv :peds board)) "ranked by score")
       (is (= 2 (count board)) "w2's player is not in w1's board"))))
+
+(deftest coins-are-tallied-and-power-ups-are-not
+  (testing "a coin is a pickup in the overlay but its own kind on the wire,
+            because the server tallies from these bytes and one :pickup for
+            everything left it unable to tell a crate of nitro from points"
+    (let [sessions (s/create)
+          send! (fn [_ _])]
+      (s/join! sessions "w1" :a send!)
+      (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :coin :index 1})
+      (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :coin :index 2})
+      (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :nugget :index 3})
+      ;; Holding a nitro is not a score.
+      (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :pickup :index 4})
+      (let [t (s/tally sessions :a)]
+        (is (= 2 (:coins t)))
+        (is (= 1 (:nuggets t)))
+        (is (= {:peds 0 :props 0 :cars 0 :wrecks 0}
+               (select-keys t [:peds :props :cars :wrecks]))))
+      (testing "and the scoreboard scores them through the shared rules"
+        (let [board (s/scoreboard sessions "w1")]
+          (is (= (rules/score-for (s/tally sessions :a))
+                 (:score (first board)))))))))
