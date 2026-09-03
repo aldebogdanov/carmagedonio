@@ -1373,3 +1373,42 @@
       (is (pos? (:collector classes 0))
           (str "no through roads in open country: " classes)))))
 
+;; --- crowds -----------------------------------------------------------------
+
+(def ^:private social-kinds #{:suit :shopper :fan :drinker :streetwalker})
+
+(deftest crowds-gather-rather-than-scatter
+  (let [[cx cz] (densest-chunk (fn [u _] (> u 0.85)))
+        a (w/chunk-peds seed cx cz (w/road-field seed cx cz))
+        n (/ (alen* a) w/ped-stride)
+        social (vec (for [i (range n)
+                          :let [o (* i w/ped-stride)
+                                kind (nth w/ped-kinds (int (aget* a (+ o 5))))]
+                          :when (social-kinds kind)]
+                      [kind (aget* a o) (aget* a (+ o 2))]))]
+    (testing "downtown has people who are somewhere for a reason"
+      (is (seq social)))
+    (testing "and they are standing with each other, not near each other"
+      (doseq [[kind x z] social]
+        (is (some (fn [[k2 x2 z2]]
+                    (and (= kind k2)
+                         (not (and (== x x2) (== z z2)))
+                         (< (Math/hypot (- x x2) (- z z2)) 12.0)))
+                  social)
+            (str "a lone " kind " at " [x z]))))))
+
+(deftest a-landmark-decides-what-gathers-near-it
+  (testing "supporters turn up at the ground, not two districts away"
+    (let [lm (first (for [dx (range -7 8), dz (range -7 8)
+                          :let [l (w/landmark seed dx dz)]
+                          :when (= :stadium (:kind l))]
+                      l))
+          _ (is lm "no stadium anywhere in 15x15 districts")
+          [cx cz] (w/chunk-of (:x lm) (:z lm))
+          mix (frequencies
+               (for [ox [-1 0 1], oz [-1 0 1]
+                     :let [a (w/chunk-peds seed (+ cx ox) (+ cz oz)
+                                           (w/road-field seed (+ cx ox) (+ cz oz)))]
+                     i (range (/ (alen* a) w/ped-stride))]
+                 (nth w/ped-kinds (int (aget* a (+ 5 (* i w/ped-stride)))))))]
+      (is (pos? (:fan mix 0)) (str "nobody supporting anybody: " mix)))))

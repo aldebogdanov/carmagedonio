@@ -31,6 +31,7 @@
 (defn- floor [x] #?(:clj (Math/floor x) :cljs (js/Math.floor x)))
 (defn- hypot [x y] (sqrt (+ (* x x) (* y y))))
 (defn- js-sin [x] #?(:clj (Math/sin x) :cljs (js/Math.sin x)))
+(defn- js-atan2 [y x] #?(:clj (Math/atan2 y x) :cljs (js/Math.atan2 y x)))
 (defn- js-cos [x] #?(:clj (Math/cos x) :cljs (js/Math.cos x)))
 
 (defn- smoothstep [t] (* t t (- 3.0 (* 2.0 t))))
@@ -1926,8 +1927,15 @@
 
 (def ped-kinds
   "What is walking about. People line the streets; the rest belong to whatever
-  land they are standing on."
-  [:person :sheep :cow :deer :dog])
+  land they are standing on.
+
+  Everything from `:suit` on is a person who is somewhere for a reason -- see
+  `gathering`. They are kinds rather than a flag on `:person` because the
+  client draws them differently and the wire already carries a kind; adding to
+  the end of this vector is safe, reordering it renames every pedestrian in
+  every saved world."
+  [:person :sheep :cow :deer :dog
+   :suit :shopper :fan :drinker :streetwalker])
 
 (def ^:private kind-index (zipmap ped-kinds (range)))
 
@@ -1937,21 +1945,62 @@
   Graded off `urbanness` rather than the city/not-city switch this was. One
   threshold and two numbers made a suburb as empty as a moor and downtown no
   busier than an industrial estate, and the whole point of the crowd is that it
-  is thicker where the streets are."
+  is thicker where the streets are.
+
+  The three city tiers came down when groups arrived. The total on a downtown
+  pavement is about what it was; what changed is how it is arranged, and a
+  crowd that stands in groups reads as busier than the same number of people
+  spaced evenly along a kerb."
   [seed cx cz]
   (let [x (* (+ cx 0.5) k/chunk-size)
         z (* (+ cz 0.5) k/chunk-size)
         u (urbanness seed x z)]
     (cond
-      (> u 0.82) 34
-      (> u 0.58) 26
-      (> u 0.34) 16
+      (> u 0.82) 24
+      (> u 0.58) 19
+      (> u 0.34) 13
       (> u 0.16) 9
       (> u 0.05) 4
       :else 2)))
 
 (def ^:private herds-per-chunk 4)
 (def ^:private herd-size 7)
+
+(def ^:private groups-per-chunk 3)
+(def ^:private group-min 3)
+(def ^:private group-max 6)
+
+(defn- gathering
+  "What sort of group stands about at (x, z), or nil where nobody would.
+
+  A crowd is a consequence of what is around it, so this reads the same fields
+  the buildings do rather than scattering types at random: office density puts
+  suits on the pavement, a shopping centre puts shoppers outside it, a stadium
+  puts supporters on the road up to it, and housing pressed hard against the
+  works is where the rest of it happens. It is the difference between a street
+  with people on it and a street that is somewhere.
+
+  `lm` is the district's landmark, passed in rather than looked up: finding one
+  costs a search over sixteen candidate cells and every group in a chunk is in
+  the same district."
+  [seed x z lm r]
+  (let [u    (urbanness seed x z)
+        ind  (industrialness seed x z)
+        near? (and lm (< (hypot (- x (:x lm)) (- z (:z lm))) 150.0))
+        p    (prng/next-double! r)]
+    (cond
+      (and near? (= :mall (:kind lm)))    :shopper
+      (and near? (= :stadium (:kind lm))) :fan
+      (and near? (= :plaza (:kind lm)))   (if (< p 0.5) :suit :shopper)
+      ;; The wrong side of the tracks: housing that backs onto the works.
+      ;; Neither field says this by itself -- it is the overlap that does.
+      (and (> ind 0.52) (< 0.30 u 0.78))
+      (cond (< p 0.34) :streetwalker (< p 0.72) :drinker :else :shopper)
+      (> u 0.80) (cond (< p 0.42) :suit (< p 0.70) :shopper (< p 0.92) :drinker
+                       :else :streetwalker)
+      (> u 0.58) (cond (< p 0.24) :suit (< p 0.58) :shopper :else :drinker)
+      (> u 0.30) (if (< p 0.55) :shopper :drinker)
+      :else nil)))
 
 (defn- grazer-for
   "What, if anything, is grazing at a point. Livestock follow the crop, deer the
@@ -2057,11 +2106,46 @@
               sgn (if back? -1.0 1.0)
               ;; Along the pavement, one way or the other. `walk!` reads this as
               ;; (cos h, sin h), so it is atan2 of dz over dx.
-              head (#?(:clj Math/atan2 :cljs js/Math.atan2)
-                    (* sgn (/ dz len)) (* sgn (/ dx len)))]
+              head (js-atan2 (* sgn (/ dz len)) (* sgn (/ dx len)))]
           (emit (+ px (* side (* (- dz) (/ off len))))
                 (+ pz (* side (* dx (/ off len))))
-                head speed :person))))
+                head speed :person)))
+      ;; And the groups. Same lines and the same draw-before-you-reject
+      ;; discipline: the stream advances by the same amount whether or not
+      ;; there turns out to be anybody worth putting here.
+      (let [[ddx ddz] (district-of cx cz)
+            lm (landmark seed ddx ddz)]
+        (dotimes [_ groups-per-chunk]
+          (let [line  (nth lines (prng/next-int! r (count lines)))
+                pts   (:points line)
+                i     (prng/next-int! r (dec (count pts)))
+                t     (prng/next-double! r)
+                side  (if (prng/next-bool! r) 1.0 -1.0)
+                ;; Further back from the kerb than a lone pedestrian: a group
+                ;; stands on the pavement, it does not queue along the gutter.
+                off   (prng/next-range! r (+ (:half line) 1.5) (+ (:half line) 7.0))
+                size  (+ group-min (prng/next-int! r (inc (- group-max group-min))))
+                [ax az] (nth pts i)
+                [bx bz] (nth pts (inc i))
+                px (+ ax (* t (- bx ax)))
+                pz (+ az (* t (- bz az)))
+                dx (- bx ax) dz (- bz az)
+                len (max 1e-6 (hypot dx dz))
+                gx (+ px (* side (* (- dz) (/ off len))))
+                gz (+ pz (* side (* dx (/ off len))))
+                kind (gathering seed gx gz lm r)]
+            (dotimes [_ size]
+              (let [ox (prng/next-range! r -2.2 2.2)
+                    oz (prng/next-range! r -2.2 2.2)
+                    ;; Barely moving. A group that walks is a queue.
+                    speed (prng/next-range! r 0.0 0.45)]
+                (when kind
+                  ;; Facing the middle of their own group, which is the only
+                  ;; thing separating a group from six people who happen to be
+                  ;; standing near each other.
+                  (emit (+ gx ox) (+ gz oz)
+                        (js-atan2 (- oz) (- ox))
+                        speed kind))))))))
     (dotimes [_ herds-per-chunk]
       (let [hx (* (+ cx (prng/next-range! r 0.1 0.9)) k/chunk-size)
             hz (* (+ cz (prng/next-range! r 0.1 0.9)) k/chunk-size)

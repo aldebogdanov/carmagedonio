@@ -51,7 +51,15 @@
    {:name :sheep  :half 0.34 :radius 0.24 :colour 0xe4e0d6 :prone? true}
    {:name :cow    :half 0.62 :radius 0.36 :colour 0x6d5443 :prone? true}
    {:name :deer   :half 0.52 :radius 0.28 :colour 0x8c6a44 :prone? true}
-   {:name :dog    :half 0.26 :radius 0.17 :colour 0x59463a :prone? true}])
+   {:name :dog    :half 0.26 :radius 0.17 :colour 0x59463a :prone? true}
+   ;; People who are somewhere for a reason. Same capsule, same rig, same way
+   ;; of dying -- what differs is the wardrobe, which at the distance a
+   ;; pedestrian is looked at is the entire read.
+   {:name :suit         :half 0.42 :radius 0.26 :colour 0xd8b48c :prone? false}
+   {:name :shopper      :half 0.42 :radius 0.26 :colour 0xd8b48c :prone? false}
+   {:name :fan          :half 0.42 :radius 0.26 :colour 0xd8b48c :prone? false}
+   {:name :drinker      :half 0.42 :radius 0.26 :colour 0xd8b48c :prone? false}
+   {:name :streetwalker :half 0.42 :radius 0.26 :colour 0xd8b48c :prone? false}])
 
 (def ^:private dead-colour 0x8c3a34)
 
@@ -86,13 +94,18 @@
 
 (defn- person-rig
   "Head, torso, hips, two legs and two arms. Arms swing against the legs, which
-  is the single detail that makes a walk read as a walk rather than a shuffle."
-  []
+  is the single detail that makes a walk read as a walk rather than a shuffle.
+
+  `legs` is the surface the legs are painted, and it is the one place a person
+  varies in shape rather than only in colour: bare legs read as a different
+  silhouette from trousered ones at a distance where nothing else about a
+  figure is legible."
+  [legs]
   [(rigid :sphere [0.0 0.50 0.0] [0.27 0.29 0.27] :skin)
    (rigid :box [0.0 0.16 0.0] [0.36 0.50 0.24] :cloth)
    (rigid :box [0.0 -0.14 0.0] [0.34 0.18 0.24] :trouser)
-   (limb :box [-0.10 -0.16 0.0] [0.13 0.50 0.15] 0.50 0.55 0.0 :trouser)
-   (limb :box [0.10 -0.16 0.0] [0.13 0.50 0.15] 0.50 0.55 pi :trouser)
+   (limb :box [-0.10 -0.16 0.0] [0.13 0.50 0.15] 0.50 0.55 0.0 legs)
+   (limb :box [0.10 -0.16 0.0] [0.13 0.50 0.15] 0.50 0.55 pi legs)
    (limb :box [-0.22 0.33 0.0] [0.11 0.42 0.12] 0.42 0.45 pi :cloth)
    (limb :box [0.22 0.33 0.0] [0.11 0.42 0.12] 0.42 0.45 0.0 :cloth)])
 
@@ -117,8 +130,10 @@
      (limb :box [(- lx) (- drop) lz] [(* 0.4 r) leg-len (* 0.4 r)] leg-len 0.5 pi :head)
      (limb :box [lx (- drop) lz] [(* 0.4 r) leg-len (* 0.4 r)] leg-len 0.5 0.0 :head)]))
 
-(defn- rig-for [{:keys [half radius prone?]}]
-  (if prone? (quadruped-rig half radius) (person-rig)))
+(defn- rig-for [{:keys [half radius prone? name]}]
+  (if prone?
+    (quadruped-rig half radius)
+    (person-rig (if (= :streetwalker name) :skin :trouser))))
 
 (defn- shade
   "Darken a colour, for the parts of a figure that are not its main surface."
@@ -129,19 +144,55 @@
         m (fn [v] (bit-and (js/Math.round (* v f)) 255))]
     (bit-or (bit-shift-left (m r) 16) (bit-shift-left (m g) 8) (m b))))
 
+(def ^:private skins
+  [0xe8c39a 0xc79a6b 0x8d5f3d 0x5d3b28 0xf0d3b0 0xa87551])
+
+(def ^:private wardrobes
+  "Six changes of clothes per sort of person.
+
+  A group of businessmen is not a group of people who happen to be standing
+  outside a bank -- it is six dark suits, and that is the whole of the read at
+  fifty metres. Every one of these is six entries so a group is varied without
+  ever being mistakable for a different group."
+  {:person       {:cloth   [0x3f5f8a 0x8a3f3f 0x2f6b52 0x8a7a3f 0x5b3f8a 0x39424d]
+                  :trouser [0x2f3540 0x4a3f35 0x35404a 0x3f3a2f 0x2b2f36 0x453a3a]}
+   ;; Charcoal, navy, and more charcoal.
+   :suit         {:cloth   [0x2b3040 0x33384a 0x232838 0x3b3f52 0x262b3a 0x1e2230]
+                  :trouser [0x232838 0x2b3040 0x1e2230 0x33384a 0x252a38 0x2b3040]}
+   ;; Whatever was in the window. Bags are not modelled; the colours do it.
+   :shopper      {:cloth   [0xd8734a 0xd9b23f 0x4aa3c8 0xc9527f 0x62b05a 0xdd8f3c]
+                  :trouser [0x3a4250 0x5a4638 0x394a3f 0x4a3f52 0x3a4250 0x504438]}
+   ;; A team, not a wardrobe: see `palette`, which picks these by chunk rather
+   ;; than by person so a crowd outside the ground supports one side.
+   :fan          {:cloth   [0xc0392b 0x2f6bb5 0x1f7a4a 0xe0a52b 0x7d3fa8 0xdedede]
+                  :trouser [0x2b2f36 0x2b2f36 0x2b2f36 0x2b2f36 0x2b2f36 0x2b2f36]}
+   :drinker      {:cloth   [0x8a6b4a 0x5c6b52 0x7a4a4a 0x4a5c6b 0x6b5c4a 0x555a52]
+                  :trouser [0x3a352f 0x35392f 0x2f3538 0x3f3a35 0x35302b 0x38352f]}
+   :streetwalker {:cloth   [0xd9407a 0xe05c2b 0xb03fc0 0xd93f4a 0xe0a02b 0x3fc0b0]
+                  ;; Bare legs -- `rig-for` paints this kind's legs `:skin` --
+                  ;; so the trouser entry only reaches the hips.
+                  :trouser [0x2b2f36 0x40252f 0x2b2f36 0x35202b 0x2b2f36 0x3a2530]}})
+
 (defn- palette
   "What each named surface of one kind is coloured. People get skin, clothes and
   trousers out of one seed colour so a crowd is not uniform; animals get their
-  hide and a darker head and legs."
-  [{:keys [colour prone?]} idx outbreak?]
-  (let [j (mod (* idx 2654435761) 6)]
+  hide and a darker head and legs.
+
+  Football supporters are the exception and it is deliberate: their shirt is
+  drawn from the *chunk* rather than from the person, so everyone standing
+  outside the ground is wearing the same one. Nothing has to be passed between
+  them for that to work -- they all read the same key."
+  [{:keys [name colour prone?]} idx key outbreak?]
+  (let [mix (+ idx (* 31 (first key)) (* 17 (second key)))
+        j   (mod (* mix 2654435761) 6)
+        team (mod (+ (* 31 (first key)) (* 17 (second key))) 6)]
     (if prone?
       {:hide colour :head (shade colour 0.78)}
-      {:skin (if outbreak? 0x7d9a58 (nth [0xe8c39a 0xc79a6b 0x8d5f3d 0x5d3b28 0xf0d3b0 0xa87551] j))
-       :cloth (if outbreak? 0x53663a
-                  (nth [0x3f5f8a 0x8a3f3f 0x2f6b52 0x8a7a3f 0x5b3f8a 0x39424d] j))
-       :trouser (if outbreak? 0x3d4a2c
-                    (nth [0x2f3540 0x4a3f35 0x35404a 0x3f3a2f 0x2b2f36 0x453a3a] j))})))
+      (let [w (get wardrobes name (get wardrobes :person))
+            pick (if (= :fan name) team j)]
+        {:skin (if outbreak? 0x7d9a58 (nth skins j))
+         :cloth (if outbreak? 0x53663a (nth (:cloth w) pick))
+         :trouser (if outbreak? 0x3d4a2c (nth (:trouser w) pick))}))))
 
 (defn create
   "`mode` is :normal or :outbreak. Outbreak does not change what is spawned --
@@ -187,7 +238,7 @@
         {:keys [half radius] :as spec} (nth kinds kind)
         rig (nth rigs kind)
         parts (:parts rig)
-        pal (palette spec (+ idx (* 31 (first key)) (* 17 (second key))) outbreak?)
+        pal (palette spec idx key outbreak?)
         ^js body (.createRigidBody
                   world
                   (-> (.dynamic RAPIER/RigidBodyDesc)
