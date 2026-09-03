@@ -87,7 +87,13 @@
     ;; A bridge parapet is clutter, here as on the client.
     (s/handle-delta! sessions :a {:cx 1 :cz 0 :kind :barrier :index 7})
     (testing "tally is derived from accepted deltas, never reported"
-      (is (= {:peds 3 :props 2 :cars 1 :wrecks 0} (s/tally sessions :a))))
+      ;; Only the counted fields are named. The tally is seeded from
+      ;; `rules/tally-fields`, so asserting the whole map here would mean this
+      ;; test failing every time a scoring category is added -- which is the
+      ;; opposite of what the next assertion is for.
+      (is (= {:peds 3 :props 2 :cars 1}
+             (select-keys (s/tally sessions :a) [:peds :props :cars])))
+      (is (zero? (:wrecks (s/tally sessions :a)))))
     (testing "every field the rules can score is present from the start"
       ;; Otherwise adding a category silently scores nil for everyone who
       ;; joined before the first one of them happened.

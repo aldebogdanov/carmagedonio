@@ -2027,11 +2027,21 @@
 
 (def pickup-kinds
   "What is worth driving over. Order is the wire format: a pickup travels as an
-  index, and reordering these renames every crate in every saved world."
-  [:repair :nitro :grip :armour :flame :shock])
+  index, and reordering these renames every crate in every saved world.
+
+  The last two are not power-ups and hold nothing: they are points. Appending
+  is safe, which is the whole reason this is a vector and not a set."
+  [:repair :nitro :grip :armour :flame :shock :coin :nugget])
 
 (def pickup-stride 4)          ; x y z kind
 (def ^:private pickups-per-chunk 3)
+
+(def ^:private coin-kind 6)
+(def ^:private nugget-kind 7)
+(def ^:private coin-runs 2)         ; trails of coins per chunk
+(def ^:private coin-run-max 9)
+(def ^:private coin-spacing 4.6)    ; metres between coins in a trail
+(def ^:private nugget-odds 0.4)     ; per chunk
 
 (defn chunk-pickups
   "Crates of something useful, sitting on the carriageway.
@@ -2047,24 +2057,63 @@
   ([seed cx cz owned]
    (let [lines (remove :bridge? owned)
          r (prng/chunk-rng seed cx cz (:pickups k/salt))
-         out (transient [])]
+         out (transient [])
+         emit (fn [x z kind lift]
+                (conj! out x)
+                ;; About a metre up: high enough to be seen over a kerb, low
+                ;; enough that any car drives through it rather than under it.
+                (conj! out (+ lift (height-at seed x z)))
+                (conj! out z)
+                (conj! out (double kind)))]
      (when (seq lines)
        (dotimes [_ pickups-per-chunk]
          (let [line (nth lines (prng/next-int! r (count lines)))
                pts (:points line)
                i (prng/next-int! r (dec (count pts)))
                t (prng/next-range! r 0.2 0.8)
-               kind (prng/next-int! r (count pickup-kinds))
+               ;; Power-ups only: the last two entries are points, and they are
+               ;; placed by the passes below rather than scattered like these.
+               kind (prng/next-int! r (- (count pickup-kinds) 2))
                [ax az] (nth pts i)
                [bx bz] (nth pts (inc i))
                x (+ ax (* t (- bx ax)))
                z (+ az (* t (- bz az)))]
-           (conj! out x)
-           ;; A metre up: high enough to be seen over a kerb, low enough that
-           ;; any car drives through it rather than under it.
-           (conj! out (+ 1.0 (height-at seed x z)))
-           (conj! out z)
-           (conj! out (double kind)))))
+           (emit x z kind 1.0)))
+       ;; Coins, in a line down one side of a carriageway rather than scattered.
+       ;; A row of them is a *line to drive*, which is a different and much
+       ;; better instruction than a dot to aim at -- it tells you where to put
+       ;; the car for the next forty metres.
+       (dotimes [_ coin-runs]
+         (let [line (nth lines (prng/next-int! r (count lines)))
+               pts (:points line)
+               i (prng/next-int! r (dec (count pts)))
+               side (if (prng/next-bool! r) 1.0 -1.0)
+               ;; Drawn before it can be clamped, so the stream advances by the
+               ;; same amount however long the segment turns out to be.
+               want (+ 4 (prng/next-int! r (- coin-run-max 3)))
+               start (prng/next-range! r 2.0 6.0)
+               [ax az] (nth pts i)
+               [bx bz] (nth pts (inc i))
+               dx (- bx ax) dz (- bz az)
+               len (max 1e-6 (hypot dx dz))
+               ux (/ dx len) uz (/ dz len)
+               off (* 0.45 (:half line) side)
+               n (min want (long (/ (max 0.0 (- len start 1.0)) coin-spacing)))]
+           (dotimes [j n]
+             (let [d (+ start (* j coin-spacing))]
+               (emit (+ ax (* ux d) (* (- uz) off))
+                     (+ az (* uz d) (* ux off))
+                     coin-kind 0.9)))))
+       ;; And sometimes one big one, on its own, worth a short trail by itself.
+       (let [roll (prng/next-double! r)
+             line (nth lines (prng/next-int! r (count lines)))
+             pts (:points line)
+             i (prng/next-int! r (dec (count pts)))
+             t (prng/next-range! r 0.25 0.75)
+             [ax az] (nth pts i)
+             [bx bz] (nth pts (inc i))]
+         (when (< roll nugget-odds)
+           (emit (+ ax (* t (- bx ax))) (+ az (* t (- bz az))) nugget-kind 1.1))))
      (let [v (persistent! out)
            a (farray (count v))]
        (dotimes [i (count v)] (fput! a i (nth v i)))

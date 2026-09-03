@@ -163,6 +163,14 @@
                                                               (sim/player-x sim)
                                                               (sim/player-z sim))]
               (cockpit/flash! cock (powerups/apply! powerups-state v kind))
+              ;; Two of them are not power-ups at all, they are points. The
+              ;; score is recomputed from this tally by the rules and checked
+              ;; against it by the server, so it has to be counted here rather
+              ;; than added to a running total.
+              (case (powerups/kind-name kind)
+                :coin   (game/coin-taken! game)
+                :nugget (game/nugget-taken! game)
+                nil)
               (net/-send! transport (wire/encode-delta (assoc delta :kind :pickup))))
             (powerups/tick!
              powerups-state v tick k/dt

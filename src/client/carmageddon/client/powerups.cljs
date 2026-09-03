@@ -24,16 +24,28 @@
             [carmageddon.shared.worldgen :as worldgen]))
 
 (def kinds
-  "One entry per `worldgen/pickup-kinds`, in that order."
-  [{:name :repair :colour 0x4fbf6a :label "REPAIR"   :secs 0.0}
-   {:name :nitro  :colour 0xf05a28 :label "NITRO"    :secs 9.0}
-   {:name :grip   :colour 0x39a0d8 :label "GRIP"     :secs 12.0}
-   {:name :armour :colour 0xb9bec6 :label "ARMOUR"   :secs 14.0}
-   {:name :flame  :colour 0xf2a63a :label "FIRETRAIL" :secs 8.0}
-   {:name :shock  :colour 0xd8d84a :label "SHOCK"    :secs 8.0}])
+  "One entry per `worldgen/pickup-kinds`, in that order.
+
+  `shape` picks which pair of pools draws it and `scale` how big. The last two
+  hold nothing and buy nothing: they are points, and they are discs rather than
+  stars so that a line of them down a carriageway reads as money rather than as
+  six power-ups you have not identified yet."
+  [{:name :repair :colour 0x4fbf6a :label "REPAIR"    :secs 0.0  :shape :star :scale 1.0}
+   {:name :nitro  :colour 0xf05a28 :label "NITRO"     :secs 9.0  :shape :star :scale 1.0}
+   {:name :grip   :colour 0x39a0d8 :label "GRIP"      :secs 12.0 :shape :star :scale 1.0}
+   {:name :armour :colour 0xb9bec6 :label "ARMOUR"    :secs 14.0 :shape :star :scale 1.0}
+   {:name :flame  :colour 0xf2a63a :label "FIRETRAIL" :secs 8.0  :shape :star :scale 1.0}
+   {:name :shock  :colour 0xd8d84a :label "SHOCK"     :secs 8.0  :shape :star :scale 1.0}
+   {:name :coin   :colour 0xe8b93a :label "+45"       :secs 0.0  :shape :coin :scale 0.55}
+   {:name :nugget :colour 0xffd24a :label "+400"      :secs 0.0  :shape :coin :scale 1.15}])
+
+(defn kind-name [k] (:name (nth kinds k)))
 
 (def ^:private reach 3.2)       ; metres: how close is "drove through it"
-(def ^:private slots 260)
+;; Per shape, and very different numbers: there are three power-ups in a chunk
+;; and two trails of up to nine coins. Measured on a loaded city: 39 stars
+;; against 173 coins.
+(def ^:private slots {:star 320 :coin 900})
 (def ^:private star-r 0.62)
 (def ^:private star-depth 0.17)
 
@@ -61,6 +73,13 @@
     (.closePath shape)
     (doto (three/ExtrudeGeometry. shape #js {:depth star-depth :bevelEnabled false})
       (.center))))
+
+(defn- coin-geometry
+  "A disc standing on its edge, so spinning it about Y flashes it face-on and
+  then edge-on -- which is what a coin does and what nothing else here does."
+  []
+  (doto (three/CylinderGeometry. star-r star-r 0.10 14)
+    (.rotateX (/ js/Math.PI 2))))
 
 ;; Fire trail: a short-lived puddle every few ticks. Any faster and the pool
 ;; cap is spent in two seconds of driving.
@@ -91,21 +110,28 @@
 (defn create [^js scene ov]
   (atom {:scene scene
          :overlay ov
-         :pool (fig/pool scene (star-geometry)
-                         (three/MeshPhongMaterial. #js {:shininess 40
-                                                        :flatShading true})
-                         slots {:cast? true})
-         ;; A second, larger star drawn additively behind the first. The
-         ;; `emissive` this replaces was set to black and did nothing at all,
+         ;; Two shapes, each drawn twice: the solid one, and a larger one
+         ;; behind it in the same colour, additive. That second pass is what
+         ;; makes a pickup shine. It replaces an `emissive` that had been set
+         ;; to black since the day it was written and had never done anything,
          ;; which is why a crate on a wet road at dusk was a dark lump.
-         ;; Instance colours reach a basic material, so each crate glows its
-         ;; own colour without a material per kind.
-         :glow (fig/pool scene (star-geometry)
-                         (three/MeshBasicMaterial.
-                          #js {:transparent true :opacity 0.42
-                               :depthWrite false
-                               :blending (.-AdditiveBlending three)})
-                         slots {:cast? false})
+         ;;
+         ;; Instance colours reach a basic material, so every pickup glows its
+         ;; own colour out of one material.
+         :pools (into {}
+                      (for [[shape geom] [[:star (star-geometry)]
+                                          [:coin (coin-geometry)]]]
+                        [shape
+                         {:solid (fig/pool scene geom
+                                           (three/MeshPhongMaterial.
+                                            #js {:shininess 40 :flatShading true})
+                                           (slots shape) {:cast? true})
+                          :glow (fig/pool scene geom
+                                          (three/MeshBasicMaterial.
+                                           #js {:transparent true :opacity 0.42
+                                                :depthWrite false
+                                                :blending (.-AdditiveBlending three)})
+                                          (slots shape) {:cast? false})}]))
          ;; Unlit and shadowless, like every other light source in the game.
          :arc-pool (fig/pool scene (three/BoxGeometry. 1 1 1)
                              (three/MeshBasicMaterial. #js {:color 0xfff27a})
@@ -130,35 +156,37 @@
     (let [gone (taken-in ps key)
           st worldgen/pickup-stride
           n (/ (.-length arr) st)
-          pool (:pool @ps)
-          glow (:glow @ps)
+          pools (:pools @ps)
           made (vec (for [idx (range n)
                           :when (not (contains? gone idx))
                           :let [o (* idx st)
                                 kind (int (aget arr (+ o 3)))
-                                colour (:colour (nth kinds kind))
-                                slot (fig/claim! pool)
+                                {:keys [colour shape]} (nth kinds kind)
+                                {:keys [solid glow]} (get pools shape)
+                                slot (fig/claim! solid)
                                 gslot (fig/claim! glow)]]
-                      (do (fig/set-colour! pool slot colour)
+                      (do (fig/set-colour! solid slot colour)
                           (fig/set-colour! glow gslot colour)
                           {:x (aget arr (+ o 0)) :y (aget arr (+ o 1))
                            :z (aget arr (+ o 2)) :kind kind :idx idx
-                           :slot slot :glow-slot gslot})))]
+                           :shape shape :slot slot :glow-slot gslot})))]
       (swap! ps assoc-in [:chunks key] made)
       made)))
 
+(defn- release-pickup! [pools {:keys [shape slot glow-slot]}]
+  (let [{:keys [solid glow]} (get pools shape)]
+    (fig/release! solid slot)
+    (fig/release! glow glow-slot)))
+
 (defn remove-chunk! [ps key]
-  (let [{:keys [pool glow]} @ps]
-    (doseq [{:keys [slot glow-slot]} (get (:chunks @ps) key)]
-      (fig/release! pool slot)
-      (fig/release! glow glow-slot))
+  (let [pools (:pools @ps)]
+    (doseq [p (get (:chunks @ps) key)] (release-pickup! pools p))
     (swap! ps update :chunks dissoc key)))
 
 (defn- take-index! [ps key idx]
   (overlay/record! (:overlay @ps) key :pickups idx)
   (when-let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))]
-    (fig/release! (:pool @ps) (:slot p))
-    (fig/release! (:glow @ps) (:glow-slot p))
+    (release-pickup! (:pools @ps) p)
     (swap! ps (fn [st]
                 (-> st
                     (update-in [:chunks key] (fn [v] (vec (remove #(= idx (:idx %)) v))))
@@ -211,12 +239,13 @@
   "Take the effect of `kind`. Returns the label to flash on the dashboard."
   [ps veh kind]
   (let [{:keys [name secs label]} (nth kinds kind)]
-    (if (= :repair name)
-      ;; The only instant one, and the only one worth grabbing when you are
-      ;; already holding something else.
-      (vehicle/repair! veh 0.45)
+    ;; A zero timer means it happens now and is over: the repair, and the two
+    ;; that are simply points. Keying on that rather than on `:repair` by name
+    ;; is what let coins arrive without another branch here.
+    (if (pos? secs)
       (do (swap! ps assoc-in [:active name] secs)
-          (effect! veh kind true)))
+          (effect! veh kind true))
+      (when (= :repair name) (vehicle/repair! veh 0.45)))
     label))
 
 (defn tick!
@@ -314,14 +343,17 @@
 (defn sync!
   "Spin them. A pickup that sits still on a grey road is a pickup nobody sees."
   [ps now-s]
-  (let [{:keys [pool glow ^js m4 chunks]} @ps]
+  (let [{:keys [pools ^js m4 chunks]} @ps]
     (doseq [[_ ps'] chunks
-            {:keys [x y z slot glow-slot kind]} ps']
+            {:keys [x y z slot glow-slot kind shape]} ps']
       (let [a (+ (* 1.6 now-s) (* 0.7 kind))
             bob (* 0.18 (js/Math.sin (+ (* 2.2 now-s) kind)))
-            ;; The halo breathes against the star rather than with it, which is
-            ;; what makes the pair read as shining instead of as two stars.
-            pulse (+ 1.34 (* 0.12 (js/Math.sin (+ (* 3.1 now-s) kind))))
+            size (:scale (nth kinds kind) 1.0)
+            ;; The halo breathes against the solid one rather than with it,
+            ;; which is what makes the pair read as shining instead of as two
+            ;; overlapping shapes.
+            pulse (* size (+ 1.34 (* 0.12 (js/Math.sin (+ (* 3.1 now-s) kind)))))
+            {:keys [solid glow]} (get pools shape)
             c (js/Math.cos a) s (js/Math.sin a)
             ^js e (.-elements m4)
             write! (fn [k target slot]
@@ -333,10 +365,11 @@
                      (aset e 8 (* k s)) (aset e 9 0.0) (aset e 10 (* k c)) (aset e 11 0.0)
                      (aset e 12 x) (aset e 13 (+ y bob)) (aset e 14 z) (aset e 15 1.0)
                      (fig/set-matrix! target slot m4))]
-        (write! 1.0 pool slot)
+        (write! size solid slot)
         (write! pulse glow glow-slot)))
-    (fig/flush! pool)
-    (fig/flush! glow))
+    (doseq [[_ {:keys [solid glow]}] pools]
+      (fig/flush! solid)
+      (fig/flush! glow)))
   ;; Bolts are written once, when they are struck. All this has to do is take
   ;; away the ones that have burnt out -- and only tell the GPU when one has.
   (when (age-arcs! ps now-s) (fig/flush! (:arc-pool @ps))))

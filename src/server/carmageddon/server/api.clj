@@ -90,6 +90,11 @@
    [:props :int]
    [:cars {:optional true} :int]
    [:wrecks :int]
+   ;; Optional so a client from before coins existed still validates. The
+   ;; score is recomputed from the tally either way, and a missing field
+   ;; counts as zero.
+   [:coins {:optional true} :int]
+   [:nuggets {:optional true} :int]
    [:elapsed number?]
    [:state [:enum :won :lost :running]]])
 

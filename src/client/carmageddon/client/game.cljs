@@ -19,6 +19,8 @@
          :props     0
          :cars      0
          :wrecks    0
+         :coins     0
+         :nuggets   0
          :state     :running}))
 
 (defn- award! [game kind]
@@ -32,6 +34,8 @@
 (defn car-wrecked! [game] (award! game :car)  (swap! game update :cars inc))
 (defn prop-wrecked! [game] (award! game :prop) (swap! game update :props inc))
 (defn opponent-wrecked! [game] (award! game :wreck) (swap! game update :wrecks inc))
+(defn coin-taken!   [game] (award! game :coin)   (swap! game update :coins inc))
+(defn nugget-taken! [game] (award! game :nugget) (swap! game update :nuggets inc))
 
 (defn tick!
   "Advance the clock by one simulation tick. Runs off the fixed timestep rather
@@ -52,7 +56,8 @@
 (defn running? [game] (= :running (:state @game)))
 
 (defn summary [game]
-  (let [{:keys [remaining score peds props cars wrecks state elapsed]} @game]
+  (let [{:keys [remaining score peds props cars wrecks coins nuggets state
+                elapsed]} @game]
     {:state state
      :remaining remaining
      :elapsed elapsed
@@ -61,7 +66,9 @@
      :target rules/target-kills
      :props props
      :cars cars
-     :wrecks wrecks}))
+     :wrecks wrecks
+     :coins coins
+     :nuggets nuggets}))
 
 (defn result
   "The run as it will be submitted. Score is recomputed from the tally rather

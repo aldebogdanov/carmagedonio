@@ -16,11 +16,18 @@
   almost none, so smashing crates cannot substitute for playing.
 
   A civilian car sits between the two: harder to hit than a crate and worth
-  going after, but not a rival, so it buys a second rather than a lap."
-  {:ped   {:points 230 :seconds 3.0}
-   :prop  {:points 25  :seconds 0.4}
-   :car   {:points 140 :seconds 1.6}
-   :wreck {:points 900 :seconds 12.0}})
+  going after, but not a rival, so it buys a second rather than a lap.
+
+  A coin is points and almost no time. That is the whole design of them: a
+  line of coins down a carriageway is a reason to take that line, not a way to
+  buy your way out of the clock -- the clock only moves for things that are
+  hard to hit."
+  {:ped    {:points 230 :seconds 3.0}
+   :prop   {:points 25  :seconds 0.4}
+   :car    {:points 140 :seconds 1.6}
+   :wreck  {:points 900 :seconds 12.0}
+   :coin   {:points 45  :seconds 0.15}
+   :nugget {:points 400 :seconds 2.0}})
 
 (def start-seconds 90.0)
 
@@ -33,7 +40,8 @@
   "The countable things, and which scoring entry each one earns. Named once so
   that adding a category cannot be half-done: score, clock and verification all
   walk this."
-  {:peds :ped :props :prop :cars :car :wrecks :wreck})
+  {:peds :ped :props :prop :cars :car :wrecks :wreck
+   :coins :coin :nuggets :nugget})
 
 (defn- earned [tally attr]
   (reduce + (for [[field entry] tally-fields]
