@@ -288,26 +288,62 @@
   [gx gz along-x?]
   (line-class (if along-x? gz gx)))
 
+(defn- run-of
+  "Which stretch of a line node index `pos` belongs to, where a stretch runs
+  between two consecutive crossings of a line one class higher."
+  [pos span]
+  (long (floor (/ (double pos) span))))
+
 (defn- edge-exists?
   "Does the street from (gx,gz) to its +X or +Z neighbour exist?
 
   Arterials always do -- that single rule is what makes the network connected
-  everywhere, forever, with no global pass. Below that it is a weighted coin
-  drawn from the canonical seed of the two endpoints, so both sides of any chunk
-  border flip it the same way."
+  everywhere, forever, with no global pass.
+
+  Below that the coin is flipped once per *run* rather than once per edge, and
+  that is the whole of road continuity. A run is the entire stretch of one line
+  between two crossings of a higher class: a collector runs arterial to
+  arterial, a local street collector to collector. Every edge in a run asks the
+  same question and gets the same answer, so a street either goes the whole way
+  or is not there -- and where it does stop, it stops at a junction with a
+  bigger road, which is the only place a road ending does not look like a bug.
+
+  Per-edge coins are what this replaced, and they were the reason the map was
+  full of stubs: a 15% chance in open country does not make a country lane, it
+  makes sixty-four metres of tarmac between two fields. Roads now cross a
+  region rather than dotting it, and they carry on into the next one for the
+  same reason they carried on into this one -- nothing about a run knows where
+  the chunk borders are."
   [seed gx gz along-x?]
   (let [cls (edge-class gx gz along-x?)]
     (if (= :arterial cls)
       true
-      (let [mx (* street-spacing (if along-x? (+ gx 0.5) gx))
-            mz (* street-spacing (if along-x? gz (+ gz 0.5)))
-            u  (urbanness seed mx mz)
-            p  (case cls
-                 :collector (+ 0.15 (* 0.75 u))
-                 (max 0.0 (- (* 1.3 u) 0.45)))
-            hx (if along-x? (inc gx) gx)
-            hz (if along-x? gz (inc gz))
-            r  (prng/make (prng/edge-seed seed gx gz hx hz))]
+      (let [;; The line this edge belongs to, and how far along it the edge is.
+            line (if along-x? gz gx)
+            pos  (if along-x? gx gz)
+            span (if (= :collector cls) arterial-every collector-every)
+            run  (run-of pos span)
+            ;; Sampled at the middle of the run, on nominal lattice
+            ;; coordinates: every edge in the run has to ask the same question
+            ;; of the same place, and a per-line offset in here would let a run
+            ;; disagree with itself.
+            mid  (* street-spacing (+ (* run span) (* 0.5 span)))
+            mx   (if along-x? mid (* street-spacing line))
+            mz   (if along-x? (* street-spacing line) mid)
+            u    (urbanness seed mx mz)
+            ;; Held close to what the per-edge odds came to in a city, so the
+            ;; downtown grid is as dense as it was. What changed is the country:
+            ;; local lanes went from impossible to rare, and collectors from a
+            ;; scattering of stubs to a road every few hundred metres.
+            p    (case cls
+                   :collector (+ 0.34 (* 0.55 u))
+                   (+ 0.04 (* 0.78 u)))
+            ;; Keyed on the line and the run, not the endpoints. The axis has
+            ;; to be in the key: horizontal line 5 and vertical line 5 are two
+            ;; different roads and must not share a coin.
+            r    (prng/make (prng/hash-coords (+ seed 4409)
+                                              (+ (* 2 line) (if along-x? 0 1))
+                                              run))]
         (< (prng/next-double! r) p)))))
 
 (def ^:private bend-samples 5)
@@ -371,10 +407,31 @@
         cls (edge-class gx gz along-x?)
         u  (urbanness seed (* 0.5 (+ (nth a 0) (nth b 0)))
                            (* 0.5 (+ (nth a 1) (nth b 1))))
+        ;; A meander, not a zigzag.
+        ;;
+        ;; This was a per-edge coin between -15 and 15 m, which meant every
+        ;; consecutive sixty-four metres of a country road bulged the opposite
+        ;; way from the last one. Over a kilometre that is not a road that
+        ;; wanders, it is a serpentine -- and on an arterial, which is supposed
+        ;; to be the thing you can see continuing into the next valley, it was
+        ;; the main reason a main road did not read as one.
+        ;;
+        ;; The bow is now a slow sine along the line, so consecutive segments
+        ;; lean the same way and the road turns through its bends over about
+        ;; nine blocks. Amplitude is per class: a lane can wander, a main road
+        ;; barely does.
         bow (if (< u bend-threshold)
-              (let [r (prng/make (prng/edge-seed (+ seed 7717) gx gz hx hz))]
+              (let [amp  (case cls :arterial 4.0 :collector 9.0 :local 15.0)
+                    i    (if along-x? gx gz)
+                    line (if along-x? gz gx)
+                    ph   (prng/next-range!
+                          (prng/make (prng/hash-coords (+ seed 7717)
+                                                       (+ (* 2 line) (if along-x? 0 1))
+                                                       0))
+                          0.0 6.283185307179586)]
                 (* (- 1.0 (/ u bend-threshold))
-                   (prng/next-range! r -15.0 15.0)))
+                   amp
+                   (js-sin (+ ph (* 0.7 i)))))
               0.0)]
     (let [lift-a (node-lift seed gx gz along-x?)
           lift-b (node-lift seed hx hz along-x?)
