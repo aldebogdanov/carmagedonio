@@ -101,6 +101,21 @@
                    nil))
       nil)))
 
+;; The headlights are the weather's decision unless the driver has overruled
+;; it. Two functions rather than one flag threaded through five call sites,
+;; because every one of them wants the same answer and none of them should be
+;; the place that decides it.
+(defn- lights-on? [weather-state]
+  (or (input/lights-forced?) (weather/lights-on? weather-state)))
+
+(defn- gloom-now
+  "How far the headlight beams carry. Switching them on by hand in clear
+  weather still shows the lamps, but the beams stay faint -- a beam is only
+  visible in air that has something in it, and a sunlit afternoon does not."
+  [weather-state]
+  (let [g (weather/gloom weather-state)]
+    (if (and (zero? g) (input/lights-forced?)) 0.18 g)))
+
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
@@ -234,7 +249,7 @@
           (weather/update! weather-state t dt)
           (weather/sync! weather-state (sim/player-x sim) (sim/player-y sim)
                          (sim/player-z sim) t))
-        (traffic/sync! traffic-state (weather/lights-on? weather-state)
+        (traffic/sync! traffic-state (lights-on? weather-state)
                        (* 0.001 (js/Date.now)))
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
@@ -261,12 +276,13 @@
              :wheels     (sim/wheels-on-ground sim)
              :slip       (js/Math.abs (sim/sideslip-now sim))
              :handbrake? (input/handbrake-held?)
+             :lights?    (lights-on? weather-state)
              :online     (remote/count-players remotes)
              :powerups   (powerups/active powerups-state)
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
              :car        (cars/display-name kind)})))
-        (render/draw! rs sim alpha dt (weather/gloom weather-state)
+        (render/draw! rs sim alpha dt (gloom-now weather-state)
                       (set (keys (powerups/active powerups-state)))))
 
       ;; HUD is updated twice a second, not per frame. UI state and sim state

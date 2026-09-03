@@ -16,10 +16,22 @@
             [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
-(defn- kind-assets []
-  (mapv (fn [{:keys [half colour]}]
+(defn- kind-assets
+  "One geometry and one material per kind of clutter.
+
+  The shape matters more than it looks like it should. Everything here was a
+  box, and a box is what a power-up crate is too -- so a gas cylinder, which is
+  the one piece of scenery that can kill you, was a differently-coloured
+  version of the thing you are meant to drive through. It is a cylinder now,
+  and it is the only round red thing in the world."
+  []
+  (mapv (fn [{:keys [half colour shape]}]
           (let [[hx hy hz] half]
-            {:geometry (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
+            {:geometry (if (= :cylinder shape)
+                         ;; Ten sides: at the distance a barrel is looked at,
+                         ;; more is a smoother barrel nobody can see.
+                         (three/CylinderGeometry. hx hx (* 2 hy) 10)
+                         (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz)))
              :material (three/MeshPhongMaterial. #js {:color colour :flatShading true
                                                       :shininess 4})}))
         worldgen/prop-kinds))

@@ -157,7 +157,8 @@
   "Repaint the cluster. Called every frame: it is a speedometer."
   [{:keys [^js ctx flash]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
-           rivals wheels drift? handbrake? online car state powerups weather grip]}]
+           rivals wheels drift? handbrake? lights? online car state powerups
+           weather grip]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -179,6 +180,10 @@
     (lamp! ctx 140 82 "AIR" (< wheels 2) amber)
     (lamp! ctx 140 100 "DRIFT" drift? amber)
     (lamp! ctx 140 118 "HAND" handbrake? bad)
+    ;; Green, like the main-beam tell-tale in a real car, and for the same
+    ;; reason: it is the one lamp here that answers a question you would
+    ;; otherwise have to guess at from the road in front of you.
+    (lamp! ctx 140 136 "LIGHTS" lights? good)
 
     (damage-car! ctx 200 26 panels damage)
 
@@ -247,7 +252,7 @@
   to draw a dashboard and deliberately nothing about where a simulation keeps
   its wheels."
   [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
-           online car powerups weather grip]}]
+           lights? online car powerups weather grip]}]
   (let [{:keys [remaining score peds state]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
@@ -264,6 +269,7 @@
      :wheels    wheels
      :drift?    (> slip 22.0)
      :handbrake? handbrake?
+     :lights?   lights?
      :online    online
      :powerups  powerups
      :weather   weather

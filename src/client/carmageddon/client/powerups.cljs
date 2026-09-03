@@ -34,6 +34,33 @@
 
 (def ^:private reach 3.2)       ; metres: how close is "drove through it"
 (def ^:private slots 260)
+(def ^:private star-r 0.62)
+(def ^:private star-depth 0.17)
+
+(defn- star-geometry
+  "A five-pointed star, extruded, built once and shared by every crate.
+
+  These were cubes, and so is half the scenery: a smashable crate, a gas
+  cylinder and a power-up were three differently-coloured boxes, and the only
+  way to learn which was which was to drive into one. A star is not a shape
+  anything else in the world has, which is the entire point of it.
+
+  Extrusion runs along +Z and the star's face is in XY, so spinning it about Y
+  turns it edge-on and back -- the way a pickup has spun in every game that has
+  ever had one."
+  []
+  (let [shape (three/Shape.)
+        points 5
+        inner (* 0.46 star-r)]
+    (dotimes [i (* 2 points)]
+      (let [a (- (* i (/ js/Math.PI points)) (/ js/Math.PI 2))
+            rad (if (even? i) star-r inner)
+            x (* rad (js/Math.cos a))
+            y (* rad (js/Math.sin a))]
+        (if (zero? i) (.moveTo shape x y) (.lineTo shape x y))))
+    (.closePath shape)
+    (doto (three/ExtrudeGeometry. shape #js {:depth star-depth :bevelEnabled false})
+      (.center))))
 
 ;; Fire trail: a short-lived puddle every few ticks. Any faster and the pool
 ;; cap is spent in two seconds of driving.
@@ -64,11 +91,21 @@
 (defn create [^js scene ov]
   (atom {:scene scene
          :overlay ov
-         :pool (fig/pool scene (three/BoxGeometry. 1 1 1)
-                         (three/MeshPhongMaterial. #js {:emissive 0x000000
-                                                        :shininess 40
+         :pool (fig/pool scene (star-geometry)
+                         (three/MeshPhongMaterial. #js {:shininess 40
                                                         :flatShading true})
                          slots {:cast? true})
+         ;; A second, larger star drawn additively behind the first. The
+         ;; `emissive` this replaces was set to black and did nothing at all,
+         ;; which is why a crate on a wet road at dusk was a dark lump.
+         ;; Instance colours reach a basic material, so each crate glows its
+         ;; own colour without a material per kind.
+         :glow (fig/pool scene (star-geometry)
+                         (three/MeshBasicMaterial.
+                          #js {:transparent true :opacity 0.42
+                               :depthWrite false
+                               :blending (.-AdditiveBlending three)})
+                         slots {:cast? false})
          ;; Unlit and shadowless, like every other light source in the game.
          :arc-pool (fig/pool scene (three/BoxGeometry. 1 1 1)
                              (three/MeshBasicMaterial. #js {:color 0xfff27a})
@@ -94,26 +131,34 @@
           st worldgen/pickup-stride
           n (/ (.-length arr) st)
           pool (:pool @ps)
+          glow (:glow @ps)
           made (vec (for [idx (range n)
                           :when (not (contains? gone idx))
                           :let [o (* idx st)
                                 kind (int (aget arr (+ o 3)))
-                                slot (fig/claim! pool)]]
-                      (do (fig/set-colour! pool slot (:colour (nth kinds kind)))
+                                colour (:colour (nth kinds kind))
+                                slot (fig/claim! pool)
+                                gslot (fig/claim! glow)]]
+                      (do (fig/set-colour! pool slot colour)
+                          (fig/set-colour! glow gslot colour)
                           {:x (aget arr (+ o 0)) :y (aget arr (+ o 1))
-                           :z (aget arr (+ o 2)) :kind kind :idx idx :slot slot})))]
+                           :z (aget arr (+ o 2)) :kind kind :idx idx
+                           :slot slot :glow-slot gslot})))]
       (swap! ps assoc-in [:chunks key] made)
       made)))
 
 (defn remove-chunk! [ps key]
-  (let [pool (:pool @ps)]
-    (doseq [{:keys [slot]} (get (:chunks @ps) key)] (fig/release! pool slot))
+  (let [{:keys [pool glow]} @ps]
+    (doseq [{:keys [slot glow-slot]} (get (:chunks @ps) key)]
+      (fig/release! pool slot)
+      (fig/release! glow glow-slot))
     (swap! ps update :chunks dissoc key)))
 
 (defn- take-index! [ps key idx]
   (overlay/record! (:overlay @ps) key :pickups idx)
   (when-let [p (first (filter #(= idx (:idx %)) (get (:chunks @ps) key)))]
     (fig/release! (:pool @ps) (:slot p))
+    (fig/release! (:glow @ps) (:glow-slot p))
     (swap! ps (fn [st]
                 (-> st
                     (update-in [:chunks key] (fn [v] (vec (remove #(= idx (:idx %)) v))))
@@ -269,21 +314,29 @@
 (defn sync!
   "Spin them. A pickup that sits still on a grey road is a pickup nobody sees."
   [ps now-s]
-  (let [{:keys [pool ^js m4 chunks]} @ps]
+  (let [{:keys [pool glow ^js m4 chunks]} @ps]
     (doseq [[_ ps'] chunks
-            {:keys [x y z slot kind]} ps']
+            {:keys [x y z slot glow-slot kind]} ps']
       (let [a (+ (* 1.6 now-s) (* 0.7 kind))
             bob (* 0.18 (js/Math.sin (+ (* 2.2 now-s) kind)))
+            ;; The halo breathes against the star rather than with it, which is
+            ;; what makes the pair read as shining instead of as two stars.
+            pulse (+ 1.34 (* 0.12 (js/Math.sin (+ (* 3.1 now-s) kind))))
             c (js/Math.cos a) s (js/Math.sin a)
-            ^js e (.-elements m4)]
-        ;; Yaw by hand rather than through an Object3D: one pickup is nine
-        ;; stores and a matrix write, and there is no other transform involved.
-        (aset e 0 (* 0.8 c)) (aset e 1 0.0) (aset e 2 (* 0.8 (- s))) (aset e 3 0.0)
-        (aset e 4 0.0) (aset e 5 0.8) (aset e 6 0.0) (aset e 7 0.0)
-        (aset e 8 (* 0.8 s)) (aset e 9 0.0) (aset e 10 (* 0.8 c)) (aset e 11 0.0)
-        (aset e 12 x) (aset e 13 (+ y bob)) (aset e 14 z) (aset e 15 1.0)
-        (fig/set-matrix! pool slot m4)))
-    (fig/flush! pool))
+            ^js e (.-elements m4)
+            write! (fn [k target slot]
+                     ;; Yaw by hand rather than through an Object3D: one pickup
+                     ;; is nine stores and a matrix write, and there is no other
+                     ;; transform involved.
+                     (aset e 0 (* k c)) (aset e 1 0.0) (aset e 2 (* k (- s))) (aset e 3 0.0)
+                     (aset e 4 0.0) (aset e 5 k) (aset e 6 0.0) (aset e 7 0.0)
+                     (aset e 8 (* k s)) (aset e 9 0.0) (aset e 10 (* k c)) (aset e 11 0.0)
+                     (aset e 12 x) (aset e 13 (+ y bob)) (aset e 14 z) (aset e 15 1.0)
+                     (fig/set-matrix! target slot m4))]
+        (write! 1.0 pool slot)
+        (write! pulse glow glow-slot)))
+    (fig/flush! pool)
+    (fig/flush! glow))
   ;; Bolts are written once, when they are struck. All this has to do is take
   ;; away the ones that have burnt out -- and only tell the GPU when one has.
   (when (age-arcs! ps now-s) (fig/flush! (:arc-pool @ps))))

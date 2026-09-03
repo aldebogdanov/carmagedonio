@@ -10,13 +10,19 @@
 
 (def ^:private held (js/Set.))
 
+;; Not part of a `Command`, and deliberately so: the headlights change nothing
+;; the sim integrates, so putting them in the command would mean every AI and
+;; every network peer had to carry an opinion about them.
+(def ^:private lights-forced (volatile! false))
+
 (def ^:private bindings
   {"KeyW" :fwd   "ArrowUp"    :fwd
    "KeyS" :back  "ArrowDown"  :back
    "KeyA" :left  "ArrowLeft"  :left
    "KeyD" :right "ArrowRight" :right
    "Space" :handbrake
-   "KeyR"  :reset})
+   "KeyR"  :reset
+   "KeyL"  :lights})
 
 (defn- down? [action]
   (some (fn [[code a]] (and (= a action) (.has held code))) bindings))
@@ -27,6 +33,10 @@
   (let [on-down (fn [e]
                   (when (contains? bindings (.-code e))
                     (.preventDefault e)
+                    ;; A latch, not a hold. Lights are the one control here
+                    ;; that stays where it was put.
+                    (when (and (= "KeyL" (.-code e)) (not (.-repeat e)))
+                      (vswap! lights-forced not))
                     (.add held (.-code e))))
         on-up   (fn [e] (.delete held (.-code e)))
         on-blur (fn [_] (.clear held))]
@@ -43,6 +53,16 @@
   here: this never becomes a `Command`, so it cannot desync anything."
   []
   (down? :handbrake))
+
+(defn lights-forced?
+  "Has the driver switched the lights on themselves?
+
+  They come on by themselves under cloud, which is right and was also
+  completely opaque: there was no way to tell whether the beams in front of you
+  were the weather's doing or something broken. A switch and a tell-tale settle
+  it."
+  []
+  @lights-forced)
 
 (defn sample
   "Snapshot the current keyboard into an immutable command for `tick`.

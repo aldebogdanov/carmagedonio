@@ -1105,11 +1105,19 @@
 
   `volatile?` is the one that matters to play: a gas cylinder goes up when it
   is hit hard, taking its neighbours and anything standing near them with it."
-  [{:name :crate  :half [0.60 0.60 0.60] :density 40.0 :colour 0xc9a86a}
-   {:name :barrel :half [0.45 0.75 0.45] :density 55.0 :colour 0x8a6a3a}
-   {:name :sign   :half [0.12 1.10 0.80] :density 26.0 :colour 0xa8a49c}
+  ;; `shape` is what it is drawn as; the collider is a box either way. Every
+  ;; one of these used to be a box, and a tan box a metre across is
+  ;; indistinguishable at speed from an amber crate you are meant to drive
+  ;; through -- which is what players did, repeatedly, into a gas cylinder.
+  [{:name :crate  :half [0.60 0.60 0.60] :density 40.0 :colour 0x9a7038
+    :shape :box}
+   {:name :barrel :half [0.45 0.75 0.45] :density 55.0 :colour 0x4a6a7a
+    :shape :cylinder}
+   {:name :sign   :half [0.12 1.10 0.80] :density 26.0 :colour 0xa8a49c
+    :shape :box}
+   ;; Red, round, and the only round red thing in the game.
    {:name :gas-barrel :half [0.46 0.80 0.46] :density 60.0 :colour 0xc4442e
-    :volatile? true}])
+    :shape :cylinder :volatile? true}])
 
 (def gas-barrel-kind 3)
 
