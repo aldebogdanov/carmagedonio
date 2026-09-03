@@ -204,10 +204,13 @@
     ;; What the sky is doing, and what it has left on the road. The grip figure
     ;; is the one that matters: it is why the corner you took last lap does not
     ;; work this one.
+    ;; Bottom left of the cluster, not the top right. Right-aligned against the
+    ;; bezel it ran straight through "rivals left", which sits at x 420 -- the
+    ;; two were legible only when the weather was clear enough to say nothing.
     (when weather
       (text! ctx (str weather " \u00b7 grip " (.toFixed (* 100 (or grip 1.0)) 0) "%")
-             (- w 14) 54 (str "600 11px " mono)
-             (if (< (or grip 1.0) 0.9) bad dim) "right"))
+             200 148 (str "600 11px " mono)
+             (if (< (or grip 1.0) 0.9) bad dim) "left"))
     ;; Who else is here. Only when there is somebody: an instrument that always
     ;; reads zero is a label.
     (when (pos? (or online 0))
