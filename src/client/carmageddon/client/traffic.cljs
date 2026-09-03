@@ -23,6 +23,16 @@
             [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
+;; What being written off does to a vehicle, as a *velocity change* rather than
+;; an impulse. This was three fixed impulse numbers, and a fixed impulse is a
+;; different event depending on what it lands on: the same 900 N.s that gave a
+;; saloon a 0.43 m/s hop moved a tanker 9 cm and threw an 86 kg scooter forty
+;; metres into the air. Multiplying by the body's own mass makes a wreck look
+;; the same whatever was wrecked, which is the only version anyone can tune.
+(def ^:private wreck-lift 2.4)     ; m/s straight up when a car writes one off
+(def ^:private wreck-shove 0.18)   ; share of the striker's velocity handed on
+(def shock-lift 7.0)               ; and what a shock does: off its wheels entirely
+
 (def ^:private lane 0.45)          ; share of the carriageway half-width to sit off
 (def ^:private stop-line 0.86)     ; how far along a street a red light holds a car
 (def ^:private follow-gap 7.5)     ; metres to leave to the car in front
@@ -726,31 +736,40 @@
 
 (defn wreck!
   "Stop driving a car and let physics have it. Returns the delta describing what
-  was wrecked, or nil if this was not the hit that did it."
-  [ts handle impulse]
-  (when-let [^Car c (get (:by-collider @ts) handle)]
-    (when (.-alive? c)
-      (set! (.-alive? c) false)
-      (overlay/record! (:overlay @ts) (.-key c) :cars (.-idx c))
-      (let [^js body (.-body c)]
-        (.setBodyType body (.-Dynamic RAPIER/RigidBodyType) true)
-        (.applyImpulse body
-                       #js {:x (* 90.0 (nth impulse 0))
-                            :y (+ 900.0 (js/Math.abs (* 40.0 (nth impulse 1))))
-                            :z (* 90.0 (nth impulse 2))}
-                       true))
-      (swap! ts update :wrecked inc)
-      (let [t (.translation ^js (.-body c))]
-        {:cx (first (.-key c)) :cz (second (.-key c)) :index (.-idx c)
-         ;; The caller decides what a wreck means. A tanker means fire.
-         :pos [(.-x t) (.-y t) (.-z t)]
-         :volatile? (boolean (:volatile? (.-type c)))}))))
+  was wrecked, or nil if this was not the hit that did it.
+
+  `vel` is the striker's velocity, in m/s -- not an impulse, despite what the
+  old parameter name claimed. `lift` is how hard the wreck is thrown upward,
+  also in m/s; a shock passes its own."
+  ([ts handle vel] (wreck! ts handle vel wreck-lift))
+  ([ts handle vel lift]
+   (when-let [^Car c (get (:by-collider @ts) handle)]
+     (when (.-alive? c)
+       (set! (.-alive? c) false)
+       (overlay/record! (:overlay @ts) (.-key c) :cars (.-idx c))
+       (let [^js body (.-body c)]
+         (.setBodyType body (.-Dynamic RAPIER/RigidBodyType) true)
+         ;; Mass is read *after* the type change: a kinematic body has no
+         ;; dynamics to report one from. The floor is paranoia -- a zero here
+         ;; would silently turn every wreck into a body that does not move.
+         (let [m (max 1.0 (.mass body))]
+           (.applyImpulse body
+                          #js {:x (* m wreck-shove (nth vel 0))
+                               :y (* m lift)
+                               :z (* m wreck-shove (nth vel 2))}
+                          true)))
+       (swap! ts update :wrecked inc)
+       (let [t (.translation ^js (.-body c))]
+         {:cx (first (.-key c)) :cz (second (.-key c)) :index (.-idx c)
+          ;; The caller decides what a wreck means. A tanker means fire.
+          :pos [(.-x t) (.-y t) (.-z t)]
+          :volatile? (boolean (:volatile? (.-type c)))})))))
 
 (defn wreck-near!
   "Wreck every living car within `r` of (x, z). Returns their deltas.
 
   This is what a weapon does: it does not hit one thing, it clears a space."
-  [ts x z r impulse]
+  [ts x z r]
   (let [r2 (* r r)
         hits (for [[_ {:keys [cars]}] (:chunks @ts)
                    i (range (alength cars))
@@ -760,7 +779,7 @@
                          dx (- (.-x t) x) dz (- (.-z t) z)]
                    :when (< (+ (* dx dx) (* dz dz)) r2)]
                (.-handle c))]
-    (vec (keep #(wreck! ts % impulse) (vec hits)))))
+    (vec (keep #(wreck! ts % [0.0 0.0 0.0] shock-lift) (vec hits)))))
 
 (defn wreck-index!
   "Wreck car `idx` of chunk `key` because someone else did. Recorded even when

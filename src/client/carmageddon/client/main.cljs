@@ -156,14 +156,19 @@
                  ;; The trail is the player's, so anyone who runs into it is
                  ;; worth points to them.
                  :fire (fire/ignite! fire-state x y z r life :player)
-                 :shock (doseq [d (concat
-                                   (map #(assoc % :kind :car)
-                                        (traffic/wreck-near! traffic-state x z r
-                                                             [0.0 60.0 0.0]))
-                                   (map #(assoc % :kind :ped)
-                                        (peds/kill-near! peds-state x z (* 0.6 r))))]
-                          (if (= :car (:kind d)) (game/car-wrecked! game) (game/ped-killed! game))
-                          (net/-send! transport (wire/encode-delta d)))
+                 :shock (let [now (* 0.001 (js/Date.now))]
+                          (doseq [d (concat
+                                     (map #(assoc % :kind :car)
+                                          (traffic/wreck-near! traffic-state x z r))
+                                     (map #(assoc % :kind :ped)
+                                          (peds/kill-near! peds-state x z (* 0.6 r))))]
+                            (if (= :car (:kind d)) (game/car-wrecked! game) (game/ped-killed! game))
+                            ;; A bolt to everything it took. The weapon decides
+                            ;; what it hits; `powerups` only knows how to draw
+                            ;; the line between here and there.
+                            (when-let [p (:pos d)]
+                              (powerups/arc! powerups-state [x (+ y 0.4) z] p now))
+                            (net/-send! transport (wire/encode-delta d))))
                  nil))))
           (let [px (sim/player-x sim) pz (sim/player-z sim)]
             (when-let [{:keys [heat]} (fire/heat-at fire-state px pz)]
@@ -244,7 +249,8 @@
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
              :car        (cars/display-name kind)})))
-        (render/draw! rs sim alpha dt (weather/gloom weather-state)))
+        (render/draw! rs sim alpha dt (weather/gloom weather-state)
+                      (set (keys (powerups/active powerups-state)))))
 
       ;; HUD is updated twice a second, not per frame. UI state and sim state
       ;; are kept apart on purpose -- when re-frame arrives for menus it

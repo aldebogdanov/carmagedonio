@@ -416,7 +416,12 @@
             (vec victims)))))
 
 (defn kill-near!
-  "Kill everyone within `r` of (x, z). Returns their deltas."
+  "Kill everyone within `r` of (x, z). Returns their deltas, each carrying the
+  position it happened at.
+
+  `:pos` is not part of the wire delta -- the encoder ignores what it does not
+  know -- but a weapon that wants to draw itself needs to know where it landed,
+  and the radius test has already read every one of these translations."
   [ps x z r]
   (let [r2 (* r r)
         victims (for [[key chunk] (:chunks @ps)
@@ -425,8 +430,10 @@
                       :let [t (.translation ^js (:body p))
                             dx (- (.-x t) x) dz (- (.-z t) z)]
                       :when (< (+ (* dx dx) (* dz dz)) r2)]
-                  [key (:idx p)])]
-    (mapv (fn [[key idx]] (kill-index! ps key idx [0.0 5.0 0.0])) (vec victims))))
+                  [key (:idx p) [(.-x t) (.-y t) (.-z t)]])]
+    (mapv (fn [[key idx pos]]
+            (assoc (kill-index! ps key idx [0.0 5.0 0.0]) :pos pos))
+          (vec victims))))
 
 (defn ped? [ps handle] (contains? (:by-collider @ps) handle))
 

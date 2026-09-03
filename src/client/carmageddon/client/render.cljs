@@ -302,6 +302,110 @@
     (.setAttribute g "color" (three/BufferAttribute. col 3))
     g))
 
+;; --- what a held power-up looks like ----------------------------------------
+;;
+;; Three of the six power-ups changed only how the car behaved and nothing you
+;; could see, which makes the ten seconds you are holding one hard to spend --
+;; you cannot tell you still have it without reading the dashboard. All three
+;; are unlit and hung on the player's car only; rivals do not collect crates.
+
+(def ^:private jet-length 1.05)
+(def ^:private jet-radius 0.17)
+
+(defn- jet-geometry
+  "An exhaust flame: a cone whose base sits at the tailpipe and whose apex
+  points back down the road. A cone points +Y with the apex at +height/2, so a
+  quarter turn about X puts the apex at +Z -- behind the car, since forward is
+  -Z -- and the translate slides the base onto the origin."
+  []
+  (doto (three/ConeGeometry. jet-radius jet-length 8 1 true)
+    (.rotateX (/ js/Math.PI 2))
+    (.translate 0 0 (* 0.5 jet-length))))
+
+(defn- build-boosts!
+  "Nitro flames, a grip ring on the road, and an armour shell.
+
+  Four meshes on one car, all hidden until something is held. They hang off the
+  root rather than the hull so a caved-in nose does not bend the shell into the
+  bodywork."
+  [^js root [hx hy hz] ground]
+  (let [flame (fn [] (three/MeshBasicMaterial.
+                      #js {:color 0xffb03a :transparent true :opacity 0.85
+                           :depthWrite false
+                           :blending (.-AdditiveBlending three)
+                           :side (.-DoubleSide three)}))
+        jets (make-array 2)]
+    (dotimes [i 2]
+      (let [^js m (three/Mesh. (jet-geometry) (flame))]
+        (.set (.-position m) (* (if (zero? i) -0.42 0.42) hx) (* -0.25 hy) (* 1.02 hz))
+        (set! (.-visible m) false)
+        (aset jets i m)
+        (.add root m)))
+    ;; Grip: a ring on the road under the car. Flat on the ground rather than
+    ;; around the car, because grip is a thing happening at the contact patch
+    ;; and that is where the eye goes looking for it.
+    ;;
+    ;; Sized off the car's *length*, not its width. Off the width it came out
+    ;; with a radius of 1.5 m on a body 3.8 m long -- drawn, visible, and
+    ;; entirely underneath the car, where nobody could see it.
+    (let [^js ring (three/Mesh. (doto (three/RingGeometry. (* 1.02 hz) (* 1.26 hz) 32)
+                                  (.rotateX (/ js/Math.PI -2)))
+                                (three/MeshBasicMaterial.
+                                 #js {:color 0x4fc4ff :transparent true
+                                      :opacity 0.0 :depthWrite false
+                                      :blending (.-AdditiveBlending three)
+                                      :side (.-DoubleSide three)}))
+          ;; Armour: a shell a hand's width proud of the bodywork. Front faces:
+          ;; back faces were the first try and they are nearly invisible,
+          ;; because the far side of the box is behind the car and loses the
+          ;; depth test to it. What is left to see is the near panels, which is
+          ;; what a shield is anyway.
+          ^js shell (three/Mesh. (three/BoxGeometry. (* 2.3 hx) (* 2.5 hy) (* 2.12 hz))
+                                 (three/MeshBasicMaterial.
+                                  #js {:color 0x9fd8ff :transparent true
+                                       :opacity 0.0 :depthWrite false
+                                       :blending (.-AdditiveBlending three)
+                                       :side (.-FrontSide three)}))]
+      ;; On the road, not under the floorpan. `ground` is how far the tyres are
+      ;; below the chassis centre, which differs by a metre between a hatchback
+      ;; and a truck -- so it is measured per vehicle rather than guessed from
+      ;; the hull.
+      (.set (.-position ring) 0.0 (+ ground 0.04) 0.0)
+      (set! (.-visible ring) false)
+      (set! (.-visible shell) false)
+      (.add root ring)
+      (.add root shell)
+      {:jets jets :ring ring :shell shell})))
+
+(defn- draw-boosts!
+  "Show what the player is holding. `held` is the set of active power-up names.
+
+  Everything here pulses off the render clock rather than off a timer of its
+  own: a flame that does not flicker is a cone, and a ring that does not
+  breathe is a decal."
+  [{:keys [cars ^js clock]} held]
+  (when-let [{:keys [jets ^js ring ^js shell]} (:boosts (first cars))]
+    (let [t (* 2 js/Math.PI @clock)
+          nitro? (contains? held :nitro)
+          grip? (contains? held :grip)
+          armour? (contains? held :armour)]
+      (dotimes [i 2]
+        (let [^js m (aget jets i)]
+          (set! (.-visible m) nitro?)
+          (when nitro?
+            ;; The two flames flicker out of phase, which is most of what stops
+            ;; a pair of cones reading as a pair of cones.
+            (let [f (+ 0.72 (* 0.28 (js/Math.sin (+ (* 9.0 t) (* i 2.1)))))]
+              (set! (.-z (.-scale m)) f)
+              (set! (.-opacity (.-material m)) (* 0.9 f))))))
+      (set! (.-visible ring) grip?)
+      (when grip?
+        (set! (.-y (.-rotation ring)) (* 1.4 t))
+        (set! (.-opacity (.-material ring)) (+ 0.46 (* 0.14 (js/Math.sin (* 3.0 t))))))
+      (set! (.-visible shell) armour?)
+      (when armour?
+        (set! (.-opacity (.-material shell)) (+ 0.26 (* 0.09 (js/Math.sin (* 2.2 t)))))))))
+
 (def ^:private soot 0x2b2622)
 ;; Allocated once: `draw-damage!` runs per car per frame and a fresh Color
 ;; there is four garbage objects a frame for nothing.
@@ -436,13 +540,22 @@
                     (.add root hull)
                     (let [wheels (build-wheels! root tex layout)
                           smoke  (build-smoke! root half)
-                          beams  (build-beams! root beam-geom kind)]
+                          beams  (build-beams! root beam-geom kind)
+                          ;; Only the player collects crates, so only the
+                          ;; player carries the four meshes that show it.
+                          ;; How far the tyres sit below the chassis centre:
+                          ;; the mount, the suspension it hangs on and the
+                          ;; wheel itself.
+                          ground (- (+ (js/Math.abs (nth (first (:connections layout)) 1))
+                                       (:suspension-rest @(cars/tuning kind) 0.32)
+                                       (:radius layout)))
+                          boosts (when (zero? i) (build-boosts! root half ground))]
                       (aset meshes i root)
                       (.add scene root)
                       {:root root :hull hull :material hull-mat
                        :paint (three/Color. paint)
                        :half half :wheels wheels :mounts (:connections layout)
-                       :smoke smoke :lamps lamps :beams beams
+                       :smoke smoke :lamps lamps :beams beams :boosts boosts
                        ;; -1 is "never painted", so the first frame always
                        ;; writes. See `draw-lights!`.
                        :lit (volatile! -1)})))
@@ -614,10 +727,11 @@
   `dt` is the real elapsed frame time, used only by the camera. Everything else
   here is a function of the fixed timestep and `alpha`. `gloom` is the world's
   answer to how dark it is, 0 to 1 -- one answer for every car, so it arrives
-  as an argument rather than being asked per vehicle."
+  as an argument rather than being asked per vehicle. `held` is the set of
+  power-up names the player is holding."
   [{:keys [^js renderer scene ^js camera meshes camera-state cast
            ^js q0 ^js q1 ^js qo ^js qp] :as rs}
-   sim alpha dt gloom]
+   sim alpha dt gloom held]
   (let [{:keys [prev curr halves player]} @sim
         n (count halves)]
     (dotimes [i n]
@@ -638,6 +752,7 @@
     (vswap! (:clock rs) #(mod (+ % dt) 1.0))
     (draw-damage! rs sim)
     (draw-lights! rs sim gloom)
+    (draw-boosts! rs held)
     (let [o (* player sim/stride)]
       (follow-sun! (:sun rs)
                    (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)
