@@ -52,8 +52,16 @@
 (def ^:private marker-off 0x6e5c36)
 (def ^:private marker-on 0xffb43a)
 
+;; A rider is not painted in the vehicle's colour: a scooter and the person on
+;; it are two different objects that happen to be travelling together, and
+;; painting them the same makes a two-wheeler read as a bollard.
+(def ^:private jacket 0x2f3540)
+(def ^:private helmet 0xdad4c6)
+(def ^:private skin 0xc79a6b)
+
 (def ^:private tints
   {:glass glass :trim trim :hazard hazard
+   :jacket jacket :helmet helmet :skin skin
    :lamp lamp-off :tail tail-off :marker marker-off})
 
 ;; Which bits of a car's lamp state are set. Kept as an integer rather than a
@@ -99,6 +107,14 @@
      {:shape :lamp :at [x (* 0.42 hy) (- hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}
      {:shape :lamp :at [(- hx) y (* 0.70 hz)] :size [0.05 0.12 0.22] :tint :marker}
      {:shape :lamp :at [hx y (* 0.70 hz)] :size [0.05 0.12 0.22] :tint :marker}]))
+
+(defn- single-lamps
+  "One headlight and one tail light, on the centre line. What a two-wheeler
+  has, and the reason a single light in the mirror at night is a different
+  thing to be told than a pair of them."
+  [hx hy hz]
+  [{:shape :lamp :at [0.0 (* 0.55 hy) hz] :size [(* 0.66 hx) 0.13 0.05] :tint :lamp}
+   {:shape :lamp :at [0.0 (* 0.30 hy) (- hz)] :size [(* 0.56 hx) 0.11 0.05] :tint :tail}])
 
 (def ^:private types
   [{:name :saloon
@@ -177,7 +193,59 @@
              {:at [0.0 1.44 2.50] :size [1.92 0.20 1.10]}
              {:at [0.0 0.50 -0.90] :size [2.16 2.30 4.60]}
              {:at [0.0 0.02 3.28] :size [2.08 0.34 0.14] :tint :trim}]
-            (lamps 1.05 1.20 3.30))}])
+            (lamps 1.05 1.20 3.30))}
+
+   ;; --- two wheels ---------------------------------------------------------
+   ;;
+   ;; A two-wheeler is not a small car, and the differences are what make it
+   ;; worth having on the road: the wheels are on the centre line rather than
+   ;; at four corners (`:n 2` in the wheel map), the whole thing weighs a
+   ;; fifth of a saloon so it goes a long way when it is hit, it carries a
+   ;; single headlight rather than a pair, and there is a person sitting on it
+   ;; in plain view rather than behind glass.
+
+   {:name :scooter
+    :half [0.26 0.42 0.82] :ride 0.50
+    ;; Drawn: the block under the seat. Hit: the whole machine and its rider.
+    :hull [0.15 0.13 0.40]
+    ;; Light. It is a box collider like everything else, so this is the number
+    ;; that decides whether clipping one is an event or a nudge.
+    :density 120.0
+    :pace 0.82
+    :wheel {:r 0.21 :w 0.10 :base 0.60 :n 2}
+    :parts (concat
+            [;; The step-through floor, which is the whole silhouette: a
+             ;; scooter is a bike with a gap where the tank should be.
+             {:at [0.0 -0.20 -0.02] :size [0.42 0.10 1.24]}
+             {:at [0.0 0.30 0.60] :size [0.48 0.60 0.09] :tilt 0.24}
+             {:at [0.0 0.60 0.52] :size [0.58 0.06 0.06] :tint :trim}
+             {:at [0.0 0.28 -0.34] :size [0.38 0.15 0.58] :tint :trim}
+             ;; The rider: torso, arms and a helmet. Sitting upright, which is
+             ;; the pose that tells a scooter from a motorbike at a distance.
+             {:at [0.0 0.56 -0.16] :size [0.34 0.60 0.28] :tint :jacket}
+             {:at [0.0 0.62 0.24] :size [0.40 0.12 0.60] :tilt 0.42 :tint :skin}
+             {:at [0.0 0.98 -0.06] :size [0.27 0.29 0.29] :tint :helmet}]
+            (single-lamps 0.30 0.42 0.82))}
+
+   {:name :bike
+    :half [0.28 0.50 1.05] :ride 0.58
+    :hull [0.15 0.17 0.42]
+    :density 150.0
+    :pace 1.22
+    :wheel {:r 0.30 :w 0.13 :base 0.74 :n 2}
+    :parts (concat
+            [{:at [0.0 0.26 0.16] :size [0.32 0.26 0.72]}
+             {:at [0.0 0.30 -0.52] :size [0.30 0.13 0.66] :tint :trim}
+             ;; Forks, raked back the way a fork is.
+             {:at [0.0 0.10 0.84] :size [0.15 0.66 0.11] :tilt -0.26 :tint :trim}
+             {:at [0.0 0.58 0.70] :size [0.62 0.06 0.06] :tint :trim}
+             {:at [0.20 -0.20 -0.44] :size [0.09 0.09 0.86] :tint :trim}
+             ;; Leaning forward onto the bars, which is the other half of the
+             ;; difference: same two wheels, entirely different posture.
+             {:at [0.0 0.60 -0.14] :size [0.36 0.64 0.30] :tilt 0.30 :tint :jacket}
+             {:at [0.0 0.70 0.30] :size [0.42 0.11 0.66] :tilt 0.30 :tint :skin}
+             {:at [0.0 1.00 0.16] :size [0.27 0.29 0.29] :tint :helmet}]
+            (single-lamps 0.32 0.50 1.05))}])
 
 (def ^:private type-index (zipmap (map :name types) (range)))
 
@@ -208,10 +276,10 @@
   ;; enough that finding a tanker is an opportunity rather than the scenery,
   ;; common enough that a drive across a city turns one up.
   (mapv type-index
-        [:saloon :saloon :hatch  :saloon :hatch  :lorry
-         :pickup :van    :saloon :hatch  :saloon :lorry
-         :saloon :saloon :hatch  :saloon :hatch  :saloon
-         :pickup :van    :saloon :hatch  :saloon :tanker]))
+        [:saloon :saloon  :hatch  :scooter :hatch  :lorry
+         :pickup :van     :saloon :hatch   :bike   :lorry
+         :saloon :saloon  :hatch  :saloon  :hatch  :saloon
+         :pickup :scooter :saloon :hatch   :bike   :tanker]))
 
 (assert (every? some? type-mix) "traffic type-mix names a vehicle that does not exist")
 
@@ -237,19 +305,33 @@
   The wheels are `spin?` parts, which turn continuously rather than leaning
   back and forth the way a pedestrian's leg does. Everything else is rigid and
   its transform is built once, here, rather than sixty times a second."
-  [{:keys [half parts wheel]}]
+  [{:keys [half hull parts wheel]}]
   (let [[hx hy hz] half
-        {wr :r ww :w track :track base :base} wheel
+        ;; What is *drawn* for the hull, which is not always what is *hit*. On
+        ;; a car they are the same box. On a two-wheeler they are not: the
+        ;; collider has to be big enough to be worth hitting and to hold the
+        ;; rider, and drawing that box puts a fridge on the road with a head
+        ;; sticking out of it. The visible hull there is the engine block, and
+        ;; the silhouette is made by the parts bolted to it.
+        [vx vy vz] (or hull half)
+        {wr :r ww :w track :track base :base wn :n :or {wn 4}} wheel
         y (+ (- hy) (* 0.35 wr))]
     (fig/rig
      (concat
-      [{:shape :box :at [0.0 0.0 0.0] :size [(* 2 hx) (* 2 hy) (* 2 hz)]}]
+      [{:shape :box :at [0.0 0.0 0.0] :size [(* 2 vx) (* 2 vy) (* 2 vz)]}]
       (for [{:keys [at size tilt shape]} parts]
         {:shape (or shape :box) :at at :size size :tilt (or tilt 0.0)})
-      (for [j (range 4)]
-        {:shape :wheel :spin? true
-         :at [(if (even? j) (- track) track) y (if (< j 2) base (- base))]
-         :size [ww (* 2 wr) (* 2 wr)]})))))
+      ;; Two wheels or four. A two-wheeler's are on the centre line, one at
+      ;; each end -- there is no track to sit them either side of.
+      (if (= 2 wn)
+        (for [j (range 2)]
+          {:shape :wheel :spin? true
+           :at [0.0 y (if (zero? j) base (- base))]
+           :size [ww (* 2 wr) (* 2 wr)]})
+        (for [j (range 4)]
+          {:shape :wheel :spin? true
+           :at [(if (even? j) (- track) track) y (if (< j 2) base (- base))]
+           :size [ww (* 2 wr) (* 2 wr)]}))))))
 
 (defn create [world scene seed ov]
   (let [material (three/MeshPhongMaterial. #js {:color 0xffffff :shininess 26
@@ -420,6 +502,10 @@
                               (count type-mix)))
         type (nth types ti)
         lg (leg seed from to)
+        ;; A scooter does not keep up with the traffic and a motorbike is
+        ;; through it before you have finished looking. One multiplier, and it
+        ;; is most of what makes a two-wheeler behave like one.
+        speed (* speed (:pace type 1.0))
         p (place! #js {:x 0.0 :y 0.0 :z 0.0 :h 0.0} lg t0 (:ride type))
         [hx hy hz] (:half type)
         ^js body (.createRigidBody
@@ -429,7 +515,7 @@
         ^js collider (.createCollider
                       world
                       (-> (.cuboid RAPIER/ColliderDesc hx hy hz)
-                          (.setDensity 300.0)
+                          (.setDensity (:density type 300.0))
                           (.setFriction 0.8)
                           (.setRestitution 0.1)
                           (.setActiveEvents (.-CONTACT_FORCE_EVENTS RAPIER/ActiveEvents))
@@ -448,7 +534,8 @@
         (let [{:keys [tint shape]} (nth (:parts type) i)]
           (fig/set-colour! (get pools (or shape :box)) (aget slots (inc i))
                            (get tints tint colour))))
-      (dotimes [i 4] (fig/set-colour! (:wheel pools) (aget slots (+ nb i)) rubber)))
+      (dotimes [i (- n nb)]
+        (fig/set-colour! (:wheel pools) (aget slots (+ nb i)) rubber)))
     (->Car body collider (.-handle collider) key idx colour type ti meshes slots
            from to t0 speed lg true
            (js/Math.abs (js/Math.sin (+ (* 12.9898 idx) (* 0.017 (nth from 0)))))
