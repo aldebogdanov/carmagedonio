@@ -30,12 +30,16 @@
   hold nothing and buy nothing: they are points, and they are discs rather than
   stars so that a line of them down a carriageway reads as money rather than as
   six power-ups you have not identified yet."
+  ;; Durations are double what they were. Eight seconds is long enough to
+  ;; notice a power-up and not long enough to use one: by the time you have
+  ;; registered what you picked up and found something to spend it on, it has
+  ;; gone. Sixteen leaves room for the decision the timer exists to create.
   [{:name :repair :colour 0x4fbf6a :label "REPAIR"    :secs 0.0  :shape :star :scale 1.0}
-   {:name :nitro  :colour 0xf05a28 :label "NITRO"     :secs 9.0  :shape :star :scale 1.0}
-   {:name :grip   :colour 0x39a0d8 :label "GRIP"      :secs 12.0 :shape :star :scale 1.0}
-   {:name :armour :colour 0xb9bec6 :label "ARMOUR"    :secs 14.0 :shape :star :scale 1.0}
-   {:name :flame  :colour 0xf2a63a :label "FIRETRAIL" :secs 8.0  :shape :star :scale 1.0}
-   {:name :shock  :colour 0xd8d84a :label "SHOCK"     :secs 8.0  :shape :star :scale 1.0}
+   {:name :nitro  :colour 0xf05a28 :label "NITRO"     :secs 18.0 :shape :star :scale 1.0}
+   {:name :grip   :colour 0x39a0d8 :label "GRIP"      :secs 24.0 :shape :star :scale 1.0}
+   {:name :armour :colour 0xb9bec6 :label "ARMOUR"    :secs 28.0 :shape :star :scale 1.0}
+   {:name :flame  :colour 0xf2a63a :label "FIRETRAIL" :secs 16.0 :shape :star :scale 1.0}
+   {:name :shock  :colour 0xd8d84a :label "SHOCK"     :secs 16.0 :shape :star :scale 1.0}
    {:name :coin   :colour 0xe8b93a :label "+45"       :secs 0.0  :shape :coin :scale 0.55}
    {:name :nugget :colour 0xffd24a :label "+400"      :secs 0.0  :shape :coin :scale 1.15}])
 
@@ -201,28 +205,32 @@
   nil)
 
 (defn collect!
-  "Whatever the car at (x, z) is standing on. Returns `{:kind :delta}` or nil.
+  "Everything the car at (x, z) is standing on, as `[{:kind :delta} ...]`.
 
   A distance check rather than a sensor collider: there are a handful of these
   per chunk, the answer is wanted once a tick, and a collider would mean a
-  broad-phase entry and a contact event for something that is not solid."
+  broad-phase entry and a contact event for something that is not solid.
+
+  All of them, not the first. It took one per tick, which is invisible for a
+  coin trail -- the next one is metres away -- and wrong the moment two crates
+  sit close enough to drive through together: you took one of them and the
+  other stayed on the road behind you.
+
+  Found first, taken second, and the finding is forced before anything is
+  taken. `for` is lazy and chunked, so realising it while collecting would
+  consume up to thirty-two crates the car never reached."
   [ps x z]
   (let [r2 (* reach reach)
-        ;; Found first, taken second. Taking it inside the sequence was a bug
-        ;; waiting for a crowded street: `for` is lazy and chunked, so `first`
-        ;; realises up to thirty-two elements -- and every one of them would
-        ;; have been collected, consuming crates the car never reached.
-        hit (first
-             (for [[key ps'] (:chunks @ps)
-                   p ps'
-                   :let [dx (- (:x p) x) dz (- (:z p) z)]
-                   :when (< (+ (* dx dx) (* dz dz)) r2)]
-               [key p]))]
-    (when hit
-      (let [[key p] hit]
-        (take-index! ps key (:idx p))
-        {:kind (:kind p)
-         :delta {:cx (first key) :cz (second key) :index (:idx p)}}))))
+        hits (vec (for [[key ps'] (:chunks @ps)
+                        p ps'
+                        :let [dx (- (:x p) x) dz (- (:z p) z)]
+                        :when (< (+ (* dx dx) (* dz dz)) r2)]
+                    [key p]))]
+    (mapv (fn [[key p]]
+            (take-index! ps key (:idx p))
+            {:kind (:kind p)
+             :delta {:cx (first key) :cz (second key) :index (:idx p)}})
+          hits)))
 
 ;; --- what holding one does -------------------------------------------------
 
@@ -247,30 +255,6 @@
           (effect! veh kind true))
       (when (= :repair name) (vehicle/repair! veh 0.45)))
     label))
-
-(defn tick!
-  "Run down the timers and do whatever the held effects do this tick.
-
-  `emit` is called with `[:fire x y z]` or `[:shock x y z]` -- powerups do not
-  reach into the fire system or the crowd themselves, because what a shock
-  hits is a gameplay question and this namespace is about what is held."
-  [ps veh tick dt emit]
-  (let [act (:active @ps)]
-    (when (seq act)
-      (doseq [[k secs] act]
-        (let [left (- secs dt)]
-          (if (pos? left)
-            (swap! ps assoc-in [:active k] left)
-            (do (swap! ps update :active dissoc k)
-                (effect! veh (index-of-name k) false)
-                ;; Belt and braces: whatever expired, put everything back. A
-                ;; missed reset here is a permanent nitro.
-                (when (empty? (:active @ps)) (vehicle/clear-boosts! veh))))))
-      (let [[x y z] (vehicle/chassis-position veh)]
-        (when (and (contains? (:active @ps) :flame) (zero? (mod tick trail-every)))
-          (emit [:fire x (- y 0.5) z trail-r trail-life]))
-        (when (and (contains? (:active @ps) :shock) (zero? (mod tick shock-every)))
-          (emit [:shock x y z shock-reach]))))))
 
 (defn- segment!
   "One straight piece of an arc, as a unit box stretched between two points."
@@ -323,6 +307,50 @@
     (swap! ps update :arcs conj {:slots slots :t0 now-s})
     nil))
 
+(def ^:private crackle-arcs 3)
+(def ^:private crackle-r 3.4)
+
+(defn- crackle!
+  "Short bolts to the ground around the car, so a held shock is visible whether
+  or not there is anything near enough to kill."
+  [ps x y z now-s]
+  (dotimes [i crackle-arcs]
+    (let [a (* 6.283185307179586 (/ (+ i (* 3.0 (mod now-s 1.0))) crackle-arcs))
+          d (* crackle-r (+ 0.55 (* 0.45 (mod (* 7.3 now-s) 1.0))))]
+      (arc! ps [x (+ y 0.4) z]
+            [(+ x (* d (js/Math.cos a))) (- y 0.5) (+ z (* d (js/Math.sin a)))]
+            now-s))))
+
+(defn tick!
+  "Run down the timers and do whatever the held effects do this tick.
+
+  `emit` is called with `[:fire x y z]` or `[:shock x y z]` -- powerups do not
+  reach into the fire system or the crowd themselves, because what a shock
+  hits is a gameplay question and this namespace is about what is held."
+  [ps veh tick dt emit]
+  (let [act (:active @ps)]
+    (when (seq act)
+      (doseq [[k secs] act]
+        (let [left (- secs dt)]
+          (if (pos? left)
+            (swap! ps assoc-in [:active k] left)
+            (do (swap! ps update :active dissoc k)
+                (effect! veh (index-of-name k) false)
+                ;; Belt and braces: whatever expired, put everything back. A
+                ;; missed reset here is a permanent nitro.
+                (when (empty? (:active @ps)) (vehicle/clear-boosts! veh))))))
+      (let [[x y z] (vehicle/chassis-position veh)]
+        (when (and (contains? (:active @ps) :flame) (zero? (mod tick trail-every)))
+          (emit [:fire x (- y 0.5) z trail-r trail-life]))
+        (when (and (contains? (:active @ps) :shock) (zero? (mod tick shock-every)))
+          ;; A few bolts to nothing in particular, before anything is asked
+          ;; about what was hit. The shock only existed on the frames it
+          ;; happened to kill something, so on an empty street it was invisible
+          ;; and indistinguishable from not having picked it up -- which is
+          ;; most of why it read as missing. Now it is visibly armed.
+          (crackle! ps x y z (* 0.001 (js/Date.now)))
+          (emit [:shock x y z shock-reach]))))))
+
 (defn- age-arcs!
   "Release every bolt that has burnt out. Returns true if anything changed, so
   `sync!` only re-uploads the buffer on the frames a bolt appeared or went."
@@ -336,6 +364,18 @@
       true)))
 
 (defn active [ps] (:active @ps))
+
+(defn bars
+  "What is held, as `[[name seconds-left fraction] ...]`.
+
+  The fraction is worked out here because only this namespace knows how long
+  each one runs for. The cluster used to divide by a hardcoded fourteen, which
+  was right for exactly one power-up and drew a bar over full for the rest the
+  moment the durations changed."
+  [ps]
+  (vec (for [[k left] (:active @ps)
+             :let [full (:secs (nth kinds (index-of-name k)) 1.0)]]
+         [k left (max 0.0 (min 1.0 (/ left full)))])))
 
 (defn label-for [k]
   (:label (first (filter #(= k (:name %)) kinds))))

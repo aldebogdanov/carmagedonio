@@ -21,7 +21,10 @@
          :wrecks    0
          :coins     0
          :nuggets   0
-         :state     :running}))
+         :state     :running
+         ;; Why it ended, for the cluster to say. Not part of the submitted
+         ;; run: the rules only know :won and :lost, and a wreck is a loss.
+         :ending    nil}))
 
 (defn- award! [game kind]
   (let [{:keys [points seconds]} (get scoring kind)]
@@ -37,6 +40,16 @@
 (defn coin-taken!   [game] (award! game :coin)   (swap! game update :coins inc))
 (defn nugget-taken! [game] (award! game :nugget) (swap! game update :nuggets inc))
 
+(defn wrecked!
+  "The player's car is finished. Ends the run.
+
+  A car at 100% damage used to keep driving, which made the damage bar an
+  instrument that measured nothing: it filled up and then the game carried on
+  exactly as before."
+  [game]
+  (when (= :running (:state @game))
+    (swap! game assoc :state :lost :ending :wreck)))
+
 (defn tick!
   "Advance the clock by one simulation tick. Runs off the fixed timestep rather
   than wall time so a stutter cannot cost the player seconds."
@@ -49,16 +62,17 @@
                          (assoc :remaining (max 0.0 r))
                          (update :elapsed + k/dt))]
                (cond
-                 (rules/won? g)              (assoc g :state :won)
-                 (<= r 0.0)                  (assoc g :state :lost)
+                 (rules/won? g)              (assoc g :state :won :ending :target)
+                 (<= r 0.0)                  (assoc g :state :lost :ending :time)
                  :else g))))))
 
 (defn running? [game] (= :running (:state @game)))
 
 (defn summary [game]
   (let [{:keys [remaining score peds props cars wrecks coins nuggets state
-                elapsed]} @game]
+                ending elapsed]} @game]
     {:state state
+     :ending ending
      :remaining remaining
      :elapsed elapsed
      :score score

@@ -46,6 +46,10 @@
 
 ;; What a gas cylinder and a tanker are worth, as fire.
 (def ^:private barrel-fire {:r 4.2 :life 12.0 :seeds 0 :blast 9.0 :push 2400.0})
+;; What is left when the player's own car is finished. Between a barrel and a
+;; tanker: a written-off car is worth an explosion, but not the one that takes
+;; the street with it.
+(def ^:private player-fire {:r 6.0 :life 14.0 :seeds 1 :blast 11.0 :push 4200.0})
 (def ^:private tanker-fire {:r 8.5 :life 25.0 :seeds 2 :blast 16.0 :push 7000.0})
 ;; Damage per second at the centre of a pool. Ten seconds parked in one writes
 ;; a car off; driving through the edge of one costs a few per cent.
@@ -139,6 +143,17 @@
           (traffic/drive! traffic-state k/dt (js/Date.now))
           (peds/walk! peds-state tick (sim/player-x sim) (sim/player-z sim))
           (game/tick! game)
+          ;; A car at 100% damage used to keep driving, which made the damage
+          ;; bar an instrument that measured nothing. It ends the run now, and
+          ;; it goes up on the way out.
+          (when (and (game/running? game)
+                     (>= (vehicle/damage (sim/player-vehicle sim)) 1.0))
+            (let [{:keys [r life seeds blast push]} player-fire]
+              (fire/ignite! fire-state (sim/player-x sim) (sim/player-y sim)
+                            (sim/player-z sim) r life :player seeds)
+              (sim/blast! sim [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
+                          blast push))
+            (game/wrecked! game))
           ;; Weather, and what it is doing to the road under every car. The
           ;; grip multiplier is pushed onto the vehicles rather than read by
           ;; them, so nothing in the tyre model has to know the sky exists.
@@ -163,9 +178,9 @@
                                 (:r barrel-fire) (:life barrel-fire) owner)))))
           ;; Anything driven over, and whatever holding it does this tick.
           (let [v (sim/player-vehicle sim)]
-            (when-let [{:keys [kind delta]} (powerups/collect! powerups-state
-                                                              (sim/player-x sim)
-                                                              (sim/player-z sim))]
+            (doseq [{:keys [kind delta]} (powerups/collect! powerups-state
+                                                            (sim/player-x sim)
+                                                            (sim/player-z sim))]
               (cockpit/flash! cock (powerups/apply! powerups-state v kind))
               ;; Two of them are not power-ups at all, they are points. The
               ;; score is recomputed from this tally by the rules and checked
@@ -299,7 +314,7 @@
              :handbrake? (input/handbrake-held?)
              :lights?    (lights-on? weather-state)
              :online     (remote/count-players remotes)
-             :powerups   (powerups/active powerups-state)
+             :powerups   (powerups/bars powerups-state)
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
              :car        (cars/display-name kind)})))

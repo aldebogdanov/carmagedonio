@@ -157,8 +157,8 @@
   "Repaint the cluster. Called every frame: it is a speedometer."
   [{:keys [^js ctx flash]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
-           rivals wheels drift? handbrake? lights? online car state powerups
-           weather grip]}]
+           rivals wheels drift? handbrake? lights? online car state ending
+           powerups weather grip]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -225,14 +225,18 @@
     ;; Whatever is being held, and for how much longer. Bars rather than
     ;; numbers: what matters is that it is about to run out, not that it has
     ;; 3.4 seconds left.
-    (let [ps (seq powerups)]
+    ;; Three fit across the cluster. A fourth would be drawn off the edge of
+    ;; the canvas, so the oldest is dropped rather than silently vanishing --
+    ;; and holding four at once is rare enough that this is a rule, not a
+    ;; compromise.
+    (let [ps (take 3 powerups)]
       (dotimes [i (count ps)]
-        (let [[k secs] (nth ps i)
+        (let [[k _ frac] (nth ps i)
               x (+ 300 (* i 86))]
           (set! (.-fillStyle ctx) "rgba(232,228,216,0.10)")
           (.fillRect ctx x 128 78 12)
           (set! (.-fillStyle ctx) amber)
-          (.fillRect ctx x 128 (* 78 (min 1.0 (/ secs 14.0))) 12)
+          (.fillRect ctx x 128 (* 78 frac) 12)
           (text! ctx (or (powerups-label k) (str k)) (+ x 39) 137
                  (str "600 8px " mono) "#12141a" "center"))))
 
@@ -240,10 +244,24 @@
       (when (> until (js/Date.now))
         (text! ctx text 74 148 (str "700 13px " mono) amber "center")))
 
-    (case state
-      :won  (text! ctx "WON" (- w 14) 140 (str "700 16px " mono) good "right")
-      :lost (text! ctx "OUT OF TIME" (- w 14) 140 (str "700 16px " mono) bad "right")
-      nil)))
+    ;; A run that has ended used to say so in twelve-point text in the corner,
+    ;; while the clock simply stopped and the car kept driving -- which reads
+    ;; as the timer having broken rather than as the run being over. It takes
+    ;; the whole cluster now.
+    (when (not= :running state)
+      (set! (.-fillStyle ctx) "rgba(14,16,20,0.82)")
+      (.beginPath ctx)
+      (.roundRect ctx 0 0 w h 10)
+      (.fill ctx)
+      (text! ctx (case ending
+                   :target "TARGET REACHED"
+                   :wreck  "WRECKED"
+                   "OUT OF TIME")
+             (/ w 2) 66 (str "700 30px " mono)
+             (if (= :won state) good bad) "center")
+      (text! ctx (str score " points \u00b7 " peds " of " target " pedestrians")
+             (/ w 2) 92 (str "600 13px " mono) ink "center")
+      (text! ctx "reload for a new run" (/ w 2) 114 (str "11px " mono) dim "center"))))
 
 (defn state-of
   "Everything the cluster needs, as one value.
@@ -253,7 +271,7 @@
   its wheels."
   [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
            lights? online car powerups weather grip]}]
-  (let [{:keys [remaining score peds state]} game]
+  (let [{:keys [remaining score peds state ending]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
      ;; An automatic has three positions and the driver only ever needs to know
@@ -275,4 +293,5 @@
      :weather   weather
      :grip      grip
      :car       car
-     :state     state}))
+     :state     state
+     :ending    ending}))
