@@ -153,9 +153,12 @@
       (is (= "no-store" (get-in r [:headers "cache-control"])))
       (is (string? (get-in r [:headers "etag"])))))
   (testing "and the validator actually validates: a second visit is a 304"
-    (let [etag (get-in (*handler* {:request-method :get :uri "/js/main.js"})
+    ;; `/index.html` through the resource handler, not `/js/main.js`: the
+    ;; compiled client is a build artifact and does not exist when the JVM
+    ;; tests run in CI, so asserting against it passed here and 404ed there.
+    (let [etag (get-in (*handler* {:request-method :get :uri "/index.html"})
                        [:headers "etag"])
-          again (*handler* {:request-method :get :uri "/js/main.js"
+          again (*handler* {:request-method :get :uri "/index.html"
                             :headers {"if-none-match" etag}})]
       (is (= 304 (:status again)))))
   (testing "API answers change without the build changing, so they are not tagged"
@@ -176,13 +179,15 @@
       (testing "and the page itself is never kept, because it is the only thing
                 that knows which build to ask for"
         (is (= "no-store" (get headers "cache-control"))))
+      ;; Again `/index.html`, and for the same reason: the rule is about the
+      ;; query string, not about which file is behind it.
       (testing "an asset asked for by this build's tag can never change"
         (is (= "public, max-age=31536000, immutable"
-               (get-in (*handler* {:request-method :get :uri "/js/main.js"
+               (get-in (*handler* {:request-method :get :uri "/index.html"
                                    :query-string (str "v=" tag)})
                        [:headers "cache-control"]))))
       (testing "one asked for without it, or with an old one, is revalidated"
         (is (= "no-cache"
-               (get-in (*handler* {:request-method :get :uri "/js/main.js"
+               (get-in (*handler* {:request-method :get :uri "/index.html"
                                    :query-string "v=stale"})
                        [:headers "cache-control"])))))))
