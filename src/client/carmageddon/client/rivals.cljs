@@ -262,7 +262,11 @@
                   [x _ z] (vehicle/chassis-position v)
                   [fx _ fz] (vehicle/heading v)]
               {:x x :z z
-               :heading (js/Math.atan2 fx fz)
+               ;; The direction it is pointing, not a map bearing. Which way is
+               ;; up on a map is the map's business, and the last time this
+               ;; namespace had an opinion about it every arrowhead pointed
+               ;; backwards.
+               :fx fx :fz fz
                :out (contains? @wrecked i)
                :damage (vehicle/damage v)}))
           (range (count controllers)))))

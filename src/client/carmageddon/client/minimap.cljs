@@ -121,10 +121,27 @@
 
 (def ^:private compass ["N" "NE" "E" "SE" "S" "SW" "W" "NW"])
 
+(defn heading-of
+  "A world direction as a map bearing: 0 is north, and it grows the way the
+  canvas rotates.
+
+  North is -Z and the map is drawn north-up, so world +X is screen right and
+  world +Z is screen *down* -- the canvas y axis points the other way from the
+  world z axis. A bearing in this convention can be handed straight to
+  `ctx.rotate`, because rotating a triangle whose tip is at (0, -1) by it lands
+  the tip on (fx, fz), which is where the car is pointing.
+
+  Both arrows on this map were built as `atan2(fx, fz)` and then rotated by its
+  negative, which is this value plus half a turn: every arrowhead pointed
+  exactly backwards. It went unnoticed on the rivals because nobody knows which
+  way a rival is supposed to be facing."
+  [fx fz]
+  (js/Math.atan2 fx (- fz)))
+
 (defn- bearing-to
   "Which way to go, in the eight directions anyone actually uses. North is -Z."
   [dx dz]
-  (let [a (js/Math.atan2 dx (- dz))
+  (let [a (heading-of dx dz)
         i (mod (js/Math.round (/ (* 8 a) (* 2 js/Math.PI))) 8)]
     (nth compass i)))
 
@@ -202,7 +219,7 @@
   (let [c (* 0.5 size)]
     (.save ctx)
     (.translate ctx c c)
-    (.rotate ctx (- heading))
+    (.rotate ctx heading)
     (.beginPath ctx)
     (.moveTo ctx 0 -11)
     (.lineTo ctx 7 8)
@@ -252,7 +269,7 @@
   [{:keys [^js ctx]} px pz per-m size blips]
   (let [half (* 0.5 (/ size per-m))
         x0 (- px half) z0 (- pz half)]
-    (doseq [{:keys [x z heading out damage]} blips
+    (doseq [{:keys [x z fx fz out damage]} blips
             :let [sx (* (- x x0) per-m)
                   sz (* (- z z0) per-m)]
             ;; A rival is leashed long before it could leave the map, but a
@@ -268,7 +285,7 @@
             (.moveTo ctx -4 -4) (.lineTo ctx 4 4)
             (.moveTo ctx 4 -4) (.lineTo ctx -4 4)
             (.stroke ctx))
-        (do (.rotate ctx (- heading))
+        (do (.rotate ctx (heading-of fx fz))
             (.beginPath ctx)
             (.moveTo ctx 0 -8)
             (.lineTo ctx 5.5 6)

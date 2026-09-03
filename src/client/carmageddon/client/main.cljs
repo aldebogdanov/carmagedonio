@@ -331,7 +331,7 @@
         ;; sixty times a second for a map, and it rasterises 169 cells.
         (let [[fx _ fz] (sim/forward-vector sim)]
           (minimap/draw! minimap (sim/player-x sim) (sim/player-z sim)
-                         (js/Math.atan2 fx fz)
+                         (minimap/heading-of fx fz)
                          (when (minimap/rivals-shown? minimap)
                            (rivals/blips rvs sim))
                          (remote/blips remotes)))

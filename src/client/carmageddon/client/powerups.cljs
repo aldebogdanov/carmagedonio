@@ -410,9 +410,17 @@
     (doseq [[_ {:keys [solid glow]}] pools]
       (fig/flush! solid)
       (fig/flush! glow)))
-  ;; Bolts are written once, when they are struck. All this has to do is take
-  ;; away the ones that have burnt out -- and only tell the GPU when one has.
-  (when (age-arcs! ps now-s) (fig/flush! (:arc-pool @ps))))
+  ;; Bolts are written when they are struck and hidden when they burn out, and
+  ;; the GPU has to be told about both.
+  ;;
+  ;; This flushed only on expiry, on the theory that a bolt is written once and
+  ;; then does nothing. It is written once -- into a buffer nobody uploaded. By
+  ;; the time an expiry forced a flush the same bolt had already been hidden
+  ;; again, so the shock killed things and drew absolutely nothing, which is
+  ;; exactly what it was reported as doing.
+  (let [expired? (age-arcs! ps now-s)]
+    (when (or expired? (seq (:arcs @ps)))
+      (fig/flush! (:arc-pool @ps)))))
 
 (defn stats [ps]
   {:live (reduce + (map count (vals (:chunks @ps))))
