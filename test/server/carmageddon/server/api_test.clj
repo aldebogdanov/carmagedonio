@@ -148,14 +148,41 @@
       (is (= 200 (:status r)))
       (is (nil? (get-in r [:headers "last-modified"]))
           "the epoch must not be offered as a validator")
-      (is (= "no-cache" (get-in r [:headers "cache-control"])))
+      ;; The page is `no-store` -- stronger than `no-cache`, and deliberately:
+      ;; it is the only thing that knows which build's assets to ask for.
+      (is (= "no-store" (get-in r [:headers "cache-control"])))
       (is (string? (get-in r [:headers "etag"])))))
   (testing "and the validator actually validates: a second visit is a 304"
-    (let [etag (get-in (*handler* {:request-method :get :uri "/"}) [:headers "etag"])
-          again (*handler* {:request-method :get :uri "/"
+    (let [etag (get-in (*handler* {:request-method :get :uri "/js/main.js"})
+                       [:headers "etag"])
+          again (*handler* {:request-method :get :uri "/js/main.js"
                             :headers {"if-none-match" etag}})]
       (is (= 304 (:status again)))))
   (testing "API answers change without the build changing, so they are not tagged"
     (let [r (*handler* {:request-method :get :uri "/api/health"})]
       (is (= 200 (:status r)))
       (is (nil? (get-in r [:headers "etag"]))))))
+
+(deftest the-page-names-the-build-it-wants
+  (testing "a browser holding an old copy under the pre-fix heuristic rule
+            never asks again -- no conditional request, no 304, it just serves
+            what it has. A URL it has never seen is the only thing that reaches
+            through that, so every deploy changes the asset URLs."
+    (let [{:keys [status body headers]} (*handler* {:request-method :get :uri "/"})
+          tag (second (re-find #"/js/main\.js\?v=([0-9a-z-]+)" body))]
+      (is (= 200 status))
+      (is (some? tag) (str "no build tag in the page: " (subs body 0 (min 200 (count body)))))
+      (is (re-find #"/js/shared\.js\?v=" body))
+      (testing "and the page itself is never kept, because it is the only thing
+                that knows which build to ask for"
+        (is (= "no-store" (get headers "cache-control"))))
+      (testing "an asset asked for by this build's tag can never change"
+        (is (= "public, max-age=31536000, immutable"
+               (get-in (*handler* {:request-method :get :uri "/js/main.js"
+                                   :query-string (str "v=" tag)})
+                       [:headers "cache-control"]))))
+      (testing "one asked for without it, or with an old one, is revalidated"
+        (is (= "no-cache"
+               (get-in (*handler* {:request-method :get :uri "/js/main.js"
+                                   :query-string "v=stale"})
+                       [:headers "cache-control"])))))))

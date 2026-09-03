@@ -155,15 +155,21 @@
                 (when (= (:world-id other) (:world-id p))
                   (send-frame! (:ch other) (wire/encode-bye (:id p)))))))})))))
 
-(defn routes [st sessions]
+(defn routes [st sessions page]
   [["/"
     ;; Served, not redirected. The resource handler's answer for "/" is a 302
     ;; to /index.html built without the query string, so an invite link --
     ;; http://host/?world=w_6d562e17 -- arrived at the lobby with the room it
     ;; names thrown away. Which is the entire purpose of the link.
+    ;;
+    ;; `no-store` rather than `no-cache`: the page is five kilobytes, it is the
+    ;; only thing that knows which build's assets to ask for, and it is exactly
+    ;; the document whose staleness cost a deploy. Nothing is gained by letting
+    ;; a browser keep a copy of it.
     {:get (fn [_]
-            (-> (resp/resource-response "public/index.html")
-                (resp/content-type "text/html; charset=utf-8")))}]
+            (-> (resp/response (page))
+                (resp/content-type "text/html; charset=utf-8")
+                (resp/header "cache-control" "no-store")))}]
 
    ["/api/health"
     {:get (fn [_] (edn-response {:ok true :service "carmagedonio"}))}]
@@ -300,6 +306,25 @@
   (let [u (or uri "")]
     (not (or (str/starts-with? u "/api") (str/starts-with? u "/ws")))))
 
+(defn- index-html
+  "The page, with the build tag stitched into the script URLs.
+
+  `no-cache` fixed the *next* deploy and could not fix the last one, because a
+  browser holding a copy under the old heuristic rule never asks again. It does
+  not send a conditional request that could be answered with a 304; it simply
+  serves what it has, for as long as it decided to. Safari held on for days
+  after Firefox had let go.
+
+  A URL a browser has never seen is the one thing that reaches through a cache
+  that has stopped asking. Every deploy changes the tag, so every asset URL
+  changes with it, and a stale bundle cannot be served for a page that no
+  longer references it."
+  [tag]
+  (some-> (io/resource "public/index.html")
+          slurp
+          (str/replace "/js/shared.js" (str "/js/shared.js?v=" tag))
+          (str/replace "/js/main.js" (str "/js/main.js?v=" tag))))
+
 (defn wrap-asset-cache
   "Give static responses an honest validator and take away the dishonest one.
 
@@ -312,10 +337,21 @@
     (fn [req]
       (let [response (handler req)]
         (if (and response (= 200 (:status response)) (cacheable? (:uri req)))
-          (-> response
-              (update :headers dissoc "last-modified" "Last-Modified")
-              (assoc-in [:headers "etag"] etag)
-              (assoc-in [:headers "cache-control"] "no-cache"))
+          (cond-> (-> response
+                      (update :headers dissoc "last-modified" "Last-Modified")
+                      (assoc-in [:headers "etag"] etag))
+            ;; A route that has already said what it wants keeps it. The page
+            ;; asks for `no-store` and means it.
+            (nil? (get-in response [:headers "cache-control"]))
+            (assoc-in [:headers "cache-control"]
+                      ;; An asset asked for by this build's tag can never
+                      ;; change, because the next build asks for a different
+                      ;; URL. That is worth a year and no round trip at all.
+                      ;; Anything else -- an old tag, or a direct hit on
+                      ;; /js/main.js -- still has to be revalidated.
+                      (if (= (:query-string req) (str "v=" tag))
+                        "public, max-age=31536000, immutable"
+                        "no-cache")))
           response)))))
 
 (defn handler
@@ -323,11 +359,15 @@
   ([st sessions]
    ;; `wrap-not-modified` sits outside, so it sees the ETag the wrapper below
    ;; has just set and can answer the conditional request with a 304.
-   (not-modified/wrap-not-modified
-    (wrap-asset-cache
-     (ring/ring-handler
-      (ring/router (routes st sessions))
-      (ring/routes
-       (ring/create-resource-handler {:path "/" :root "public"})
-       (ring/create-default-handler)))
-     (build-tag)))))
+   (let [tag (build-tag)
+         ;; Read and rewritten once, at boot: it is the same five kilobytes for
+         ;; every visitor and the tag cannot change while the process lives.
+         html (index-html tag)]
+     (not-modified/wrap-not-modified
+      (wrap-asset-cache
+       (ring/ring-handler
+        (ring/router (routes st sessions (constantly html)))
+        (ring/routes
+         (ring/create-resource-handler {:path "/" :root "public"})
+         (ring/create-default-handler)))
+       tag)))))
