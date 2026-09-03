@@ -1327,3 +1327,49 @@
       (is (seq errs))
       (is (< (/ (reduce + errs) (count errs)) 0.15) "mean")
       (is (< (apply max errs) 1.2) "worst case, at a kerb"))))
+
+;; --- roads that carry on ----------------------------------------------------
+
+(defn- edge-present
+  "Which lattice edges exist in a box, as a set of [gx gz along-x?]."
+  [x1 z1]
+  (set (map (juxt :gx :gz :along-x?) (w/streets-in-bounds seed 0.0 0.0 x1 z1))))
+
+(deftest streets-run-whole-stretches-rather-than-stubs
+  (testing "a street either crosses the whole stretch between two junctions of
+            a higher class or is not there at all -- a per-edge coin leaves
+            sixty-four metres of tarmac between two fields"
+    (let [present (edge-present 2400.0 2400.0)
+          ;; A collector line is a multiple of four that is not a multiple of
+          ;; eight; its runs are the eight edges between two arterials. A local
+          ;; line is anything else, and its runs are four edges long.
+          runs (for [line (range 1 33)
+                     :let [collector? (and (zero? (mod line 4)) (pos? (mod line 8)))
+                           span (if collector? 8 4)]
+                     :when (pos? (mod line 8))
+                     along-x? [true false]
+                     run (range 0 (quot 32 span))
+                     :let [edges (for [i (range (* run span) (* (inc run) span))]
+                                   (contains? present
+                                              (if along-x? [i line true] [line i false])))]]
+                 [line run (count (filter true? edges)) span])]
+      (is (seq runs))
+      (doseq [[line run n span] runs]
+        (is (or (zero? n) (= n span))
+            (str "line " line " run " run " is " n " of " span " edges"))))))
+
+(deftest country-roads-exist-at-all
+  (testing "the country used to be arterials every 512 m and nothing else"
+    (let [[cx cz] (densest-chunk (fn [u _] (< u 0.06)))
+          lines (w/chunk-lines seed cx cz)
+          classes (frequencies (map :class (w/streets-in-bounds
+                                            seed
+                                            (* (- cx 3) k/chunk-size)
+                                            (* (- cz 3) k/chunk-size)
+                                            (* (+ cx 4) k/chunk-size)
+                                            (* (+ cz 4) k/chunk-size))))]
+      (is (seq lines))
+      (is (pos? (:arterial classes 0)))
+      (is (pos? (:collector classes 0))
+          (str "no through roads in open country: " classes)))))
+
