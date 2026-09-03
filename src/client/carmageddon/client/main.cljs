@@ -7,6 +7,7 @@
             [carmageddon.client.buildings :as buildings]
             [carmageddon.client.camera :as camera]
             [carmageddon.client.chunks :as chunks]
+            [carmageddon.client.events :as events]
             [carmageddon.client.cockpit :as cockpit]
             [carmageddon.client.fire :as fire]
             [carmageddon.client.clock :as clock]
@@ -50,6 +51,21 @@
 ;; tanker: a written-off car is worth an explosion, but not the one that takes
 ;; the street with it.
 (def ^:private player-fire {:r 6.0 :life 14.0 :seeds 1 :blast 11.0 :push 4200.0})
+
+(defn- claim-props!
+  "Score and broadcast a blast's worth of destroyed clutter. Returns the
+  volatile ones, so a chain can carry on through them.
+
+  Both explosion chains used to keep `(filter :volatile? ...)` and drop the
+  rest on the floor. The crates a barrel flattened were worth nothing, which
+  was merely stingy -- and their deltas never left this machine, which was not:
+  deltas are the only state that crosses the wire, so those crates stayed
+  standing for everybody else in the room."
+  [game transport ds]
+  (doseq [d ds]
+    (game/prop-wrecked! game)
+    (net/-send! transport (wire/encode-delta (assoc d :kind :prop))))
+  (filterv :volatile? ds))
 (def ^:private tanker-fire {:r 8.5 :life 25.0 :seeds 2 :blast 16.0 :push 7000.0})
 ;; Damage per second at the centre of a pool. Ten seconds parked in one writes
 ;; a car off; driving through the edge of one costs a few per cent.
@@ -128,7 +144,7 @@
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
                                   bridges rvs cock fire-state powerups-state
-                                  weather-state remotes]}]
+                                  weather-state remotes events]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -170,7 +186,12 @@
           (when (zero? (mod tick 30))
             (doseq [{:keys [x z r owner]} (fire/pools fire-state)
                     d (props/destroy-near! props-state x z (* 0.8 r))]
-              (game/prop-wrecked! game)
+              ;; Points only for your own fire. Every other burn path checks
+              ;; this; this one read `owner` and used it solely to attribute
+              ;; the next ignition.
+              (when (= :player owner) (game/prop-wrecked! game))
+              ;; The delta goes out either way -- the prop is gone here and
+              ;; everyone has to agree about that.
               (net/-send! transport (wire/encode-delta (assoc d :kind :prop)))
               (when (:volatile? d)
                 (let [[bx by bz] (:pos d)]
@@ -226,10 +247,15 @@
               (vehicle/add-damage! (sim/player-vehicle sim) (* burn-rate heat k/dt)))
             ;; Rivals burn too, which is what makes driving one into a pool a
             ;; tactic rather than a waste of a barrel.
-            (doseq [v (rest (sim/vehicles sim))]
-              (let [[vx _ vz] (vehicle/chassis-position v)]
-                (when-let [{:keys [heat]} (fire/heat-at fire-state vx vz)]
-                  (vehicle/add-damage! v (* burn-rate heat k/dt))))))
+            (let [vs (sim/vehicles sim)]
+              (doseq [i (range 1 (count vs))]
+                (let [v (nth vs i)
+                      [vx _ vz] (vehicle/chassis-position v)]
+                  (when-let [{:keys [heat owner]} (fire/heat-at fire-state vx vz)]
+                    ;; Burning a rival to death is a wreck like any other, and
+                    ;; it belongs to whoever lit the fire.
+                    (rivals/blame! rvs (dec i) owner (js/Date.now))
+                    (vehicle/add-damage! v (* burn-rate heat k/dt)))))))
           (doseq [[d owner] (peds/burn! peds-state fire-state tick)]
             (when (= :player owner) (game/ped-killed! game))
             (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))
@@ -253,8 +279,9 @@
           ;; but only acts after a few seconds out of contact.
           (let [[fx _ fz] (sim/forward-vector sim)]
             (rivals/leash! rvs sim (js/Math.atan2 fx fz)))
-          (dotimes [_ (rivals/score-wrecks! rvs sim)]
-            (game/opponent-wrecked! game))
+          ;; Only the ones the player actually put out of the race.
+          (doseq [{:keys [by]} (rivals/score-wrecks! rvs sim (js/Date.now))]
+            (when (= :player by) (game/opponent-wrecked! game)))
           ;; Outbound snapshot rate is deliberately independent of both sim and
           ;; render rate.
           (when (zero? (mod tick snap-every))
@@ -329,6 +356,7 @@
         (reset! stats s)
         ;; The map redraws at HUD rate. Twice a second is indistinguishable from
         ;; sixty times a second for a map, and it rasterises 169 cells.
+        (events/sync! events (js/Date.now))
         (let [[fx _ fz] (sim/forward-vector sim)]
           (minimap/draw! minimap (sim/player-x sim) (sim/player-z sim)
                          (minimap/heading-of fx fz)
@@ -392,7 +420,9 @@
         ;; trying it without one -- the flag changes behaviour, not generation,
         ;; so the same seed makes the same city either way.
         pd        (peds/create (:world @s) (:scene rs) ov mode)
-        gm        (game/create)
+        ev        (events/create!)
+        gm        (game/create (fn [kind points seconds]
+                                (events/note! ev kind points seconds)))
         rvs       (rivals/create seed opponent-count)
         mgr       (chunks/create
                    {:seed      seed
@@ -476,8 +506,9 @@
                                                (let [{:keys [r life blast push]} barrel-fire]
                                                  (fire/ignite! fr bx by bz r life :player)
                                                  (sim/blast! s [bx by bz] blast push)
-                                                 (filter :volatile?
-                                                         (props/destroy-near! ps bx bz blast))))
+                                                 (claim-props!
+                                                  gm transport
+                                                  (props/destroy-near! ps bx bz blast))))
                                              seeds))
                                        (inc depth)))))))
                             (when (peds/ped? pd hit)
@@ -503,8 +534,10 @@
                                       ;; not a whole intact lorry lying in its
                                       ;; own fireball.
                                       (traffic/shatter! tf hit (* 0.001 (js/Date.now)))
-                                      (doseq [{:keys [pos]} (filter :volatile?
-                                                                    (props/destroy-near! ps bx bz blast))]
+                                      (doseq [{:keys [pos]}
+                                              (claim-props!
+                                               gm transport
+                                               (props/destroy-near! ps bx bz blast))]
                                         (fire/ignite! fr (nth pos 0) (nth pos 1) (nth pos 2)
                                                       (:r barrel-fire) (:life barrel-fire)
                                                       :player)))))))
@@ -530,6 +563,14 @@
                           (let [veh (nth (sim/vehicles s) vi)]
                             (when (> (js/Math.abs (vehicle/forward-speed veh))
                                      min-smash-speed)
+                              ;; Who hit whom. A rival the player has just put a
+                              ;; dent in is the player's to finish; a rival that
+                              ;; drives itself into a wall is nobody's. Recorded
+                              ;; where the damage is actually applied, so it is
+                              ;; a consequence of the hit rather than a guess
+                              ;; made afterwards about who was nearest.
+                              (when (and (pos? vi) (= 0 (sim/vehicle-of-collider s hit)))
+                                (rivals/blame! rvs (dec vi) :player (js/Date.now)))
                               ;; Pedestrians and clutter barely scratch the
                               ;; paint; terrain, buildings and other cars hit
                               ;; properly. Capped per event so one scrape spread
@@ -562,14 +603,14 @@
                                                  :birds-state bd
                                                  :overlay ov
                                                  :minimap mm
-                                                 :peds-state pd :game gm
+                                                 :peds-state pd :game gm :events ev
                                                  :rvs rvs
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
                                  :landmarks lm :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
                                  :overlay ov :minimap mm :cockpit ck :game gm
-                                 :rivals rvs :remotes remotes
+                                 :rivals rvs :remotes remotes :events ev
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"
                                   (:live (props/stats ps)) "props,"

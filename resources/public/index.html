@@ -13,7 +13,25 @@
         color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6);
         pointer-events: none; user-select: none;
       }
+      /* Both text blocks stop short of the log on the right rather than
+         running under it. */
+      #hud, #help { max-width: calc(100% - 250px); }
       #hud  { top: 12px; opacity: .55; }
+      /* What just happened and what it was worth. Top right: the map owns the
+         bottom right, the instruments the bottom left, and the two text blocks
+         the top left. */
+      #events {
+        position: fixed; right: 12px; top: 12px; z-index: 3;
+        width: 220px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        pointer-events: none; user-select: none;
+      }
+      #events .ev {
+        display: flex; justify-content: space-between; gap: 10px;
+        color: #e8e4d8; text-shadow: 0 1px 3px rgba(0,0,0,.85);
+      }
+      #events .ev.fade { opacity: .4; }
+      #events .ev .pts { color: #f0a830; font-weight: 600; white-space: nowrap; }
       /* Both text blocks live top-left now. The bottom of the screen belongs
          to the instruments on one side and the map on the other, and at 1280
          wide a centred cluster ran straight into the map. */

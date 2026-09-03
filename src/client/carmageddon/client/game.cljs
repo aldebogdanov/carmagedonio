@@ -11,8 +11,16 @@
 
 (def ^:private scoring rules/scoring)
 
-(defn create []
-  (atom {:remaining rules/start-seconds
+(defn create
+  "`on-award` is called with [kind points seconds] every time anything scores.
+
+  One hook rather than a call at each scoring site: `award!` is already the
+  single funnel every path goes through, so anything hung here cannot miss an
+  event or disagree with the score about what one was worth."
+  ([] (create nil))
+  ([on-award]
+  (atom {:on-award on-award
+         :remaining rules/start-seconds
          :elapsed   0.0
          :score     0
          :peds      0
@@ -24,14 +32,15 @@
          :state     :running
          ;; Why it ended, for the cluster to say. Not part of the submitted
          ;; run: the rules only know :won and :lost, and a wreck is a loss.
-         :ending    nil}))
+         :ending    nil})))
 
 (defn- award! [game kind]
   (let [{:keys [points seconds]} (get scoring kind)]
     (swap! game (fn [g]
                   (-> g
                       (update :score + points)
-                      (update :remaining + seconds))))))
+                      (update :remaining + seconds))))
+    (when-let [f (:on-award @game)] (f kind points seconds))))
 
 (defn ped-killed!  [game] (award! game :ped)  (swap! game update :peds inc))
 (defn car-wrecked! [game] (award! game :car)  (swap! game update :cars inc))

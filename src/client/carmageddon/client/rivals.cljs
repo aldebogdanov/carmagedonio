@@ -69,7 +69,19 @@
    ;; Nobody drives like anybody else. Derived from the index rather than
    ;; drawn, so a rival behaves the same way every time you meet it.
    :nerve       (mapv #(+ 0.75 (* 0.5 (mod (* 0.6180339 (inc %)) 1.0))) (range n))
-   :wrecked     (atom #{})})
+   :wrecked     (atom #{})
+   ;; Who last did a rival real damage, and when: `{i [by ms]}`.
+   ;;
+   ;; Nine hundred points went to whoever happened to be watching when a
+   ;; rival's damage crossed the line, so a rival that drove itself into a wall
+   ;; paid the player. A wreck is worth more than everything else in the game
+   ;; put together and it was the one thing nobody had to earn.
+   :blame       (atom {})})
+
+;; How long a hit stays yours. Long enough that a rival you have worked over
+;; and then lost sight of is still your wreck when it finally goes; short
+;; enough that a graze five minutes ago is not.
+(def ^:private blame-window 12000)
 
 (def ^:const mode-approach 0)
 (def ^:const mode-charge 1)
@@ -239,18 +251,31 @@
             (let [{:keys [pos yaw]} (respawn-spot seed px pz heading)]
               (sim/place-vehicle! sim (inc i) pos yaw))))))))
 
+(defn blame!
+  "Remember who last did rival `i` real damage.
+
+  Called from wherever damage is actually applied, so the record is a
+  consequence of the hit rather than a guess made afterwards from who was
+  nearest."
+  [{:keys [blame]} i by now-ms]
+  (swap! blame assoc i [by now-ms]))
+
 (defn score-wrecks!
-  "A rival past the damage threshold is out of the race and worth points, once.
-  Returns how many newly wrecked, so the caller can score them."
-  [{:keys [controllers wrecked]} sim]
+  "Rivals that have just gone past the damage threshold, as
+  `[{:index i :by who} ...]` -- once each.
+
+  `:by` is whoever last hurt it inside the blame window, or nil for a rival
+  that wrecked itself. The caller scores its own."
+  [{:keys [controllers wrecked blame]} sim now-ms]
   (let [vs (sim/vehicles sim)]
-    (reduce (fn [n i]
-              (if (and (not (contains? @wrecked i))
-                       (> (vehicle/damage (nth vs (inc i))) wreck-damage))
-                (do (swap! wrecked conj i) (inc n))
-                n))
-            0
-            (range (count controllers)))))
+    (vec (for [i (range (count controllers))
+               :when (and (not (contains? @wrecked i))
+                          (> (vehicle/damage (nth vs (inc i))) wreck-damage))]
+           (let [[by at] (get @blame i)]
+             (swap! wrecked conj i)
+             (swap! blame dissoc i)
+             {:index i
+              :by (when (and by (< (- now-ms at) blame-window)) by)})))))
 
 (defn blips
   "Where every rival is, for the map. `:out` ones are wrecked and no longer
