@@ -15,10 +15,13 @@
             [carmageddon.shared.rules :as rules]
             [carmageddon.shared.wire :as wire]
             [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me]
             [org.httpkit.server :as http]
             [reitit.ring :as ring]
+            [ring.middleware.not-modified :as not-modified]
             [ring.util.response :as resp]))
 
 ;; --- wire ------------------------------------------------------------------
@@ -251,11 +254,75 @@
                         (edn-response 422 {:error :run-rejected :problems problems})
                         (edn-response 201 (store/submit-run! st body)))))))}]])
 
+;; --- caching ----------------------------------------------------------------
+;;
+;; Assets come out of the uberjar, and a jar entry has no useful modification
+;; time: Ring reported `Last-Modified: Thu, 01 Jan 1970 00:00:01 GMT` on every
+;; one of them, with no `Cache-Control` at all.
+;;
+;; That combination is worse than no caching. With neither `Cache-Control` nor
+;; `Expires`, a browser falls back to heuristic freshness -- typically a tenth
+;; of the age of the document. An age of fifty-six years makes that five and a
+;; half, so a browser that had loaded the game once would not ask for it again
+;; this decade. Deploys landed correctly on the server and changed nothing at
+;; all for anyone who had already played.
+
+(defn- build-tag
+  "A short content hash of the compiled client, computed once at boot.
+
+  Every cacheable response is validated against this, so it changes exactly
+  when a new build is deployed -- which is the only moment a cached asset is
+  wrong. Falls back to the boot time when there is no compiled client on the
+  classpath, which is the case in a REPL and is still correct: a restart is
+  the coarsest thing that can change what is served."
+  []
+  (or (when-let [r (io/resource "public/js/main.js")]
+        (with-open [in (io/input-stream r)]
+          (let [digest (java.security.MessageDigest/getInstance "SHA-256")
+                buf (byte-array 65536)]
+            (loop []
+              (let [n (.read in buf)]
+                (when (pos? n)
+                  (.update digest buf 0 n)
+                  (recur))))
+            (subs (.toString (BigInteger. 1 (.digest digest)) 16) 0 12))))
+      (str "boot-" (System/currentTimeMillis))))
+
+(defn- cacheable?
+  "Static assets only. The API answers change without the build changing, and
+  the WebSocket route's response is not a response at all."
+  [uri]
+  (let [u (or uri "")]
+    (not (or (str/starts-with? u "/api") (str/starts-with? u "/ws")))))
+
+(defn wrap-asset-cache
+  "Give static responses an honest validator and take away the dishonest one.
+
+  `no-cache` does not mean 'do not cache' -- it means 'cache it, but ask before
+  using it'. With the ETag below, that ask is a conditional request answered
+  with 304 and no body, so a returning player pays one round trip rather than
+  three megabytes, and gets the new build the moment there is one."
+  [handler tag]
+  (let [etag (str "\"" tag "\"")]
+    (fn [req]
+      (let [response (handler req)]
+        (if (and response (= 200 (:status response)) (cacheable? (:uri req)))
+          (-> response
+              (update :headers dissoc "last-modified" "Last-Modified")
+              (assoc-in [:headers "etag"] etag)
+              (assoc-in [:headers "cache-control"] "no-cache"))
+          response)))))
+
 (defn handler
   ([st] (handler st (session/create)))
   ([st sessions]
-   (ring/ring-handler
-    (ring/router (routes st sessions))
-    (ring/routes
-     (ring/create-resource-handler {:path "/" :root "public"})
-     (ring/create-default-handler)))))
+   ;; `wrap-not-modified` sits outside, so it sees the ETag the wrapper below
+   ;; has just set and can answer the conditional request with a 304.
+   (not-modified/wrap-not-modified
+    (wrap-asset-cache
+     (ring/ring-handler
+      (ring/router (routes st sessions))
+      (ring/routes
+       (ring/create-resource-handler {:path "/" :root "public"})
+       (ring/create-default-handler)))
+     (build-tag)))))

@@ -138,3 +138,24 @@
     (testing "which changes behaviour, not generation -- the seed still decides
               what gets built"
       (is (int? (:seed w))))))
+
+(deftest static-assets-carry-an-honest-validator
+  (testing "a jar entry has no modification time, and Ring reported the epoch.
+            With no Cache-Control beside it a browser caches heuristically --
+            a tenth of the document's age, which for 1970 is five years -- so
+            a deploy changed nothing for anyone who had already played."
+    (let [r (*handler* {:request-method :get :uri "/"})]
+      (is (= 200 (:status r)))
+      (is (nil? (get-in r [:headers "last-modified"]))
+          "the epoch must not be offered as a validator")
+      (is (= "no-cache" (get-in r [:headers "cache-control"])))
+      (is (string? (get-in r [:headers "etag"])))))
+  (testing "and the validator actually validates: a second visit is a 304"
+    (let [etag (get-in (*handler* {:request-method :get :uri "/"}) [:headers "etag"])
+          again (*handler* {:request-method :get :uri "/"
+                            :headers {"if-none-match" etag}})]
+      (is (= 304 (:status again)))))
+  (testing "API answers change without the build changing, so they are not tagged"
+    (let [r (*handler* {:request-method :get :uri "/api/health"})]
+      (is (= 200 (:status r)))
+      (is (nil? (get-in r [:headers "etag"]))))))

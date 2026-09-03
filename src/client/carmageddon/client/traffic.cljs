@@ -20,6 +20,7 @@
   (:require ["@dimforge/rapier3d-compat" :as RAPIER]
             ["three" :as three]
             [carmageddon.client.figures :as fig]
+            [carmageddon.client.fire :as fire]
             [carmageddon.client.overlay :as overlay]
             [carmageddon.shared.worldgen :as worldgen]))
 
@@ -32,6 +33,47 @@
 (def ^:private wreck-lift 2.4)     ; m/s straight up when a car writes one off
 (def ^:private wreck-shove 0.18)   ; share of the striker's velocity handed on
 (def shock-lift 7.0)               ; and what a shock does: off its wheels entirely
+
+;; How much further a light vehicle is thrown than a heavy one.
+;;
+;; The two obvious models are both wrong. A fixed *impulse* -- what this was --
+;; makes delta-v go as 1/m, and put an 86 kg scooter seventy metres in the air.
+;; A fixed *delta-v* ignores mass entirely, and leaves a bike sitting placidly
+;; where a lorry would sit. A square root is the honest middle: a scooter goes
+;; two and a half times higher than a saloon, not twenty-five.
+(def ^:private lift-reference 2000.0)   ; kg -- roughly a saloon
+(def ^:private lift-max 2.2)
+
+;; A contact force big enough to mean a crash, and the reason two-wheelers were
+;; invincible.
+;;
+;; This was a flat 1500 N for every vehicle. Contact force scales with what is
+;; being stopped, so on a two-tonne saloon that is a solid hit and on an 86 kg
+;; scooter it is unreachable -- the scooter is shoved out of the way long
+;; before it can push back that hard, and it simply never registered being hit
+;; at all. It is now a share of the vehicle's own mass, floored so the lightest
+;; still notice a kerb, and capped so a tanker is still worth going after.
+(def ^:private smash-share 0.7)
+(def ^:private smash-floor 220.0)
+(def ^:private smash-cap 1800.0)
+
+(def ^:private burn-every 6)       ; ticks between checking the road for fire
+(def ^:private burn-lift 3.6)      ; m/s -- a car that catches fire jumps
+
+;; What is left of a vehicle that has gone up. Small dynamic boxes in the
+;; vehicle's own paint, thrown out of where it stood: a tanker that has just
+;; exploded should stop being a tanker, and until this existed it was a whole
+;; intact tanker lying in its own fireball.
+(def ^:private debris-pieces 8)
+(def ^:private debris-life 11.0)   ; seconds before the pieces are cleared away
+(def ^:private debris-density 120.0)
+;; In m/s, not N.s. A fragment weighs about three kilogrammes, and the first
+;; version threw it with the same fixed impulse a car would get -- which is a
+;; hundred metres a second, and put half the tanker in low orbit. The same
+;; mistake as the wreck impulse, one level down.
+(def ^:private debris-up 13.0)
+(def ^:private debris-out 7.0)
+(def ^:private debris-spin 3.5)
 
 (def ^:private lane 0.45)          ; share of the carriageway half-width to sit off
 (def ^:private stop-line 0.86)     ; how far along a street a red light holds a car
@@ -296,7 +338,12 @@
 (deftype Car [body collider handle key idx colour type ti meshes slots
               ^:mutable from ^:mutable to ^:mutable t ^:mutable speed
               ^:mutable leg ^:mutable alive? ^:mutable rnd ^:mutable ekey
-              ^:mutable dist ^:mutable braking? ^:mutable lamps]
+              ^:mutable dist ^:mutable braking? ^:mutable lamps
+              ;; `gone?` means the vehicle no longer exists at all -- its body
+              ;; has been removed and its slots handed back. `alive?` only
+              ;; means it has stopped driving. Everything that walks the chunk
+              ;; has to tell the two apart or it will release a slot twice.
+              ^:mutable gone?]
   ;; A record would allocate a new one of these per car per tick. Traffic is the
   ;; one place in the client where state is genuinely mutated in place, and
   ;; deftype fields are munged by the ClojureScript compiler rather than left to
@@ -385,6 +432,10 @@
          :qpos (three/Vector3.)
          :quat (three/Quaternion.)
          :one (three/Vector3. 1 1 1)
+         ;; Scratch scale for a piece of debris, which unlike a vehicle is not
+         ;; drawn at unit size.
+         :dsc (three/Vector3. 1 1 1)
+         :debris []          ; [{:body :slot :sx :sy :sz :t0}]
          ;; One placement object for the whole simulation. `place!` writes into
          ;; it rather than returning, so driving allocates nothing per tick.
          :place #js {:x 0.0 :y 0.0 :z 0.0 :h 0.0}
@@ -529,7 +580,13 @@
                           (.setFriction 0.8)
                           (.setRestitution 0.1)
                           (.setActiveEvents (.-CONTACT_FORCE_EVENTS RAPIER/ActiveEvents))
-                          (.setContactForceEventThreshold 1500.0))
+                          ;; Worked out here rather than read off the body,
+                          ;; because the threshold belongs to the descriptor
+                          ;; and the body does not exist yet. A cuboid's mass
+                          ;; is its density times eight half-extents.
+                          (.setContactForceEventThreshold
+                           (let [m (* (:density type 300.0) 8.0 hx hy hz)]
+                             (min smash-cap (max smash-floor (* smash-share m))))))
                       body)
         colour (nth colours (mod (+ idx (nth from 0) (nth from 1)) (count colours)))
         rig (nth (:rigs @ts) ti)
@@ -552,7 +609,7 @@
            (edge-key from to) 0.0 false
            ;; -1 is "never painted": no real state equals it, so the first
            ;; `sync!` after a car spawns always writes its lamps.
-           -1)))
+           -1 false)))
 
 (defn- paint-lamps!
   "Repaint one car's lamps for a lamp state. Called only when that state has
@@ -602,9 +659,13 @@
         (let [^Car c c0
               parts (:parts (nth (:rigs @ts) (.-ti c)))
               ^js slots (.-slots c)]
-          (dotimes [i (count parts)]
-            (fig/release! (get pools (:shape (nth parts i))) (aget slots i)))
-          (.removeRigidBody world ^js (.-body c))))
+          ;; A shattered vehicle has already given its slots and its body back.
+          ;; Doing it twice hands the same slot to the free list twice, and two
+          ;; cars later share it.
+          (when-not (.-gone? c)
+            (dotimes [i (count parts)]
+              (fig/release! (get pools (:shape (nth parts i))) (aget slots i)))
+            (.removeRigidBody world ^js (.-body c)))))
       (swap! ts (fn [s]
                   (-> s
                       (update :chunks dissoc key)
@@ -632,13 +693,13 @@
     ;; Who is on which street, and how far along.
     (doseq [[_ {:keys [cars]}] chunks, c0 cars]
       (let [^Car c c0]
-        (when (.-alive? c)
+        (when (and (.-alive? c) (not (.-gone? c)))
           (let [k (.-ekey c)
                 v (or (.get ahead k) (let [a (array)] (.set ahead k a) a))]
             (.push v c)))))
     (doseq [[_ {:keys [cars]}] chunks, c0 cars
             :let [^Car c c0]
-            :when (.-alive? c)]
+            :when (and (.-alive? c) (not (.-gone? c)))]
       (let [^Leg lg (.-leg c)
             total (.-total lg)
             ;; Where the car would get to if nothing were in its way. Kept,
@@ -701,15 +762,28 @@
   `lights?` is the world's answer to whether it is dark enough to need them,
   and it is the same answer for every car -- so it arrives as one argument
   rather than being asked per vehicle."
-  [ts lights?]
+  [ts lights? now-s]
   (let [{:keys [chunks pools rigs ^js body-m ^js local-m ^js out-m
-                ^js qpos ^js quat ^js one]} @ts
+                ^js qpos ^js quat ^js one ^js dsc debris]} @ts
         lit (if lights? lit-bit 0)
         touched (volatile! false)]
+    ;; Debris first, because expiring a piece hands a box slot back and the
+    ;; vehicles below should not be told to draw into it in the same pass.
+    (when (seq debris)
+      (let [{live true dead false} (group-by #(< (- now-s (:t0 %)) debris-life) debris)]
+        (doseq [{:keys [^js body slot]} dead]
+          (fig/release! (:box pools) slot)
+          (.removeRigidBody ^js (:world @ts) body))
+        (when (seq dead) (swap! ts assoc :debris (vec live)))
+        (doseq [{:keys [^js body slot sx sy sz]} live]
+          (.set dsc sx sy sz)
+          (fig/body-matrix! body-m qpos quat dsc body)
+          (fig/set-matrix! (:box pools) slot body-m))))
     (doseq [[_ {:keys [cars]}] chunks]
       (dotimes [i (alength cars)]
         (let [^Car c (aget cars i)
               rig (nth rigs (.-ti c))]
+          (when-not (.-gone? c)
           (fig/body-matrix! body-m qpos quat one ^js (.-body c))
           ;; The wheels are told how far the car has come, not how long it has
           ;; been going: a car held at a red light stands with its wheels still.
@@ -721,7 +795,7 @@
             (when (not= state (.-lamps c))
               (set! (.-lamps c) state)
               (vreset! touched true)
-              (paint-lamps! pools c state))))))
+              (paint-lamps! pools c state)))))))
     (fig/flush! (:box pools))
     (fig/flush! (:wheel pools))
     (fig/flush! (:tank pools))
@@ -752,18 +826,136 @@
          ;; Mass is read *after* the type change: a kinematic body has no
          ;; dynamics to report one from. The floor is paranoia -- a zero here
          ;; would silently turn every wreck into a body that does not move.
-         (let [m (max 1.0 (.mass body))]
+         (let [m (max 1.0 (.mass body))
+               ;; See `lift-max`: the same hit throws a bike higher than a bus,
+               ;; but nothing like as much higher as momentum alone would say.
+               boost (min lift-max (js/Math.sqrt (/ lift-reference m)))]
            (.applyImpulse body
                           #js {:x (* m wreck-shove (nth vel 0))
-                               :y (* m lift)
+                               :y (* m lift boost)
                                :z (* m wreck-shove (nth vel 2))}
-                          true)))
+                          true)
+           ;; And a tumble. A wreck that translates without rotating reads as a
+           ;; box being slid, which is exactly what it is until this line.
+           (.applyTorqueImpulse body
+                                #js {:x (* 0.30 m (- (nth vel 2) 0.5))
+                                     :y (* 0.08 m (nth vel 0))
+                                     :z (* -0.30 m (- (nth vel 0) 0.5))}
+                                true)))
        (swap! ts update :wrecked inc)
        (let [t (.translation ^js (.-body c))]
          {:cx (first (.-key c)) :cz (second (.-key c)) :index (.-idx c)
           ;; The caller decides what a wreck means. A tanker means fire.
           :pos [(.-x t) (.-y t) (.-z t)]
           :volatile? (boolean (:volatile? (.-type c)))})))))
+
+(defn- make-piece!
+  "One flying fragment: a small dynamic box, thrown outward and spinning."
+  [^js world pools colour x y z r]
+  (let [sx (+ 0.22 (* 0.34 (js/Math.random)))
+        sy (+ 0.16 (* 0.30 (js/Math.random)))
+        sz (+ 0.22 (* 0.40 (js/Math.random)))
+        a  (* 6.283185307179586 (js/Math.random))
+        d  (* r (js/Math.random))
+        m  (* debris-density sx sy sz)
+        ^js body (.createRigidBody
+                  world
+                  (-> (.dynamic RAPIER/RigidBodyDesc)
+                      (.setTranslation (+ x (* d (js/Math.cos a)))
+                                       (+ y 0.8 (* 1.4 (js/Math.random)))
+                                       (+ z (* d (js/Math.sin a))))
+                      (.setLinearDamping 0.15)
+                      (.setAngularDamping 0.25)))]
+    (.createCollider world
+                     (-> (.cuboid RAPIER/ColliderDesc (* 0.5 sx) (* 0.5 sy) (* 0.5 sz))
+                         (.setDensity debris-density)
+                         (.setFriction 0.7)
+                         (.setRestitution 0.25))
+                     body)
+    (.applyImpulse body
+                   #js {:x (* m debris-out (js/Math.cos a))
+                        :y (* m debris-up (+ 0.6 (* 0.8 (js/Math.random))))
+                        :z (* m debris-out (js/Math.sin a))}
+                   true)
+    (.applyTorqueImpulse body
+                         #js {:x (* m debris-spin (- (js/Math.random) 0.5))
+                              :y (* m debris-spin (- (js/Math.random) 0.5))
+                              :z (* m debris-spin (- (js/Math.random) 0.5))}
+                         true)
+    (let [slot (fig/claim! (:box pools))]
+      (fig/set-colour! (:box pools) slot colour)
+      {:body body :slot slot :sx sx :sy sy :sz sz})))
+
+(defn shatter!
+  "Take a wrecked vehicle off the road and leave pieces where it stood.
+
+  Only for the ones that go up. An ordinary wreck is still a recognisable car
+  lying on its roof, which is the point of it; a tanker that has just taken the
+  street with it should not still be a tanker.
+
+  The vehicle's body is removed and its slots handed back, so the pieces are
+  cheaper than what they replace rather than more expensive."
+  [ts handle now-s]
+  (when-let [^Car c (get (:by-collider @ts) handle)]
+    (when-not (.-gone? c)
+      (set! (.-gone? c) true)
+      (set! (.-alive? c) false)
+      (let [{:keys [^js world pools rigs]} @ts
+            parts (:parts (nth rigs (.-ti c)))
+            ^js slots (.-slots c)
+            ^js body (.-body c)
+            t (.translation body)
+            [hx _ hz] (:half (.-type c))
+            spread (* 0.7 (max hx hz))
+            pieces (vec (for [_ (range debris-pieces)]
+                          (make-piece! world pools (.-colour c)
+                                       (.-x t) (.-y t) (.-z t) spread)))]
+        (dotimes [i (count parts)]
+          (fig/release! (get pools (:shape (nth parts i))) (aget slots i)))
+        (.removeRigidBody world body)
+        (swap! ts (fn [st]
+                    (-> st
+                        (update :by-collider dissoc handle)
+                        (update :debris into (map #(assoc % :t0 now-s) pieces)))))
+        true))))
+
+(defn shatter-index!
+  "Shatter car `idx` of chunk `key`, for callers holding a delta rather than a
+  collider handle -- which is everything that wrecked it at a distance."
+  [ts key idx now-s]
+  (when-let [{:keys [cars]} (get (:chunks @ts) key)]
+    (some (fn [c0]
+            (let [^Car c c0]
+              (when (and (= idx (.-idx c)) (not (.-gone? c)))
+                (shatter! ts (.-handle c) now-s))))
+          cars)))
+
+(defn burn!
+  "Wreck any car standing in fire. Returns `[[delta owner] ...]`.
+
+  Nothing did this. Fire ate props and it killed pedestrians, and traffic drove
+  straight through it -- including, memorably, a burning tanker driving calmly
+  away from its own explosion.
+
+  Same tenth-of-a-second cadence and the same attribution as `peds/burn!`: the
+  caller scores only the ones whose fire was the player's."
+  [ts fs tick]
+  (when (and (zero? (mod tick burn-every))
+             (pos? (:pools (fire/stats fs))))
+    ;; Realised before anything is wrecked. `wreck!` mutates the chunk this is
+    ;; walking, and a lazy sequence here is the same bug the crate collector had.
+    (let [victims (vec (for [[_ {:keys [cars]}] (:chunks @ts)
+                             i (range (alength cars))
+                             :let [^Car c (aget cars i)]
+                             :when (and (.-alive? c) (not (.-gone? c)))
+                             :let [t (.translation ^js (.-body c))
+                                   h (fire/heat-at fs (.-x t) (.-z t))]
+                             :when h]
+                         [(.-handle c) (:owner h)]))]
+      (vec (keep (fn [[handle owner]]
+                   (when-let [d (wreck! ts handle [0.0 0.0 0.0] burn-lift)]
+                     [d owner]))
+                 victims)))))
 
 (defn wreck-near!
   "Wreck every living car within `r` of (x, z). Returns their deltas.
@@ -774,7 +966,7 @@
         hits (for [[_ {:keys [cars]}] (:chunks @ts)
                    i (range (alength cars))
                    :let [^Car c (aget cars i)]
-                   :when (.-alive? c)
+                   :when (and (.-alive? c) (not (.-gone? c)))
                    :let [t (.translation ^js (.-body c))
                          dx (- (.-x t) x) dz (- (.-z t) z)]
                    :when (< (+ (* dx dx) (* dz dz)) r2)]
@@ -789,7 +981,7 @@
   (when-let [{:keys [cars]} (get (:chunks @ts) key)]
     (doseq [c0 cars]
       (let [^Car c c0]
-        (when (and (= idx (.-idx c)) (.-alive? c))
+        (when (and (= idx (.-idx c)) (.-alive? c) (not (.-gone? c)))
           (wreck! ts (.-handle c) [0.0 0.0 0.0]))))))
 
 (defn stats [ts]

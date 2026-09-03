@@ -182,6 +182,22 @@
           (doseq [[d owner] (peds/burn! peds-state fire-state tick)]
             (when (= :player owner) (game/ped-killed! game))
             (net/-send! transport (wire/encode-delta (assoc d :kind :ped))))
+          ;; And the traffic, which drove through fire untouched until now --
+          ;; including a burning tanker driving away from its own explosion. A
+          ;; tanker that catches light takes the street with it, exactly as one
+          ;; that was rammed does, which is what makes a fire in an industrial
+          ;; estate keep going by itself.
+          (doseq [[d owner] (traffic/burn! traffic-state fire-state tick)]
+            (when (= :player owner) (game/car-wrecked! game))
+            (net/-send! transport (wire/encode-delta (assoc d :kind :car)))
+            (when (:volatile? d)
+              (let [[bx by bz] (:pos d)
+                    {:keys [r life seeds blast push]} tanker-fire]
+                (fire/ignite! fire-state bx by bz r life owner seeds)
+                (sim/blast! sim [bx by bz] blast push)
+                (traffic/shatter-index! traffic-state
+                                        [(:cx d) (:cz d)] (:index d)
+                                        (* 0.001 (js/Date.now))))))
           ;; Rivals that have lost touch are brought back. Checked every tick,
           ;; but only acts after a few seconds out of contact.
           (let [[fx _ fz] (sim/forward-vector sim)]
@@ -218,7 +234,8 @@
           (weather/update! weather-state t dt)
           (weather/sync! weather-state (sim/player-x sim) (sim/player-y sim)
                          (sim/player-z sim) t))
-        (traffic/sync! traffic-state (weather/lights-on? weather-state))
+        (traffic/sync! traffic-state (weather/lights-on? weather-state)
+                       (* 0.001 (js/Date.now)))
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
         ;; Lights are a pure function of the clock, so this only has to repaint
@@ -430,6 +447,10 @@
                                           {:keys [r life seeds blast push]} tanker-fire]
                                       (fire/ignite! fr bx by bz r life :player seeds)
                                       (sim/blast! s [bx by bz] blast push)
+                                      ;; It is not a tanker any more. Pieces,
+                                      ;; not a whole intact lorry lying in its
+                                      ;; own fireball.
+                                      (traffic/shatter! tf hit (* 0.001 (js/Date.now)))
                                       (doseq [{:keys [pos]} (filter :volatile?
                                                                     (props/destroy-near! ps bx bz blast))]
                                         (fire/ignite! fr (nth pos 0) (nth pos 1) (nth pos 2)
