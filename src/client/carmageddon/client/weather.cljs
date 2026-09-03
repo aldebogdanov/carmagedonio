@@ -51,9 +51,16 @@
 
 (defn create [^js scene ^js sun ^js renderer seed]
   (let [mat (three/MeshBasicMaterial. #js {:color 0xcfe0ee :transparent true
-                                           :opacity 0.75 :depthWrite false})]
+                                           :opacity 0.75 :depthWrite false})
+        ;; The sky fill, found by name rather than passed in: `update!` raises
+        ;; it as it takes the sun away, which is what an overcast sky actually
+        ;; does. Without it, dimming the sun and the exposure together turned a
+        ;; dark car into a hole in the road.
+        ^js fill (.getObjectByName scene "fill")]
     (atom {:scene scene
            :sun sun
+           :fill fill
+           :fill0 (when fill (.-intensity fill))
            :renderer renderer
            :seed seed
            ;; Thin vertical slivers. A raindrop is one of the few things in
@@ -87,7 +94,8 @@
 (defn update!
   "Advance the weather and push it into the scene. `t` is wall-clock seconds."
   [ws t dt]
-  (let [{:keys [seed ^js sun ^js renderer scene wet sun0 fog0 exposure0]} @ws
+  (let [{:keys [seed ^js sun ^js fill ^js renderer scene wet sun0 fill0 fog0
+                exposure0]} @ws
         rain (rain-at seed t)
         cloud (cloud-at seed t)
         ;; Up fast, down slow. Chasing the rain symmetrically would mean the
@@ -97,7 +105,11 @@
         wet' (+ wet (* (min 1.0 k) (- rain wet)))]
     (swap! ws assoc :wet wet' :rain rain :cloud cloud)
     ;; The sun goes out before the rain arrives and comes back after it leaves.
-    (set! (.-intensity sun) (* sun0 (- 1.0 (* 0.62 cloud))))
+    (set! (.-intensity sun) (* sun0 (- 1.0 (* 0.50 cloud))))
+    ;; And the sky takes over. A cloud layer is a diffuser, not a lid: it kills
+    ;; the key light and the hard shadow and replaces both with a bright, flat
+    ;; fill. Modelling only the first half is what made a storm read as night.
+    (when fill (set! (.-intensity fill) (* fill0 (+ 1.0 (* 0.35 cloud)))))
     (when-let [^js fog (.-fog scene)]
       (set! (.-far fog) (* fog0 (- 1.0 (* 0.45 rain))))
       (.setHex (.-color fog) (if (> cloud 0.35) 0x8d95a0 0xbdd6e8)))
@@ -106,11 +118,37 @@
     ;; takes the sky, the buildings and the road down together -- which is what
     ;; an overcast day actually does to a scene. Dimming only the sun left a
     ;; storm brightly lit from behind a cloud that was not there.
-    (set! (.-toneMappingExposure renderer) (* exposure0 (- 1.0 (* 0.45 cloud))))
+    ;;
+    ;; The dim is now 0.30 rather than 0.45, and it is the *last* of three
+    ;; things taking light out of the scene rather than one of two. Overcast
+    ;; should look overcast; it should not make a navy hatchback invisible.
+    (set! (.-toneMappingExposure renderer) (* exposure0 (- 1.0 (* 0.30 cloud))))
     wet'))
 
 (defn wetness [ws] (:wet @ws))
 (defn raining? [ws] (> (:rain @ws) 0.05))
+
+(defn gloom
+  "How dark it is: 0 when nobody would have their lights on, and 0.25 to 1
+  when they would.
+
+  One number rather than a flag and a level, because everything downstream
+  wants both. Whether a lamp is lit is `(pos? gloom)`; how far a headlight beam
+  carries is the value itself -- a beam drawn at full strength in light
+  overcast is a grey wedge lying on a sunlit road, and the only thing that
+  fixes that is for it to be nearly invisible until the sky is genuinely dark.
+
+  There is no night in this world yet, so the trigger is the weather rather
+  than the clock. That is not a compromise: under a front the sun is halved,
+  the exposure is down a third and the fog has closed to two thirds -- exactly
+  the conditions in which a car without lights is hard to see."
+  [ws]
+  (let [{:keys [cloud rain]} @ws]
+    (if (or (> cloud 0.38) (> rain 0.08))
+      (max 0.25 (min 1.0 (max cloud (* 1.4 rain))))
+      0.0)))
+
+(defn lights-on? [ws] (pos? (gloom ws)))
 
 (defn grip-scale
   "What the surface is worth right now, as a multiple of dry grip."

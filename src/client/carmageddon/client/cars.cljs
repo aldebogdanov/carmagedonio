@@ -71,8 +71,9 @@
    [rear-track      axle-y wheelbase]])
 
 ;; Shapes bolted to the chassis box, in chassis-local metres:
-;; [x y z  hx hy hz  tint] where tint is :paint, :glass or :trim.
-;; The chassis box itself is the hull; these are what make the silhouette.
+;; [x y z  hx hy hz  tint] where tint is :paint, :glass, :trim, or one of the
+;; three lamps -- :lamp, :tail, :marker. The chassis box itself is the hull;
+;; these are what make the silhouette.
 
 (def catalogue
   {:muscle
@@ -97,7 +98,7 @@
     ;; Front-wheel drive, which is what makes it understeer where the muscle
     ;; car oversteers. The handbrake still works the rear axle.
     :driven  #{0 1}
-    :paint   0x2f74b5
+    :paint   0x4a93d6                ; lifted: see `render/paint-mat`
     :tuning  {:engine-torque 700.0 :top-speed 47.0
               :grip 1.52 :grip-rear-bias 1.10
               :spring-rate 24000.0 :nominal-load 1960.0 :max-load 14000.0
@@ -165,7 +166,7 @@
     :wheels  {:radius 0.42 :rear-radius 0.80 :width 0.30 :rear-width 0.46
               :front-track 0.66 :rear-track 0.95 :wheelbase 1.15 :axle-y -0.12}
     :driven  #{2 3}
-    :paint   0x2f7d32
+    :paint   0x5aa83e                ; lifted: see `render/paint-mat`
     :tuning  {:engine-torque 4200.0 :top-speed 12.0     ; all torque, no pace
               ;; Agricultural tyres on tarmac, and deliberately below the roll
               ;; threshold: it should slide before it tips.
@@ -198,6 +199,41 @@
   (get kinds i default-kind))
 
 (defn spec [kind] (get catalogue kind (get catalogue default-kind)))
+
+(defn- lights
+  "The lamp cluster for a hull of half-extents `half`. Forward is -Z.
+
+  Derived from the hull rather than written per vehicle: a headlight sits at
+  the front corner of whatever it is bolted to, and a table of coordinates per
+  vehicle is a table that is wrong the first time a hull changes size.
+
+  They are bolted to the hull, not the root, so a folded nose takes its
+  headlights with it -- `render/draw-damage!` squashes the hull and everything
+  parented to it goes along, which is exactly what a lamp cluster should do."
+  [[hx hy hz]]
+  (let [x  (* 0.64 hx)
+        yh (* -0.30 hy)]
+    [[(- x) yh (- hz)          (* 0.24 hx) 0.09 0.05 :lamp]
+     [x     yh (- hz)          (* 0.24 hx) 0.09 0.05 :lamp]
+     [(- x) (* -0.05 hy) hz    (* 0.22 hx) 0.09 0.05 :tail]
+     [x     (* -0.05 hy) hz    (* 0.22 hx) 0.09 0.05 :tail]
+     ;; Side markers, on the flanks behind the front axle. The pair nobody
+     ;; misses until a car crosses a junction in front of them at dusk and is
+     ;; simply not there.
+     [(- hx) yh (* -0.55 hz)   0.05 0.07 0.13 :marker]
+     [hx     yh (* -0.55 hz)   0.05 0.07 0.13 :marker]]))
+
+(defn body-parts
+  "Everything bolted to the hull: the silhouette the catalogue describes, and
+  the lamps every vehicle has whether it mentions them or not."
+  [kind]
+  (let [s (spec kind)]
+    (concat (:body s) (lights (:half s)))))
+
+(defn headlamps
+  "Where the two headlights are, for whatever wants to put a beam there."
+  [kind]
+  (filterv (fn [p] (= :lamp (peek p))) (lights (:half (spec kind)))))
 
 (defn half [kind] (:half (spec kind)))
 (defn density [kind] (:density (spec kind)))

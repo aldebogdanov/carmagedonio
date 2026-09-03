@@ -112,11 +112,23 @@
    ;; What the road is worth today. A property of the world acting on the car,
    ;; not of the driver -- which is why it lives here beside the damage rather
    ;; than in the Command.
-   :surface   (doto (js/Float64Array. 1) (.fill 1.0))})
+   :surface   (doto (js/Float64Array. 1) (.fill 1.0))
+   ;; [brake reverse], both 0..1, written by `update!` from the *resolved*
+   ;; command. The renderer lights the lamps off this rather than inferring
+   ;; them from the velocity, which gets a car coasting downhill wrong in both
+   ;; directions -- it is slowing down and no pedal is down, and it is picking
+   ;; up speed backwards with the brake pedal buried.
+   :lights    (js/Float64Array. 2)})
 
 (def ^:const boost-engine 0)
 (def ^:const boost-grip 1)
 (def ^:const boost-armour 2)
+
+;; What the driver last did with the pedals, for whoever is drawing the lamps.
+;; Two scalars rather than a pair, because this is read per car per frame and a
+;; vector there is garbage sixty times a second for two numbers.
+(defn brake-of   [{:keys [^js lights]}] (aget lights 0))
+(defn reverse-of [{:keys [^js lights]}] (aget lights 1))
 
 (defn set-boost! [{:keys [^js boost]} i v] (aset boost i v))
 (defn set-surface! [{:keys [^js surface]} v] (aset surface 0 v))
@@ -420,7 +432,7 @@
 (defn update!
   "Advance steering and apply all four wheels' forces for this tick. Must run
   before `world.step`, because the forces it adds are consumed by that step."
-  [{:keys [steer tuning ^js damage] :as veh} cmd dt]
+  [{:keys [steer tuning ^js damage ^js lights] :as veh} cmd dt]
   (let [{:keys [max-steer steer-speed-falloff steer-rate]} @tuning
         ^js body (:body veh)
         ;; Rapier's addForce accumulator persists across steps until cleared --
@@ -452,9 +464,16 @@
                        (< target (- cur d)) (- cur d)
                        :else target)]
     (aset steer 0 next)
-    (dotimes [i 4]
-      (step-wheel! veh i dt
-                   (gear-for veh (assoc cmd :boost-top (boost-of veh boost-engine)))))))
+    ;; Resolved once, not once per wheel. It was inside the loop, which meant
+    ;; four `forward-speed` calls and four map builds a tick per vehicle for an
+    ;; answer that cannot differ between wheels.
+    (let [c (gear-for veh (assoc cmd :boost-top (boost-of veh boost-engine)))]
+      (aset lights 0 (max 0.0 (min 1.0 (:brake c 0.0))))
+      ;; Reverse is negative drive: at rest the brake pedal selects it, and
+      ;; rolling backwards it is what the brake pedal keeps doing.
+      (aset lights 1 (if (neg? (:drive c 0.0)) 1.0 0.0))
+      (dotimes [i 4]
+        (step-wheel! veh i dt c)))))
 
 (defn clear-motion!
   "Everything about how the car is moving, zeroed. Damage is not motion and is

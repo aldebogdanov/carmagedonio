@@ -62,16 +62,30 @@
     (jitter ctx rng size 900 [40 40 44] 26 4.0)
     c))
 
-(defn- body-canvas [seed size base-rgb]
+(defn- body-canvas
+  "Panel grain for bodywork, and nothing else.
+
+  This is a *modulation* map, not a paint job, and that distinction was the
+  single biggest reason cars were too dark. It used to be painted in the muscle
+  car's red, (176, 46, 34) -- and three.js multiplies `map` by `color`. The
+  reference car came out right because its paint was very nearly the colour of
+  its own texture; every other vehicle in the game had its blue multiplied by
+  34/255 and its green by 46/255 before a single light was applied. A navy
+  hatchback was arithmetically incapable of being navy.
+
+  Near-white, so `color` is what the car is painted and this only adds the
+  seams and the stripe. Both are darker than the base rather than lighter, so
+  they read on a white truck as well as on a dark one."
+  [seed size base-rgb]
   (let [c   (canvas size)
         ctx (.getContext c "2d")
         rng (prng/make seed)
         [r g b] base-rgb]
     (fill! ctx (rgb r g b) 0 0 size size)
-    (jitter ctx rng size 2600 base-rgb 16 2.0)
+    (jitter ctx rng size 2600 base-rgb 10 2.0)
     ;; Panel seams: cheap, but they give the body a scale reference so the car
     ;; does not read as an untextured slab.
-    (set! (.-strokeStyle ctx) "rgba(0,0,0,0.30)")
+    (set! (.-strokeStyle ctx) "rgba(0,0,0,0.26)")
     (set! (.-lineWidth ctx) 2)
     (doseq [f [0.18 0.5 0.82]]
       (.beginPath ctx)
@@ -79,7 +93,7 @@
       (.lineTo ctx size (* size f))
       (.stroke ctx))
     ;; A single off-centre stripe -- makes yaw and roll legible at a glance.
-    (fill! ctx "rgba(255,255,255,0.16)" 0 (* size 0.40) size (* size 0.06))
+    (fill! ctx "rgba(0,0,0,0.14)" 0 (* size 0.40) size (* size 0.06))
     c))
 
 (defn- crate-canvas [seed size]
@@ -183,7 +197,9 @@
    {:repeat [1 1]})
    :road   (->texture (road-canvas (prng/hash-coords seed 2 0) 512) renderer
                       {:repeat [40 40]})
-   :body   (->texture (body-canvas (prng/hash-coords seed 3 0) 256 [176 46 34]) renderer nil)
+   ;; Near-white on purpose: see `body-canvas`. The colour of a car lives in
+   ;; its material, not in here.
+   :body   (->texture (body-canvas (prng/hash-coords seed 3 0) 256 [238 238 238]) renderer nil)
    :crate  (->texture (crate-canvas (prng/hash-coords seed 4 0) 256) renderer nil)
    :tyre   (->texture (tyre-canvas (prng/hash-coords seed 5 0) 128) renderer nil)
    ;; One facade per building zone, in `worldgen/building-zones` order. UVs come

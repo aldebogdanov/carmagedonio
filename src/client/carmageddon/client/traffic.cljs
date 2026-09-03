@@ -28,19 +28,40 @@
 (def ^:private follow-gap 7.5)     ; metres to leave to the car in front
 (def ^:private straight-bonus 6.0) ; weighting for carrying straight on at a node
 
+;; Civilian paint. The two darkest -- a near-black navy and a bottle green --
+;; were genuinely hard to see coming under cloud, so both were lifted. A dark
+;; car is fine; a car you cannot see until it is in the windscreen is not.
 (def ^:private colours
-  [0x9fa4ab 0x3d4b63 0x8c3a34 0xd8d2c4 0x2f4f3a 0x6b5a3e 0x1f2833 0xb08a3c])
+  [0x9fa4ab 0x53688a 0x8c3a34 0xd8d2c4 0x3f6b52 0x6b5a3e 0x39465c 0xb08a3c])
 
-(def ^:private glass 0x1d2733)
+(def ^:private glass 0x2b3d4e)
 (def ^:private rubber 0x1b1b1e)
-(def ^:private lamp 0xf2e6b8)
-(def ^:private tail 0x8e2820)
-(def ^:private trim 0x2b2b2e)
+(def ^:private trim 0x36363c)
 
 (def ^:private hazard 0xd8d2c4)
 
+;; Lamps have two colours each: the lens when it is not lit, and the lens when
+;; it is. Switching a light on is a single instance-colour write, which is why
+;; every car on the map can have working lights for the price of the frames on
+;; which one of them changes its mind.
+(def ^:private lamp-off 0x7a7566)
+(def ^:private lamp-on 0xfff4d2)
+(def ^:private tail-off 0x6b2a25)
+(def ^:private tail-on 0xc4392c)
+(def ^:private tail-brake 0xff4a38)
+(def ^:private marker-off 0x6e5c36)
+(def ^:private marker-on 0xffb43a)
+
 (def ^:private tints
-  {:glass glass :lamp lamp :tail tail :trim trim :hazard hazard})
+  {:glass glass :trim trim :hazard hazard
+   :lamp lamp-off :tail tail-off :marker marker-off})
+
+;; Which bits of a car's lamp state are set. Kept as an integer rather than a
+;; map so `sync!` can decide whether anything changed with one comparison per
+;; car per frame -- which is the whole cost of this feature when nothing is
+;; happening.
+(def ^:const lit-bit 1)
+(def ^:const brake-bit 2)
 
 ;; Local +Z is forward here, not -Z: `place!` yaws by atan2(nx, nz), which maps
 ;; local +Z onto the direction of travel. It never mattered while a car was a
@@ -59,14 +80,25 @@
 ;; A positive tilt drops the +Z (front) end: `write-local!`'s third column is
 ;; (0, -sin a, cos a), so the nose goes down.
 (defn- lamps
-  "Headlights and tail lights, as pairs. Cheap, and the single clearest signal
-  that the thing in the mirror is facing you rather than away."
+  "Headlights, tail lights and side markers.
+
+  These come out of their own pool, drawn with an unlit material: a lamp that
+  takes a light calculation is a lamp that goes out exactly when it is needed,
+  which is the whole problem with modelling a light as a pale box. An unlit
+  instance is the same one draw call and it stays bright through a storm.
+
+  The markers are the ones that are easy to leave out and shouldn't be. Head
+  and tail lights say which way a car is facing; only a side marker says a car
+  is *there*, crossing the junction you are about to arrive at."
   [hx hy hz]
-  (let [x (* 0.62 hx)]
-    [{:at [(- x) (* 0.30 hy) (* 0.99 hz)] :size [(* 0.42 hx) 0.16 0.05] :tint :lamp}
-     {:at [x (* 0.30 hy) (* 0.99 hz)] :size [(* 0.42 hx) 0.16 0.05] :tint :lamp}
-     {:at [(- x) (* 0.42 hy) (* -0.99 hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}
-     {:at [x (* 0.42 hy) (* -0.99 hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}]))
+  (let [x (* 0.62 hx)
+        y (* 0.30 hy)]
+    [{:shape :lamp :at [(- x) y hz] :size [(* 0.42 hx) 0.16 0.05] :tint :lamp}
+     {:shape :lamp :at [x y hz] :size [(* 0.42 hx) 0.16 0.05] :tint :lamp}
+     {:shape :lamp :at [(- x) (* 0.42 hy) (- hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}
+     {:shape :lamp :at [x (* 0.42 hy) (- hz)] :size [(* 0.40 hx) 0.15 0.05] :tint :tail}
+     {:shape :lamp :at [(- hx) y (* 0.70 hz)] :size [0.05 0.12 0.22] :tint :marker}
+     {:shape :lamp :at [hx y (* 0.70 hz)] :size [0.05 0.12 0.22] :tint :marker}]))
 
 (def ^:private types
   [{:name :saloon
@@ -149,6 +181,21 @@
 
 (def ^:private type-index (zipmap (map :name types) (range)))
 
+(defn- lamp-parts
+  "Where a type's lamps live in its rig, by tint.
+
+  A rig is [hull] ++ parts ++ wheels, so part `i` of the type is rig slot
+  `i + 1`. Resolved once per type at build time: repainting a car's brake
+  lights should not mean searching its parts for the ones that are brake
+  lights."
+  [type]
+  (let [ps (:parts type)
+        of (fn [t] (into-array (keep-indexed (fn [i p] (when (= t (:tint p)) (inc i)))
+                                             ps)))]
+    {:heads (of :lamp) :tails (of :tail) :markers (of :marker)}))
+
+(def ^:private type-lamps (mapv lamp-parts types))
+
 (def ^:private type-mix
   ;; Written as names and looked up, not as indices. The first version was a
   ;; literal list of numbers and referred to index 6 of a six-element vector --
@@ -171,7 +218,7 @@
 (deftype Car [body collider handle key idx colour type ti meshes slots
               ^:mutable from ^:mutable to ^:mutable t ^:mutable speed
               ^:mutable leg ^:mutable alive? ^:mutable rnd ^:mutable ekey
-              ^:mutable dist]
+              ^:mutable dist ^:mutable braking? ^:mutable lamps]
   ;; A record would allocate a new one of these per car per tick. Traffic is the
   ;; one place in the client where state is genuinely mutated in place, and
   ;; deftype fields are munged by the ClojureScript compiler rather than left to
@@ -182,6 +229,7 @@
 (def ^:private box-slots 6400)     ; bodies and bodywork
 (def ^:private wheel-slots 3200)
 (def ^:private tank-slots 96)
+(def ^:private lamp-slots 3600)    ; six per car, and cars come and go in blocks
 
 (defn- type-rig
   "One vehicle as a rig: hull, bodywork, four wheels.
@@ -224,7 +272,14 @@
                :tank (fig/pool scene
                                (doto (three/CylinderGeometry. 0.5 0.5 1 14)
                                  (.rotateX (/ js/Math.PI 2)))
-                               material tank-slots {:receive? true})}
+                               material tank-slots {:receive? true})
+               ;; Unlit, and casting no shadow. Both deliberate: a light
+               ;; source that is shaded goes out under the cloud that is the
+               ;; reason it came on, and a light source that casts a shadow is
+               ;; a light source that is somehow also opaque.
+               :lamp (fig/pool scene (three/BoxGeometry. 1 1 1)
+                               (three/MeshBasicMaterial. #js {:color 0xffffff})
+                               lamp-slots {:cast? false})}
         rigs (mapv type-rig types)]
     (atom {:world world :scene scene :seed seed :overlay ov
          :pools pools
@@ -397,7 +452,28 @@
     (->Car body collider (.-handle collider) key idx colour type ti meshes slots
            from to t0 speed lg true
            (js/Math.abs (js/Math.sin (+ (* 12.9898 idx) (* 0.017 (nth from 0)))))
-           (edge-key from to) 0.0)))
+           (edge-key from to) 0.0 false
+           ;; -1 is "never painted": no real state equals it, so the first
+           ;; `sync!` after a car spawns always writes its lamps.
+           -1)))
+
+(defn- paint-lamps!
+  "Repaint one car's lamps for a lamp state. Called only when that state has
+  actually changed, which for a car driving down an empty street is never."
+  [pools ^Car c state]
+  (let [^js pool (:lamp pools)
+        ^js slots (.-slots c)
+        {:keys [^js heads ^js tails ^js markers]} (nth type-lamps (.-ti c))
+        lit? (pos? (bit-and state lit-bit))
+        brake? (pos? (bit-and state brake-bit))]
+    (dotimes [i (alength heads)]
+      (fig/set-colour! pool (aget slots (aget heads i)) (if lit? lamp-on lamp-off)))
+    (dotimes [i (alength tails)]
+      (fig/set-colour! pool (aget slots (aget tails i))
+                       (cond brake? tail-brake lit? tail-on :else tail-off)))
+    (dotimes [i (alength markers)]
+      (fig/set-colour! pool (aget slots (aget markers i))
+                       (if lit? marker-on marker-off)))))
 
 (defn add-chunk! [ts key arr]
   (when (and arr (pos? (.-length arr)))
@@ -468,7 +544,13 @@
             :when (.-alive? c)]
       (let [^Leg lg (.-leg c)
             total (.-total lg)
-            t' (+ (.-t c) (/ (* (.-speed c) dt) total))
+            ;; Where the car would get to if nothing were in its way. Kept,
+            ;; because the difference between that and where it actually gets
+            ;; to is the brake pedal -- there is no pedal to read here, so the
+            ;; brake lights are inferred from the gap between intent and
+            ;; permission.
+            want (+ (.-t c) (/ (* (.-speed c) dt) total))
+            t' want
             ;; The car in front.
             peers (.get ahead (.-ekey c))
             gap (/ follow-gap total)
@@ -486,6 +568,7 @@
                                                             (.-phase lg))))
                  (min t' stop-line)
                  t')]
+        (set! (.-braking? c) (< t' (- want 1.0e-9)))
         (if (>= t' 1.0)
           ;; Arrived. Pick the next street and carry the overshoot into it.
           (let [nxt (next-node seed (.-from c) (.-to c) (.-rnd c))]
@@ -511,14 +594,21 @@
                                           :z 0.0 :w (js/Math.cos (* 0.5 (.-h p)))}))))))
 
 (defn sync!
-  "Place every car's body, bodywork and wheels.
+  "Place every car's body, bodywork and wheels, and set its lights.
 
   Wrecks are read from the body like anything else -- once a car is debris the
   physics is the only thing that knows where it is, and its wheels stop turning
-  because it has stopped covering ground."
-  [ts]
+  because it has stopped covering ground. A wreck's lights are out, which is
+  also how you tell one from a car stopped at a light.
+
+  `lights?` is the world's answer to whether it is dark enough to need them,
+  and it is the same answer for every car -- so it arrives as one argument
+  rather than being asked per vehicle."
+  [ts lights?]
   (let [{:keys [chunks pools rigs ^js body-m ^js local-m ^js out-m
-                ^js qpos ^js quat ^js one]} @ts]
+                ^js qpos ^js quat ^js one]} @ts
+        lit (if lights? lit-bit 0)
+        touched (volatile! false)]
     (doseq [[_ {:keys [cars]}] chunks]
       (dotimes [i (alength cars)]
         (let [^Car c (aget cars i)
@@ -527,10 +617,23 @@
           ;; The wheels are told how far the car has come, not how long it has
           ;; been going: a car held at a red light stands with its wheels still.
           (fig/place-rig! rig (.-meshes c) (.-slots c) body-m local-m out-m
-                          (/ (.-dist c) (:r (:wheel (.-type c))))))))
+                          (/ (.-dist c) (:r (:wheel (.-type c)))))
+          (let [state (if (.-alive? c)
+                        (bit-or lit (if (.-braking? c) brake-bit 0))
+                        0)]
+            (when (not= state (.-lamps c))
+              (set! (.-lamps c) state)
+              (vreset! touched true)
+              (paint-lamps! pools c state))))))
     (fig/flush! (:box pools))
     (fig/flush! (:wheel pools))
-    (fig/flush! (:tank pools))))
+    (fig/flush! (:tank pools))
+    ;; Matrices moved for every lamp on the map; colours only for the cars that
+    ;; changed their minds. Uploading the colour buffer regardless would undo
+    ;; most of the point of comparing.
+    (if @touched
+      (fig/flush! (:lamp pools))
+      (set! (.-needsUpdate (.-instanceMatrix ^js (:mesh (:lamp pools)))) true))))
 
 (defn traffic? [ts handle] (contains? (:by-collider @ts) handle))
 

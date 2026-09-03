@@ -42,10 +42,22 @@
 (defn- paint-mat
   "Bodywork. A standard material rather than the Phong everything else uses,
   because `scene.environment` only reaches standard materials -- and a sky to
-  reflect is the entire difference between paint and coloured cardboard."
+  reflect is the entire difference between paint and coloured cardboard.
+
+  Metalness was 0.45, and that was the bug behind 'the hatchback is invisible'.
+  A metal has no diffuse term: the shader multiplies the base colour's diffuse
+  contribution by (1 - metalness), so nearly half of what makes a blue car blue
+  was being thrown away before the light even arrived. What was left was a
+  specular reflection of a two-pixel gradient sky -- which under cloud is dim
+  and grey, and under a storm is nearly nothing. Cars painted a dark colour to
+  begin with had nothing to fall back on.
+
+  0.16 is a clear coat over pigment, which is what car paint is. The env map
+  still gives it the sky; the pigment now survives losing it."
   [tex colour]
   (three/MeshStandardMaterial. #js {:map tex :color colour
-                                    :metalness 0.45 :roughness 0.42}))
+                                    :metalness 0.16 :roughness 0.46
+                                    :envMapIntensity 1.15}))
 
 (defn- chunk-geometry
   "Build a BufferGeometry for one streamed chunk.
@@ -196,7 +208,13 @@
       (.updateProjectionMatrix c))
     (.add scene sun)
     (.add scene (.-target sun))
-    (.add scene (three/HemisphereLight. sky-horizon ground-bounce 1.1))
+    ;; The sky fill, and the single biggest lever on whether a car is readable.
+    ;; The sun lights one side of a box; this is what stops the other three
+    ;; being a silhouette. It was 1.1, which was enough on a clear day and not
+    ;; on any other -- and an overcast sky is *more* ambient light, not less,
+    ;; which is why `weather` now raises this as it takes the sun away.
+    (.add scene (doto (three/HemisphereLight. sky-horizon ground-bounce 1.55)
+                  (aset "name" "fill")))
     [scene sun]))
 
 (defn- follow-sun!
@@ -212,9 +230,17 @@
 
 (def ^:private part-tints
   "Bodywork that is not paint. Glass is dark and slightly blue; trim is the
-  bumpers, stacks and spoilers, which read best as near-black."
-  {:glass 0x1d2733
-   :trim  0x2b2b2e})
+  bumpers, stacks and spoilers, which read best as near-black.
+
+  Both were darker. On a vehicle that is mostly glass and trim -- the tractor is
+  a cab, a bonnet and an exhaust stack -- near-black parts and a metallic paint
+  that had lost its diffuse left nothing at all to see under cloud. Lifted far
+  enough to read as a surface rather than a hole."
+  {:glass 0x30455a
+   :trim  0x3c3c42
+   ;; Lit parts. These never take a light calculation at all -- see `lamp-mat`.
+   :lamp  0xfff2cf
+   :tail  0xd6382c})
 
 (def ^:private rival-paint
   "Rivals are painted from their own palette rather than their catalogue
@@ -222,6 +248,59 @@
   the traffic. Which one you are looking at is the map's job; *that it is
   hostile* has to be readable from the mirror."
   [0xd8722c 0x7d3fa8 0xb8322f 0x1c7d74 0xc9a227])
+
+;; Lamp lenses, dark and lit. A lamp is drawn with an unlit material -- see
+;; `lamp-mat` -- so switching one on is a colour, not a light.
+(def ^:private lamp-off 0x7a7566)
+(def ^:private lamp-on 0xfff4d2)
+(def ^:private tail-off 0x6b2a25)
+(def ^:private tail-on 0xc4392c)
+(def ^:private tail-brake 0xff4a38)
+(def ^:private tail-reverse 0xe8e2d0)
+(def ^:private marker-off 0x6e5c36)
+(def ^:private marker-on 0xffb43a)
+
+(defn- lamp-mat
+  "A lit surface. Basic rather than standard on purpose: a lamp that takes a
+  light calculation is a lamp that dims under exactly the cloud that is the
+  reason it was switched on, and a headlight that goes out in the rain is worse
+  than no headlight at all."
+  [hex]
+  (three/MeshBasicMaterial. #js {:color hex}))
+
+(def ^:private beam-length 13.0)
+(def ^:private beam-radius 1.6)
+
+(defn- beam-geometry
+  "An open cone with its apex at the origin, opening along -Z, fading to nothing
+  at the mouth.
+
+  Built once and shared. A cone points +Y with its apex at +height/2, so a
+  quarter turn about X puts the apex at +Z and the mouth at -Z, and the
+  translate slides the apex back onto the lamp it hangs off.
+
+  The fade is a vertex colour rather than an opacity, because opacity is a
+  material uniform and cannot vary along a mesh. Under additive blending black
+  *is* transparent -- it adds nothing -- so a colour ramp to black at the mouth
+  is exactly a beam that runs out. Without it the cone has a hard rim and reads
+  as a grey wedge lying on the road rather than as light."
+  []
+  (let [g (doto (three/ConeGeometry. beam-radius beam-length 12 1 true)
+            (.rotateX (/ js/Math.PI 2))
+            (.translate 0 0 (* -0.5 beam-length)))
+        ^js pos (.getAttribute g "position")
+        n (.-count pos)
+        col (js/Float32Array. (* 3 n))]
+    (dotimes [i n]
+      (let [t (min 1.0 (max 0.0 (/ (- (.getZ pos i)) beam-length)))
+            ;; Bright at the lamp, gone well before the mouth. Squared, so the
+            ;; visible part of the beam is the first third of it.
+            v (- 1.0 (* t t))]
+        (aset col (* 3 i) v)
+        (aset col (+ 1 (* 3 i)) (* 0.94 v))
+        (aset col (+ 2 (* 3 i)) (* 0.76 v))))
+    (.setAttribute g "color" (three/BufferAttribute. col 3))
+    g))
 
 (def ^:private soot 0x2b2622)
 ;; Allocated once: `draw-damage!` runs per car per frame and a fresh Color
@@ -255,16 +334,49 @@
   A box is a box, and every vehicle in the catalogue was one until this
   existed. The silhouette is what makes a truck read as a truck from behind the
   wheel, and it costs four child meshes."
-  [^js hull kind paint tex]
-  (doseq [[x y z hx hy hz tint] (:body (cars/spec kind))]
+  [^js hull kind paint tex lamps]
+  (doseq [[x y z hx hy hz tint] (cars/body-parts kind)]
     (let [^js m (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
-                             (if (= :paint tint)
-                               (paint-mat (:body tex) paint)
-                               (three/MeshStandardMaterial.
-                                #js {:color (part-tints tint)
-                                     :metalness 0.6 :roughness 0.25})))]
+                             (cond
+                               (= :paint tint) (paint-mat (:body tex) paint)
+                               ;; One material per lamp *group* per car, shared
+                               ;; by both lamps in it. Switching the headlights
+                               ;; on is then one colour write, not one per bulb.
+                               (lamps tint) (lamps tint)
+                               :else (three/MeshStandardMaterial.
+                                      #js {:color (part-tints tint)
+                                           :metalness 0.35 :roughness 0.30})))]
       (.set (.-position m) x y z)
       (.add hull m))))
+
+(defn- build-beams!
+  "Two cones of light off the front of the car, hung on the root rather than the
+  hull so a caved-in nose does not bend them.
+
+  Additive and unlit, which is the cheap way to draw a beam: it brightens
+  whatever is behind it and disappears against a bright sky, which is what a
+  headlight in daylight does anyway. Two transparent cones per car is nothing
+  next to a spotlight, and a spotlight would have added two more lights to
+  every shader in the scene for a pool on the road nobody is looking at."
+  [^js root geom kind]
+  (let [out (make-array 2)]
+    (dotimes [i 2]
+      (let [[x y z] (nth (cars/headlamps kind) i)
+            ;; A little ahead of the lens. The apex is the brightest part of the
+            ;; cone, and starting it inside the bodywork put a bright smudge on
+            ;; the nose of the car rather than a beam in front of it.
+            z (- z 0.35)
+            ^js m (three/Mesh. geom (three/MeshBasicMaterial.
+                                     #js {:color 0xffffff :vertexColors true
+                                          :transparent true
+                                          :opacity 0.0 :depthWrite false
+                                          :blending (.-AdditiveBlending three)
+                                          :side (.-DoubleSide three)}))]
+        (.set (.-position m) x y z)
+        (set! (.-visible m) false)
+        (aset out i m)
+        (.add root m)))
+    out))
 
 (defn- build-smoke!
   "A few translucent puffs at the nose, hidden until the engine is cooked.
@@ -294,6 +406,9 @@
   wheels are children, and they were squashed with it."
   [^js scene sim tex]
   (let [meshes (make-array sim/max-entities)
+        ;; One cone between every headlight in the game. Geometry is shared;
+        ;; only the material differs, and only so a beam can fade on its own.
+        beam-geom (beam-geometry)
         cars   (mapv
                 (fn [i]
                   (let [kind   (sim/kind-of sim i)
@@ -304,22 +419,33 @@
                         layout (cars/layout kind)
                         ^js root (three/Group.)
                         ^js hull-mat (paint-mat (:body tex) paint)
+                        lamps {:lamp (lamp-mat lamp-off)
+                               :tail (lamp-mat tail-off)
+                               :marker (lamp-mat marker-off)}
                         ^js hull (three/Mesh. (three/BoxGeometry. (* 2 hx) (* 2 hy) (* 2 hz))
                                               hull-mat)]
-                    (build-body! hull kind paint tex)
+                    (build-body! hull kind paint tex lamps)
                     (set! (.-castShadow hull) true)
                     (set! (.-receiveShadow hull) true)
                     (doseq [^js c (array-seq (.-children hull))]
-                      (set! (.-castShadow c) true))
+                      ;; Everything bolted on casts, except the lamps: a light
+                      ;; source with a shadow is a light source that is also
+                      ;; somehow opaque.
+                      (set! (.-castShadow c) (not (instance? three/MeshBasicMaterial
+                                                              (.-material c)))))
                     (.add root hull)
                     (let [wheels (build-wheels! root tex layout)
-                          smoke  (build-smoke! root half)]
+                          smoke  (build-smoke! root half)
+                          beams  (build-beams! root beam-geom kind)]
                       (aset meshes i root)
                       (.add scene root)
                       {:root root :hull hull :material hull-mat
                        :paint (three/Color. paint)
                        :half half :wheels wheels :mounts (:connections layout)
-                       :smoke smoke})))
+                       :smoke smoke :lamps lamps :beams beams
+                       ;; -1 is "never painted", so the first frame always
+                       ;; writes. See `draw-lights!`.
+                       :lit (volatile! -1)})))
                 (range (count (:vehicles @sim))))]
     [meshes cars]))
 
@@ -444,14 +570,54 @@
               (set! (.-opacity (.-material m))
                     (* (min 1.0 (* 1.6 (- f 0.45))) (- 0.55 (* 0.55 t)))))))))))
 
+(defn- draw-lights!
+  "Head, tail and marker lamps, and the beams that go with the headlights.
+
+  Three bits of state -- lit, braking, reversing -- packed into an integer and
+  compared with what was last painted. A car cruising in the dry costs one
+  integer comparison a frame; the writes happen on the frames where something
+  actually changed, which is the only place they belong.
+
+  Reversing shows as the tail cluster turning white rather than as a separate
+  pair of lamps. A real car has both; at the size these are drawn on screen the
+  extra pair would be two more meshes to say something the colour already says.
+
+  The beams are graded by `gloom` rather than switched, because a headlight
+  beam is only visible in air that has something in it. Drawn at full strength
+  under light cloud it is a grey wedge lying on a sunlit road; graded, it is
+  nothing until the sky closes in and then it is the thing lighting your way."
+  [{:keys [cars]} sim gloom]
+  (dotimes [i (count cars)]
+    (let [on?    (pos? gloom)
+          {:keys [lamps beams lit]} (nth cars i)
+          v      (nth (sim/vehicles sim) i)
+          brake? (> (vehicle/brake-of v) 0.05)
+          rev?   (> (vehicle/reverse-of v) 0.5)
+          ;; The beam strength is quantised into the state word too, or a sky
+          ;; that is slowly clouding over would repaint every lamp every frame.
+          state  (bit-or (if brake? 1 0) (if rev? 2 0)
+                         (bit-shift-left (int (* 8 gloom)) 2))]
+      (when (not= state @lit)
+        (vreset! lit state)
+        (.setHex (.-color ^js (:lamp lamps)) (if on? lamp-on lamp-off))
+        (.setHex (.-color ^js (:marker lamps)) (if on? marker-on marker-off))
+        (.setHex (.-color ^js (:tail lamps))
+                 (cond rev? tail-reverse brake? tail-brake on? tail-on :else tail-off))
+        (dotimes [j 2]
+          (let [^js m (aget beams j)]
+            (set! (.-visible m) on?)
+            (set! (.-opacity (.-material m)) (* 0.26 gloom))))))))
+
 (defn draw!
   "Interpolate every entity by `alpha` in [0,1] and present the frame.
 
   `dt` is the real elapsed frame time, used only by the camera. Everything else
-  here is a function of the fixed timestep and `alpha`."
+  here is a function of the fixed timestep and `alpha`. `gloom` is the world's
+  answer to how dark it is, 0 to 1 -- one answer for every car, so it arrives
+  as an argument rather than being asked per vehicle."
   [{:keys [^js renderer scene ^js camera meshes camera-state cast
            ^js q0 ^js q1 ^js qo ^js qp] :as rs}
-   sim alpha dt]
+   sim alpha dt gloom]
   (let [{:keys [prev curr halves player]} @sim
         n (count halves)]
     (dotimes [i n]
@@ -471,6 +637,7 @@
     (draw-wheels! rs sim)
     (vswap! (:clock rs) #(mod (+ % dt) 1.0))
     (draw-damage! rs sim)
+    (draw-lights! rs sim gloom)
     (let [o (* player sim/stride)]
       (follow-sun! (:sun rs)
                    (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)

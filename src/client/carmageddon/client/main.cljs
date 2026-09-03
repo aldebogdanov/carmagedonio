@@ -213,7 +213,7 @@
           (weather/update! weather-state t dt)
           (weather/sync! weather-state (sim/player-x sim) (sim/player-y sim)
                          (sim/player-z sim) t))
-        (traffic/sync! traffic-state)
+        (traffic/sync! traffic-state (weather/lights-on? weather-state))
         (birds/update! birds-state (* 0.001 (js/Date.now))
                        (sim/player-x sim) (sim/player-z sim))
         ;; Lights are a pure function of the clock, so this only has to repaint
@@ -244,7 +244,7 @@
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
              :car        (cars/display-name kind)})))
-        (render/draw! rs sim alpha dt))
+        (render/draw! rs sim alpha dt (weather/gloom weather-state)))
 
       ;; HUD is updated twice a second, not per frame. UI state and sim state
       ;; are kept apart on purpose -- when re-frame arrives for menus it
