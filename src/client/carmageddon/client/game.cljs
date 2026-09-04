@@ -33,14 +33,22 @@
          :state     :running
          ;; Why it ended, for the cluster to say. Not part of the submitted
          ;; run: the rules only know :won and :lost, and a wreck is a loss.
-         :ending    nil})))
+         :ending    nil
+         ;; Whose clock this is. `:local` until a room tells us otherwise, and
+         ;; `:room` from the first clock frame onward. It is not a setting: a
+         ;; solo run and a room are the same code path until the socket says
+         ;; they are not.
+         :clock     :local})))
 
 (defn- award! [game kind]
   (let [{:keys [points seconds]} (get scoring kind)]
     (swap! game (fn [g]
-                  (-> g
-                      (update :score + points)
-                      (update :remaining + seconds))))
+                  (cond-> (update g :score + points)
+                    ;; Only a clock you own is a clock you can add to. In a
+                    ;; room the seconds come back from the server, which is the
+                    ;; only place that can decide them for everybody -- and it
+                    ;; would double-count them if this added them too.
+                    (= :local (:clock g)) (update :remaining + seconds))))
     (when-let [f (:on-award @game)] (f kind points seconds))))
 
 (defn ped-killed!  [game] (award! game :ped)  (swap! game update :peds inc))
@@ -50,6 +58,20 @@
 (defn rival-dented! [game] (award! game :dent)   (swap! game update :dents inc))
 (defn coin-taken!   [game] (award! game :coin)   (swap! game update :coins inc))
 (defn nugget-taken! [game] (award! game :nugget) (swap! game update :nuggets inc))
+
+(defn room-clock!
+  "What the room says is left, in seconds, and whether it has run out.
+
+  The first of these switches this run onto the room's clock for good. The
+  countdown still runs locally between frames so the display moves smoothly;
+  each frame re-anchors it, and drift over a round is a rounding error."
+  [game seconds over?]
+  (swap! game
+         (fn [g]
+           (let [g (assoc g :clock :room :remaining (max 0.0 seconds))]
+             (if (and over? (= :running (:state g)))
+               (assoc g :state :lost :ending :time)
+               g)))))
 
 (defn wrecked!
   "The player's car is finished. Ends the run.

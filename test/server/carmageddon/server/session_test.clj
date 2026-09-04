@@ -103,7 +103,13 @@
         (is (= (rules/score-for {:peds 3 :props 2 :cars 1}) (:score (first board))))
         (is (= 2 (count board)))))
     (testing "peers are told about every destruction, scored or not"
-      (is (= 6 (count (filter #(= :b (first %)) @inbox)))))))
+      ;; Delta frames specifically. Peers also receive clock frames now, one
+      ;; per scored delta, so counting everything in the inbox counts two
+      ;; different things and answers neither question.
+      (is (= 6 (count (filter (fn [[who ^bytes frame]]
+                                (and (= :b who)
+                                     (= wire/msg-delta (bit-and (aget frame 0) 0xFF))))
+                              @inbox)))))))
 
 (deftest an-unknown-delta-kind-is-relayed-but-not-scored
   ;; A client newer than this process will send kinds it has never heard of.
@@ -160,3 +166,50 @@
         (let [board (s/scoreboard sessions "w1")]
           (is (= (rules/score-for (s/tally sessions :a))
                  (:score (first board)))))))))
+
+(deftest a-room-has-one-clock
+  (testing "everyone in a room races the same countdown, and it is the server's
+            because it has to be the same number for everybody"
+    (let [sessions (s/create)
+          inbox (atom [])
+          send! (fake-socket inbox)]
+      (s/join! sessions "w1" :a send!)
+      (s/join! sessions "w1" :b send!)
+      (s/join! sessions "w2" :c send!)
+      (let [{:keys [remaining-ms state]} (s/clock sessions "w1")]
+        (is (= :running state))
+        (is (<= (- (* 1000 rules/start-seconds) 500) remaining-ms
+                (* 1000 rules/start-seconds))
+            "a fresh room starts on the full clock"))
+      (testing "a scored delta buys the room time, and tells the room"
+        (reset! inbox [])
+        (let [before (:remaining-ms (s/clock sessions "w1"))]
+          (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :ped :index 1})
+          (let [after (:remaining-ms (s/clock sessions "w1"))
+                clocks (filter (fn [[_ ^bytes f]]
+                                 (= wire/msg-clock (bit-and (aget f 0) 0xFF)))
+                               @inbox)]
+            (is (> after before))
+            (is (<= (- after before)
+                    (long (* 1000 (get-in rules/scoring [:ped :seconds])))))
+            (testing "including the player who earned it -- they are the one
+                      waiting to see the clock move"
+              (is (= #{:a :b} (set (map first clocks))))))))
+      (testing "and the other room's clock is untouched"
+        (is (>= (* 1000 rules/start-seconds)
+                (:remaining-ms (s/clock sessions "w2")))))
+      (testing "an unscored delta buys nothing"
+        (let [before (:remaining-ms (s/clock sessions "w1"))]
+          (s/handle-delta! sessions :a {:cx 0 :cz 0 :kind :pickup :index 2})
+          (is (>= before (:remaining-ms (s/clock sessions "w1")))))))))
+
+(deftest a-round-that-is-over-stays-over
+  (testing "a straggler still smashing crates cannot restart it for everybody"
+    (let [sessions (s/create)]
+      (s/join! sessions "w1" :a (fn [_ _]))
+      ;; Wind the deadline back past now.
+      (swap! sessions assoc-in [:clocks "w1" :deadline] (- (System/currentTimeMillis) 10))
+      (is (= :over (:state (s/clock sessions "w1"))))
+      (is (nil? (s/extend-clock! sessions "w1" 30.0)))
+      (is (= :over (:state (s/clock sessions "w1"))))
+      (is (zero? (:remaining-ms (s/clock sessions "w1")))))))

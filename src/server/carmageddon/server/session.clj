@@ -25,9 +25,53 @@
 ;; Generous: a dropped connection can leave a real gap between snapshots.
 (def max-gap-seconds 2.0)
 
-(defn create [] (atom {:players {} :next-id 1}))
+(defn create [] (atom {:players {} :next-id 1 :clocks {}}))
+
+;; --- the room's clock -------------------------------------------------------
+;;
+;; A room has one clock and everybody in it is racing the same one. Before
+;; this, every player counted down their own ninety seconds on their own
+;; machine: the world was shared and the run was not, so a "room" was parallel
+;; solo games that happened to smash the same crates.
+;;
+;; It lives here rather than on any client because it has to be the same number
+;; for everybody, and because what extends it -- destruction the server has
+;; accepted -- is already counted here.
+;;
+;; What it does *not* count is a rival wrecked or a dent put in one. Rivals are
+;; local AI: your rivals are not in anybody else's world, so a rival is not a
+;; shared-world event and cannot extend a shared clock. Those still score
+;; points, which are yours; the clock is the room's.
 
 (defn- now-ms [] (System/currentTimeMillis))
+
+(defn- fresh-clock [] {:deadline (+ (now-ms) (long (* 1000 rules/start-seconds)))})
+
+(defn clock
+  "The room's clock as `{:remaining-ms n :state :running|:over}`, starting it
+  if this is the first anyone has asked."
+  [sessions world-id]
+  (let [c (or (get-in @sessions [:clocks world-id])
+              (let [c (fresh-clock)]
+                (swap! sessions assoc-in [:clocks world-id] c)
+                c))
+        left (- (:deadline c) (now-ms))]
+    {:remaining-ms (max 0 left)
+     :state (if (pos? left) :running :over)}))
+
+(defn extend-clock!
+  "Push the room's deadline out by `seconds`. Nothing happens once it has run
+  out -- a round that is over stays over, and a straggler still smashing crates
+  cannot restart it for everybody."
+  [sessions world-id seconds]
+  (when (and (pos? seconds) (= :running (:state (clock sessions world-id))))
+    (swap! sessions update-in [:clocks world-id :deadline] + (long (* 1000 seconds)))
+    true))
+
+(defn forget-clock!
+  "Drop a room's clock, for when the last player leaves it."
+  [sessions world-id]
+  (swap! sessions update :clocks dissoc world-id))
 
 (defn implausible
   "Why this snapshot should be dropped, or nil if it is fine.
@@ -94,6 +138,15 @@
   (doseq [p (peers sessions ch)]
     ((:send p) (:ch p) frame)))
 
+(defn broadcast-all!
+  "Send a frame to everyone in a world, including whoever caused it. The clock
+  is the one thing the sender needs back: they earned the seconds and they are
+  waiting to see them."
+  [sessions world-id frame]
+  (doseq [p (vals (:players @sessions))
+          :when (= world-id (:world-id p))]
+    ((:send p) (:ch p) frame)))
+
 (defn handle-state!
   "Accept, record and relay one car snapshot. Returns :relayed or the reason it
   was dropped."
@@ -135,9 +188,18 @@
   still only counts what the rules describe."
   ([sessions ch msg] (handle-delta! sessions ch msg (wire/encode-delta msg)))
   ([sessions ch {:keys [kind]} frame]
-   (when (get-in @sessions [:players ch])
+   (when-let [me (get-in @sessions [:players ch])]
      (when-let [field (scored-as kind)]
-       (swap! sessions update-in [:players ch :tally field] inc))
+       (swap! sessions update-in [:players ch :tally field] inc)
+       ;; And the room gets the time it bought. Broadcast to everyone rather
+       ;; than to everyone else: the player who earned it is the one waiting to
+       ;; see the clock move.
+       (let [secs (get-in rules/scoring [(get rules/tally-fields field) :seconds] 0)
+             world (:world-id me)]
+         (when (extend-clock! sessions world secs)
+           (let [{:keys [remaining-ms state]} (clock sessions world)]
+             (broadcast-all! sessions world
+                             (wire/encode-clock remaining-ms state))))))
      (broadcast! sessions ch frame)
      (get-in @sessions [:players ch :tally]))))
 

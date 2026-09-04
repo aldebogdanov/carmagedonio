@@ -108,12 +108,17 @@
 (defn- apply-inbound!
   "Drain the transport. Everything the network can say about the world arrives
   here: who moved, who left, and what got destroyed."
-  [transport remotes props-state peds-state traffic-state bridges powerups now]
+  [transport remotes props-state peds-state traffic-state bridges powerups game now]
   (doseq [msg (net/-poll! transport)]
     (case (:type msg)
       :welcome (remote/set-self! remotes (:player-id msg))
       :state   (doseq [car (:cars msg)] (remote/observe! remotes now car))
       :bye     (remote/forget! remotes (:player-id msg))
+      ;; The room's clock. Everyone in here is racing the same one, and the
+      ;; first of these switches this run onto it for good.
+      :clock   (game/room-clock! game
+                                 (/ (:remaining-ms msg) 1000.0)
+                                 (= :over (:state msg)))
       :delta   (let [{:keys [cx cz kind index]} msg
                      key [cx cz]]
                  ;; Someone else destroyed something. Apply it locally so the
@@ -297,7 +302,7 @@
           (when (zero? (mod tick snap-every))
             (net/-send! transport (wire/encode-state tick [(car-snapshot sim)])))
           (apply-inbound! transport remotes props-state peds-state traffic-state
-                          bridges powerups-state (js/Date.now))))
+                          bridges powerups-state game (js/Date.now))))
 
       :on-frame
       (fn [alpha dt]

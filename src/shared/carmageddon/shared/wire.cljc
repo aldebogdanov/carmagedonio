@@ -22,6 +22,7 @@
 (def msg-state   3)   ; both ways: car snapshots
 (def msg-delta   4)   ; both ways: something in the world was destroyed
 (def msg-bye     5)   ; server -> client: player N left
+(def msg-clock   6)   ; server -> client: how long this room has left
 
 (def car-bytes 30)
 
@@ -151,6 +152,26 @@
     (put-u16! b 1 k/protocol-version)
     (bytes-of b)))
 
+(def clock-states
+  "What the room's clock is doing. One byte, and appending is safe."
+  {:running 0 :over 1})
+(def clock-state-of (into {} (map (fn [[k v]] [v k]) clock-states)))
+
+(defn encode-clock
+  "How long the room has left, in milliseconds.
+
+  A duration rather than a deadline, because the two machines do not agree
+  about what time it is and there is no reason to make them: the client anchors
+  what it is told to its own clock the instant it arrives, counts down from
+  there, and is re-anchored by the next one. Drift over a three-minute round is
+  a rounding error, and every extension sends a fresh one anyway."
+  [remaining-ms state]
+  (let [b (alloc 6)]
+    (put-u8! b 0 msg-clock)
+    (put-i32! b 1 (max 0 (long remaining-ms)))
+    (put-u8! b 5 (clock-states state 0))
+    (bytes-of b)))
+
 (defn encode-bye [player-id]
   (let [b (alloc 3)]
     (put-u8! b 0 msg-bye)
@@ -193,6 +214,8 @@
           msg-welcome {:type :welcome :player-id (get-u16 b 1)
                        :seed (get-i32 b 3) :protocol (get-u16 b 7)}
           msg-bye     {:type :bye :player-id (get-u16 b 1)}
+          msg-clock   {:type :clock :remaining-ms (get-i32 b 1)
+                       :state (clock-state-of (get-u8 b 5) :running)}
           msg-delta   {:type :delta :cx (get-i32 b 1) :cz (get-i32 b 5)
                        :kind (delta-kind-of (get-u8 b 9)) :index (get-u16 b 10)}
           msg-state   (let [tick (get-i32 b 1)

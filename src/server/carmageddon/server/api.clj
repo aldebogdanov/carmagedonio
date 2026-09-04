@@ -127,8 +127,13 @@
          req
          {:on-open
           (fn [ch]
-            (let [p (session/join! sessions world-id ch send-frame!)]
-              (send-frame! ch (wire/encode-welcome (:id p) (:seed world)))))
+            (let [p (session/join! sessions world-id ch send-frame!)
+                  {:keys [remaining-ms state]} (session/clock sessions world-id)]
+              (send-frame! ch (wire/encode-welcome (:id p) (:seed world)))
+              ;; Straight away, so a player who joins a room in progress is on
+              ;; the room's clock from their first frame rather than starting
+              ;; their own three minutes.
+              (send-frame! ch (wire/encode-clock remaining-ms state))))
 
           :on-receive
           (fn [ch data]
