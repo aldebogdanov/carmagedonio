@@ -15,6 +15,12 @@
 ;; every network peer had to carry an opinion about them.
 (def ^:private lights-forced (volatile! false))
 
+;; What a thumb is doing, when there is one. Held here rather than merged in
+;; `main` so that `sample` stays the one place a `Command` is assembled: a
+;; command has to mean the same thing whether a key, a thumb, the AI or the
+;; network produced it, and two places building one is two chances to disagree.
+(def ^:private touch (volatile! nil))
+
 (def ^:private bindings
   {"KeyW" :fwd   "ArrowUp"    :fwd
    "KeyS" :back  "ArrowDown"  :back
@@ -54,6 +60,16 @@
   []
   (down? :handbrake))
 
+(defn use-touch!
+  "Register the on-screen controls' state atom, or nil to forget them."
+  [state]
+  (vreset! touch state))
+
+(defn- pad
+  "What the thumbs are asking for, or nothing at all."
+  []
+  (if-let [t @touch] @t {:steer 0.0 :gas false :brake false :handbrake false}))
+
 (defn lights-forced?
   "Has the driver switched the lights on themselves?
 
@@ -70,9 +86,14 @@
   Axes are already normalised to [-1, 1] / [0, 1] here rather than in the sim,
   so a networked or AI-driven command is indistinguishable from a human one."
   [tick]
-  (->Command tick
-             (if (down? :fwd) 1.0 0.0)
-             (if (down? :back) 1.0 0.0)
-             (+ (if (down? :left) -1.0 0.0) (if (down? :right) 1.0 0.0))
-             (down? :handbrake)
-             (down? :reset)))
+  (let [{:keys [steer gas brake handbrake]} (pad)]
+    (->Command tick
+               (if (or (down? :fwd) gas) 1.0 0.0)
+               (if (or (down? :back) brake) 1.0 0.0)
+               ;; Whichever is asking for more lock. Adding them would let a
+               ;; key and a thumb cancel each other out, which is a way to be
+               ;; surprised by a car that will not turn.
+               (let [k (+ (if (down? :left) -1.0 0.0) (if (down? :right) 1.0 0.0))]
+                 (if (> (js/Math.abs steer) (js/Math.abs k)) steer k))
+               (or (down? :handbrake) handbrake)
+               (down? :reset))))

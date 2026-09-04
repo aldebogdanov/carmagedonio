@@ -27,6 +27,7 @@
             [carmageddon.client.render :as render]
             [carmageddon.client.rivals :as rivals]
             [carmageddon.client.sim :as sim]
+            [carmageddon.client.touch :as touch]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.client.weather :as weather]
             [carmageddon.shared.constants :as k]
@@ -479,8 +480,10 @@
         ;; same thing whether a human, the AI or the network produced it.
         detach    (let [d-input (input/attach!)
                         d-cam   (camera/attach! (:camera-state rs) canvas)
-                        d-map   (minimap/attach! mm)]
-                    (fn [] (d-input) (d-cam) (d-map)))
+                        d-map   (minimap/attach! mm)
+                        ;; nil on a device that does not want them.
+                        d-touch (touch/attach!)]
+                    (fn [] (d-input) (d-cam) (d-map) (when d-touch (d-touch))))
         [sx _ sz] (:spawn @s)]
            ;; The one place physics impacts become gameplay.
            ;;
