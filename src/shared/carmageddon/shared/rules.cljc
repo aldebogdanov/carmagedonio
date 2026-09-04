@@ -26,16 +26,25 @@
   A dent is a tenth of a rival's health. Working one over from pristine to
   wrecked pays 225 on the way and 900 at the end, so the kill is still very
   clearly the prize -- but a fight you lose the last hit of is no longer worth
-  nothing at all."
-  {:ped    {:points 230 :seconds 3.0}
-   :prop   {:points 25  :seconds 0.4}
-   :car    {:points 140 :seconds 1.6}
-   :wreck  {:points 900 :seconds 12.0}
-   :dent   {:points 25  :seconds 0.25}
-   :coin   {:points 45  :seconds 0.15}
-   :nugget {:points 400 :seconds 2.0}})
+  nothing at all.
 
-(def start-seconds 90.0)
+  Every clock figure went up by about half when ninety seconds turned out to
+  be the length of time it takes to *find* something worth hitting rather than
+  to hit it. The world is a couple of kilometres between one crowd and the
+  next; a run that ends before you have driven across it is a run nobody gets
+  to play."
+  {:ped    {:points 230 :seconds 4.5}
+   :prop   {:points 25  :seconds 0.6}
+   :car    {:points 140 :seconds 2.5}
+   :wreck  {:points 900 :seconds 18.0}
+   :dent   {:points 25  :seconds 0.4}
+   :coin   {:points 45  :seconds 0.25}
+   :nugget {:points 400 :seconds 3.0}})
+
+;; Doubled. Ninety seconds is about how long it takes to work out where you
+;; are and pick a direction, which left nothing for the part of the game that
+;; is actually the game.
+(def start-seconds 180.0)
 
 ;; UNPLAYTESTED. An AI hunting pedestrians manages roughly one kill every eight
 ;; seconds, which puts 40 out of reach; a human aiming at a crowd should be much

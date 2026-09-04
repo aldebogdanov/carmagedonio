@@ -448,6 +448,18 @@
        :half     (:half (road-profile cls))
        :shoulder (verge cls u)
        :class    cls
+       ;; How made-up the surface is, 0 for a dirt lane and 1 for tarmac.
+       ;;
+       ;; Decided here, where the urbanness under the street is already known,
+       ;; and not from the class alone -- which is what it was. A back street
+       ;; in the middle of a city was classified exactly like a farm track and
+       ;; drawn as one, so every low-grade road in every town came out the
+       ;; colour of mud. A lane is a dirt track because of where it is, not
+       ;; because of what it is called.
+       :paved    (case cls
+                   :arterial  1.0
+                   :collector (max 0.65 (min 1.0 (* 1.5 u)))
+                   (min 1.0 (* 1.7 u)))
        :ya       ya
        :yb       yb
        :lift-a   lift-a
@@ -485,18 +497,19 @@
 (defn- segments-of
   "Flatten streets into [x1 z1 y1 x2 z2 y2 half shoulder paved ...].
 
-  `paved` is 0 for a lane and 1 for an arterial. It rides along in the segment
-  array because the ground needs it: out in the country a local street is a dirt
-  track and a main road is still tarmac, and the only thing that knows which is
-  which by the time the colour is chosen is the segment that won.
+  `paved` is 0 for a lane and 1 for tarmac, and it is decided by `street` from
+  the urbanness under it rather than from the class. It rides along in the
+  segment array because the ground needs it: out in the country a local street
+  is a dirt track and a main road is still tarmac, and the only thing that
+  knows which is which by the time the colour is chosen is the segment that
+  won.
 
   Flat and typed because `road-at` runs about a thousand times per chunk against
   this array; boxed vector access shows up plainly in a profile."
   [streets]
   (let [out (transient [])]
-    (doseq [{:keys [points half shoulder ya yb class]} streets]
-      (let [n (count points)
-            paved (case class :arterial 1.0 :collector 0.65 0.0)]
+    (doseq [{:keys [points half shoulder ya yb paved]} streets]
+      (let [n (count points)]
         (dotimes [i (dec n)]
           (let [[x1 z1] (nth points i)
                 [x2 z2] (nth points (inc i))

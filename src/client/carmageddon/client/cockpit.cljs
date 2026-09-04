@@ -189,7 +189,13 @@
 
     ;; The clock, which is the thing that ends the run.
     (let [low? (< remaining 15.0)]
-      (text! ctx (.toFixed remaining 1) 300 58 (str "700 34px " mono)
+      ;; Tenths below a hundred seconds and whole ones above. Nobody needs a
+      ;; tenth of a second when they have four minutes, and six digits at this
+      ;; size runs into the column beside it.
+      (text! ctx (if (< remaining 100.0)
+                   (.toFixed remaining 1)
+                   (str (js/Math.round remaining)))
+             300 58 (str "700 34px " mono)
              (cond (= :lost state) bad low? bad :else ink) "left")
       (text! ctx "seconds left" 302 74 (str "9px " mono) dim "left"))
 

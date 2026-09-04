@@ -4,16 +4,36 @@
   (:require [clojure.test :refer [deftest is testing]]
             [carmageddon.shared.rules :as rules]))
 
+(defn- close? [a b] (< (abs (- a b)) 1e-9))
+(defn- pts  [k] (get-in rules/scoring [k :points]))
+(defn- secs [k] (get-in rules/scoring [k :seconds]))
+
+;; Both of these assert the *summation*, against the table rather than against
+;; copies of the numbers in it. They were written with the figures inlined,
+;; which meant a tuning pass -- the most ordinary change anyone can make here --
+;; failed two assertions that had no opinion about tuning.
+
 (deftest score-is-derived-not-remembered
   (is (= 0 (rules/score-for {})))
-  (is (= 230 (rules/score-for {:peds 1})))
-  (is (= 925 (rules/score-for {:props 1 :wrecks 1})))
-  (is (= (+ (* 3 230) (* 2 25) 900)
+  (is (= (pts :ped) (rules/score-for {:peds 1})))
+  (is (= (+ (pts :prop) (pts :wreck)) (rules/score-for {:props 1 :wrecks 1})))
+  (is (= (+ (* 3 (pts :ped)) (* 2 (pts :prop)) (pts :wreck))
          (rules/score-for {:peds 3 :props 2 :wrecks 1}))))
 
 (deftest seconds-earned-tracks-the-table
-  (is (= 3.0 (rules/seconds-earned {:peds 1})))
-  (is (= 12.4 (rules/seconds-earned {:props 1 :wrecks 1}))))
+  (is (close? (secs :ped) (rules/seconds-earned {:peds 1})))
+  (is (close? (+ (secs :prop) (secs :wreck))
+              (rules/seconds-earned {:props 1 :wrecks 1})))
+  (is (close? (+ (* 3 (secs :ped)) (* 2 (secs :car)))
+              (rules/seconds-earned {:peds 3 :cars 2}))))
+
+(deftest every-scoring-entry-is-worth-something
+  (testing "the one thing the table itself can get wrong that the sums cannot"
+    (doseq [[kind {:keys [points seconds]}] rules/scoring]
+      (is (pos? points) (str kind " is worth no points"))
+      (is (not (neg? seconds)) (str kind " buys negative time")))
+    (testing "and every countable thing has an entry to score it with"
+      (is (every? rules/scoring (vals rules/tally-fields))))))
 
 (deftest verify-accepts-a-consistent-run
   (let [tally {:peds 3 :props 2 :wrecks 0}
