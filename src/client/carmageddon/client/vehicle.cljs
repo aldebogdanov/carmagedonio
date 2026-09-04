@@ -64,6 +64,12 @@
       v
       (doto v (aset 0 (/ x len)) (aset 1 (/ y len)) (aset 2 (/ z len))))))
 
+;; Where a tyre stops rolling and starts sliding, and how much of its
+;; cornering it has lost by the time it is fully locked.
+(def ^:private lock-slip 0.40)
+(def ^:private lock-band 0.50)
+(def ^:private lock-loss 0.85)
+
 (defn- magic
   "Pacejka-shaped normalised force curve. Rises to ~1.0 at the peak slip, then
   decays -- that decay is the whole point."
@@ -391,7 +397,27 @@
             mu   (max 0.25 mu)
             cap  (* mu load)
             fx0  (* cap (magic kappa long-B long-C long-E))
-            fy0  (* -1.0 cap (magic alpha lat-B lat-C lat-E))
+            ;; A tyre that has stopped rolling has stopped steering.
+            ;;
+            ;; Past a slip ratio of about 0.4 the contact patch is sliding
+            ;; rather than gripping, and a sliding patch has no directional
+            ;; preference left to corner with. Without this the friction
+            ;; ellipse alone leaves a fully locked wheel about seventy per cent
+            ;; of its cornering force -- scaling a pair down proportionally
+            ;; never takes either of them to nothing -- and that is why yanking
+            ;; the handbrake made the car lean and never made it rotate.
+            ;;
+            ;; It cuts both ways, which is the point: it is also what makes
+            ;; wheelspin under power step the back out.
+            ;;
+            ;; Prioritising longitudinal outright was the first attempt and it
+            ;; was much worse: a car holding a steady corner is also making
+            ;; drive force, so giving that force the budget first took the
+            ;; skidpad from 0.83 g to 0.24. This only touches a tyre that has
+            ;; actually let go.
+            slide (min 1.0 (max 0.0 (/ (- (js/Math.abs kappa) lock-slip) lock-band)))
+            fy0  (* -1.0 cap (magic alpha lat-B lat-C lat-E)
+                    (- 1.0 (* lock-loss slide)))
             mag  (js/Math.hypot fx0 fy0)
             scl  (if (> mag cap) (/ cap mag) 1.0)
             fxv  (* fx0 scl)

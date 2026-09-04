@@ -12,12 +12,21 @@
   (:require [carmageddon.shared.constants :as k]
             [carmageddon.shared.worldgen :as worldgen]))
 
-(def ^:private radius 4)
-;; Chunks either side, so 9 across -- 2.3 km of context. It used to be 13, and
-;; that was a better world map than it was a tactical one: at that scale a
-;; rival at the end of its leash is eleven pixels from the centre, which is
-;; underneath the marker for your own car.
-(def ^:private span (inc (* 2 radius)))
+;; Chunks across the map, widest first. Nine -- 2.3 km -- is what this was, and
+;; it is a good compromise and therefore not very good at either job: at that
+;; scale a whole district is a smudge and a junction is invisible. The two
+;; questions a map gets asked are "where am I in the world" and "which of these
+;; is my turning", and they want different maps.
+(def ^:private zooms [13 9 5 3 1])
+(def ^:private default-zoom 1)
+
+;; Below this, the map stops being a picture of regions and starts being a
+;; street plan: real streets rather than the arterial lattice, and the blocks
+;; between them.
+(def ^:private plan-below 6)
+
+(def ^:private block-colour "rgba(46,44,42,0.55)")
+(def ^:private local-colour "rgba(24,24,26,0.75)")
 
 (def ^:private colours
   {:water    "#3f6f96"
@@ -52,12 +61,18 @@
        ;; Landmarks are cached the same way and for the same reason: one per
        ;; district, worked out from the seed, never changing.
        :landmark-cache (js/Map.)
+       ;; And the street plan, for the same reason and with the same lifetime:
+       ;; a lattice cell's streets and its block are functions of the seed.
+       ;; Without this the 1.3 km plan cost 18 ms to draw -- a dropped frame,
+       ;; twice a second, for a picture that had not changed.
+       :plan-cache (js/Map.)
        :misses (volatile! 0)
        :at (volatile! nil)
        ;; Rivals are shown by default and can be switched off. Some players
        ;; would rather be surprised, and a map with four things moving on it
        ;; is a busier read than one with none.
-       :show-rivals (volatile! true)})))
+       :show-rivals (volatile! true)
+       :zoom (volatile! default-zoom)})))
 
 (defn attach!
   "The map's own controls. Returns a detach fn.
@@ -65,15 +80,24 @@
   Separate from `input/attach!` on purpose, for the same reason the camera's
   controls are: what a local player has chosen to draw on their map is not part
   of the `Command` the simulation consumes and must never reach the wire."
-  [{:keys [show-rivals]}]
+  [{:keys [show-rivals zoom]}]
   (let [on-key (fn [^js e]
-                 (when (= "KeyM" (.-code e))
-                   (.preventDefault e)
-                   (vswap! show-rivals not)))]
+                 (case (.-code e)
+                   "KeyM" (do (.preventDefault e) (vswap! show-rivals not))
+                   ;; The brackets, because every other key on the left of the
+                   ;; board is already driving the car.
+                   "BracketRight"
+                   (do (.preventDefault e)
+                       (vswap! zoom #(min (dec (count zooms)) (inc %))))
+                   "BracketLeft"
+                   (do (.preventDefault e) (vswap! zoom #(max 0 (dec %))))
+                   nil))]
     (.addEventListener js/window "keydown" on-key)
     (fn detach! [] (.removeEventListener js/window "keydown" on-key))))
 
 (defn rivals-shown? [{:keys [show-rivals]}] (boolean @show-rivals))
+
+(defn- span-of [{:keys [zoom]}] (nth zooms @zoom))
 
 (defn- cache-key
   "Injective for any coordinates anyone will drive to, and a number rather than
@@ -170,6 +194,57 @@
             sz (* (- (* cz k/chunk-size) z0) per-m)]
         (set! (.-fillStyle ctx) (get colours (kind-at ms cx cz) "#000"))
         (.fillRect ctx sx sz (inc cell) (inc cell))))))
+
+(defn- draw-plan!
+  "The actual street network and the blocks between it, for when the map is
+  zoomed in far enough to be a street plan rather than a picture of regions.
+
+  Both come straight from the generator and neither builds a chunk: a street is
+  a polyline the lattice already knows, and a block is the interior of a
+  lattice cell, which is four node positions and a setback. What is *not* drawn
+  is the buildings -- those are the expensive half of generating a chunk, and a
+  map wants the block anyway. A street map has never drawn individual houses."
+  [{:keys [^js ctx seed ^js plan-cache]} px pz per-m size]
+  (let [half (* 0.5 (/ size per-m))
+        x0 (- px half) z0 (- pz half)
+        x1 (+ px half) z1 (+ pz half)
+        sx (fn [x] (* (- x x0) per-m))
+        sz (fn [z] (* (- z z0) per-m))
+        g (fn [v] (long (Math/floor (/ v worldgen/street-spacing))))
+        cell (fn [gx gz]
+               (let [k (str gx "," gz)]
+                 (or (.get plan-cache k)
+                     (let [v #js {:in (worldgen/cell-interior seed gx gz)
+                                  :streets (worldgen/cell-streets seed gx gz)}]
+                       (.set plan-cache k v)
+                       v))))
+        cells (for [gx (range (g x0) (+ 2 (g x1)))
+                    gz (range (g z0) (+ 2 (g z1)))]
+                (cell gx gz))]
+    ;; Blocks first, so the streets sit on top of them.
+    (set! (.-fillStyle ctx) block-colour)
+    (doseq [^js c cells
+            :let [in (.-in c)]
+            :when in]
+      (let [{:keys [x0 x1 z0 z1]} in]
+        (.fillRect ctx (sx x0) (sz z0)
+                   (* (- x1 x0) per-m) (* (- z1 z0) per-m))))
+    ;; Then every street, at something like its real width, so an arterial
+    ;; reads as one without being labelled.
+    (doseq [^js c cells
+            st (.-streets c)
+            :let [pts (:points st)]]
+      (set! (.-strokeStyle ctx)
+            (if (= :local (:class st)) local-colour road-colour))
+      (set! (.-lineWidth ctx) (max 1.0 (* 2.0 (:half st) per-m)))
+      (set! (.-lineCap ctx) "round")
+      (.beginPath ctx)
+      (let [[ax az] (first pts)]
+        (.moveTo ctx (sx ax) (sz az)))
+      (doseq [[bx bz] (rest pts)]
+        (.lineTo ctx (sx bx) (sz bz)))
+      (.stroke ctx))
+    (set! (.-lineCap ctx) "butt")))
 
 (defn- draw-roads!
   "The arterial lattice, straight from the line indices.
@@ -335,12 +410,15 @@
   indistinguishable from one that updates sixty times."
   ([ms x z heading] (draw! ms x z heading nil nil))
   ([ms x z heading blips] (draw! ms x z heading blips nil))
-  ([{:keys [^js canvas ^js label at show-rivals] :as ms} x z heading blips players]
+  ([{:keys [^js canvas ^js ctx ^js label at show-rivals] :as ms} x z heading blips players]
   (when canvas
     (let [size (.-width canvas)
+          span (span-of ms)
           per-m (/ size (* span k/chunk-size))]
       (draw-cells! ms x z per-m size)
-      (draw-roads! ms x z per-m size)
+      (if (< span plan-below)
+        (draw-plan! ms x z per-m size)
+        (draw-roads! ms x z per-m size))
       (draw-landmarks! ms x z per-m size)
       (when (and @show-rivals (seq blips))
         (draw-rivals! ms x z per-m size blips))
@@ -350,7 +428,16 @@
       ;; The label says where you are and what is nearby, which between them
       ;; are the two things a place needs before it is somewhere rather than
       ;; some coordinates.
-      (let [near (first (landmarks-near ms x z 900.0))
+      ;; How much ground the map is covering, bottom left. Without it a zoom
+      ;; step is a picture that changed rather than a scale that did.
+      (let [across (* span k/chunk-size)]
+        (set! (.-fillStyle ctx) "rgba(255,255,255,0.75)")
+        (set! (.-font ctx) "600 11px ui-monospace, Menlo, monospace")
+        (.fillText ctx (if (>= across 1000)
+                         (str (.toFixed (/ across 1000.0) 1) " km")
+                         (str (js/Math.round across) " m"))
+                   6 (- size 6)))
+      (let [near (first (landmarks-near ms x z (* 0.75 (/ size per-m))))
             nm   (str (area-here ms x z)
                       (when near
                         (str "  \u00b7  " (worldgen/landmark-labels (:kind near))

@@ -471,6 +471,19 @@
        :bridge?  (or (pos? lift-a) (pos? lift-b)
                      (spans-a-gap? seed a b ya yb))})))
 
+(defn cell-streets
+  "The streets lattice cell (gx, gz) owns: the one leaving it along +X and the
+  one along +Z, where they exist.
+
+  The unit `streets-in-bounds` is built from, and public because a caller that
+  redraws the same ground repeatedly -- the map -- wants to cache per cell
+  rather than per query box. A cell's streets are a function of the seed and
+  never change, so caching them is caching forever."
+  [seed gx gz]
+  (cond-> []
+    (edge-exists? seed gx gz true)  (conj (street seed gx gz true))
+    (edge-exists? seed gx gz false) (conj (street seed gx gz false))))
+
 (defn streets-in-bounds
   "Every street that could reach the box [x0,x1] x [z0,z1].
 
@@ -484,10 +497,7 @@
         out (transient [])]
     (doseq [gx (range gx0 (inc gx1))
             gz (range gz0 (inc gz1))]
-      (when (edge-exists? seed gx gz true)
-        (conj! out (street seed gx gz true)))
-      (when (edge-exists? seed gx gz false)
-        (conj! out (street seed gx gz false))))
+      (doseq [s (cell-streets seed gx gz)] (conj! out s)))
     (persistent! out)))
 
 ;; --- road field: the streets near one chunk, indexed for lookup -------------

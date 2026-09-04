@@ -42,7 +42,14 @@
 
 ;; Below this the car is nudging, not crashing.
 (def ^:private min-smash-speed 4.0)     ; m/s
+;; What one contact event can do. Scenery is capped hard so that a scrape
+;; spread over many contacts cannot write a car off in a single tick.
 (def ^:private max-damage-per-hit 0.02)
+;; Another car is a different matter, and this was the same 0.02: at two per
+;; cent an event, with a rival written off at ninety, ramming one flat out was
+;; something you had to do dozens of times before anything happened. It read as
+;; the truck being invulnerable rather than as the muscle car being light.
+(def ^:private max-vehicle-damage-per-hit 0.10)
 (def ^:private opponent-count 3)
 
 ;; What a gas cylinder and a tanker are worth, as fire.
@@ -561,11 +568,22 @@
                         ;; every qualifying impact threw out of the contact
                         ;; callback and took the rest of that tick with it.
                         ;; Nothing was damaged, and no opponent could be wrecked.
-                        (doseq [[vi hit] [[v1 h2] [v2 h1]]
+                        (doseq [[vi hit other] [[v1 h2 v2] [v2 h1 v1]]
                                 :when vi]
-                          (let [veh (nth (sim/vehicles s) vi)]
-                            (when (> (js/Math.abs (vehicle/forward-speed veh))
-                                     min-smash-speed)
+                          (let [veh (nth (sim/vehicles s) vi)
+                                other-veh (when other (nth (sim/vehicles s) other))
+                                ;; How fast the *collision* was, not how fast
+                                ;; this particular car happened to be going. The
+                                ;; guard asked whether the car being damaged was
+                                ;; moving, which made anything stationary
+                                ;; immune to being rammed -- and a rival that
+                                ;; has just been stopped by the last hit is
+                                ;; exactly what you are about to hit again.
+                                closing (max (js/Math.abs (vehicle/forward-speed veh))
+                                             (if other-veh
+                                               (js/Math.abs (vehicle/forward-speed other-veh))
+                                               0.0))]
+                            (when (> closing min-smash-speed)
                               ;; Pedestrians and clutter barely scratch the
                               ;; paint; terrain, buildings and other cars hit
                               ;; properly. Capped per event so one scrape spread
@@ -573,7 +591,9 @@
                               ;; single tick.
                               (vehicle/add-damage!
                                veh
-                               (min max-damage-per-hit
+                               (min (if other-veh
+                                      max-vehicle-damage-per-hit
+                                      max-damage-per-hit)
                                     (* (if (or (props/prop? ps hit) (peds/ped? pd hit))
                                          0.04 1.0)
                                        (/ (max 0.0 (- force damage-force-floor))
