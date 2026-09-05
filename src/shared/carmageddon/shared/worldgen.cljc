@@ -1317,7 +1317,18 @@
    {:name :factory   :cover 0.82 :height [9.0 16.0]}
    {:name :warehouse :cover 0.88 :height [7.0 11.0]}
    {:name :civic     :cover 0.62 :height [10.0 19.0]}
-   {:name :barn      :cover 0.45 :height [5.0 8.5]}])
+   {:name :barn      :cover 0.45 :height [5.0 8.5]}
+   ;; Heavy industry. Appended, because the index into this vector travels in
+   ;; the buildings array and reordering it rebuilds every city ever generated.
+   ;;
+   ;; An industrial estate was a district of identical sheds: `:factory` and
+   ;; `:warehouse` are light production and stay exactly as they were, but a
+   ;; works is not a bigger shed -- it is tanks, a stack you can see from two
+   ;; districts away, and a gantry. Low and wide, because the height is in the
+   ;; plant rather than in the building.
+   {:name :plant     :cover 0.86 :height [7.0 12.0]}
+   ;; And the yards between them, which were empty ground.
+   {:name :yard      :cover 0.92 :height [2.4 4.0]}])
 
 (def zone-index (zipmap (map :name building-zones) (range)))
 
@@ -1336,7 +1347,12 @@
       ;; wants a band of density rather than a floor: without the upper bound a
       ;; quarter of downtown came out as warehousing.
       (and (> ind 0.68) (< 0.22 u 0.74))
-      (if (< p 0.55) :factory :warehouse)
+      ;; Heavy plant at the core of an estate, light units around its edge.
+      ;; That gradient is what makes an industrial area read as one place
+      ;; rather than as a lot of the same shed.
+      (if (> ind 0.80)
+        (cond (< p 0.32) :plant (< p 0.54) :yard (< p 0.80) :factory :else :warehouse)
+        (cond (< p 0.40) :factory (< p 0.74) :warehouse (< p 0.88) :yard :else :plant))
 
       (> u 0.80)
       (if main?
@@ -1861,6 +1877,52 @@
               (for [i (range doors)]
                 (part (* hx (- (/ (* 2.0 (+ i 0.5)) doors) 1.0)) 2.0 (- (+ hz 0.1))
                       (* hx (/ 1.3 doors)) 4.0 0.3 :box (:door c)))))
+
+      :plant
+      ;; A works: a low shed, a rank of storage tanks beside it, a stack that
+      ;; can be seen from the next district, and a gantry over the yard.
+      (let [tanks (+ 2 (prng/next-int! r 3))
+            tr    (min 3.4 (* 0.30 hx))
+            th    (* tr (prng/next-range! r 2.2 3.4))]
+        (into [base
+               ;; The stack. Twice a factory chimney and set on its own base,
+               ;; because a chimney growing straight out of a roof reads as a
+               ;; pipe and a chimney on a plinth reads as a chimney.
+               (part (* hx -0.68) (* 0.5 h) (* hz 0.55) 2.6 h 2.6 :box (:concrete c))
+               (part (* hx -0.68) (+ h 13.0) (* hz 0.55) 1.7 28.0 1.7
+                     :cylinder (:brick c))
+               ;; Gantry: two legs and a beam across the yard.
+               (part (* hx 0.86) (* 0.5 (+ h 3.0)) (* hz -0.75) 0.7 (+ h 3.0) 0.7
+                     :box (:steel c))
+               (part (* hx 0.86) (* 0.5 (+ h 3.0)) (* hz 0.75) 0.7 (+ h 3.0) 0.7
+                     :box (:steel c))
+               (part (* hx 0.86) (+ h 3.0) 0.0 1.1 0.9 (* 2 hz 0.9)
+                     :box (:steel c))
+               ;; A pipe run along the roof, which is the detail that says the
+               ;; building is doing something rather than storing something.
+               (part 0.0 (+ h 0.8) (* hz -0.55) (* 2 hx 0.92) 0.5 0.5
+                     :cylinder (:steel c))]
+              (for [i (range tanks)]
+                (part (+ (* hx -0.1) (* i 2.4 tr))
+                      (+ h (* 0.5 th))
+                      (* hz 0.1)
+                      (* 2 tr) th (* 2 tr) :cylinder (:roof-metal c)))))
+
+      :yard
+      ;; Stacked containers and a couple of squat tanks. The base is deliberately
+      ;; short: what is being drawn is a yard with things in it, not a building.
+      (let [rows (+ 2 (prng/next-int! r 3))
+            cw   (/ (* 2 hx) rows)]
+        (into [(part 0.0 (* 0.5 h) 0.0 (* 2 hx) h (* 2 hz) :box (:concrete c))
+               (part (* hx 0.6) (+ h 2.2) (* hz -0.5) 2.0 4.4 2.0
+                     :cylinder (:roof-metal c))]
+              (for [i (range rows)]
+                (let [stack (+ 1 (prng/next-int! r 3))]
+                  (part (+ (- hx) (* cw (+ i 0.5)))
+                        (+ h (* 1.3 stack))
+                        (* hz (prng/next-range! r -0.4 0.4))
+                        (* cw 0.82) (* 2.6 stack) (* 2 hz 0.55)
+                        :box (pick (:awning c) (:steel c) (:door c) (:sign c)))))))
 
       :civic
       (into [base
@@ -2586,6 +2648,27 @@
               tr   (* tr (+ 1.0 (* farm (- cr 1.0))))
               tg   (* tg (+ 1.0 (* farm (- cg 1.0))))
               tb   (* tb (+ 1.0 (* farm (- cb 1.0))))
+              ;; Hardstanding. An estate is not built on grass -- the ground
+              ;; between the sheds is concrete, oil and gravel, and it was
+              ;; coming out the same bright green as a meadow because the only
+              ;; thing greying the ground was how *built-up* a place is, and an
+              ;; industrial estate is deliberately in the middle of that range.
+              ;; Dry land only: the river runs through a works as it does
+              ;; through anywhere else.
+              ;; Like the roads and the water, this has to *cancel* the green
+              ;; rather than merely lighten it: the ground texture is painted
+              ;; green and the vertex colour multiplies it, so three numbers
+              ;; that are nearly equal make pale grass, not concrete. The
+              ;; first attempt was 1.16/1.08/1.02 -- greyed on paper, and
+              ;; still a meadow on screen.
+              ;;
+              ;; Warmer and dirtier than the city's pale blue concrete: an
+              ;; estate is oil and gravel, not a pavement.
+              ind  (* (max 0.0 (- (industrialness seed x z) 0.55)) 2.2 (- 1.0 rv))
+              ind  (min 1.0 ind)
+              tr   (+ tr (* ind (- (* gr 1.22) tr)))
+              tg   (+ tg (* ind (- (* gr 0.95) tg)))
+              tb   (+ tb (* ind (- (* gr 1.12) tb)))
               ;; Out in the country a lane is a dirt track and a main road is
               ;; still tarmac, which is what `paved` in the segment array is for.
               dirt-road (* (- 1.0 u) (- 1.0 paved))

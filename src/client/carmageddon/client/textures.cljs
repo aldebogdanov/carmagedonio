@@ -10,7 +10,8 @@
   The ground texture is not decoration. On an untextured plane there is no
   optical flow, so speed is invisible and the vehicle cannot be tuned by feel."
   (:require ["three" :as three]
-            [carmageddon.shared.prng :as prng]))
+            [carmageddon.shared.prng :as prng]
+            [carmageddon.shared.worldgen :as worldgen]))
 
 (defn- canvas ^js [size]
   (let [c (js/document.createElement "canvas")]
@@ -160,7 +161,16 @@
    {:tint [96 94 88]    :cols 6 :rows 3  :lit 0.10}                     ; factory
    {:tint [104 100 94]  :cols 3 :rows 2  :lit 0.05}                     ; warehouse
    {:tint [140 136 124] :cols 6 :rows 4  :lit 0.20}                     ; civic
-   {:tint [118 74 58]   :cols 2 :rows 2  :lit 0.06}])                   ; barn
+   {:tint [118 74 58]   :cols 2 :rows 2  :lit 0.06}                     ; barn
+   ;; Heavy plant: almost no windows, and the few there are burn all night.
+   {:tint [92 92 90]    :cols 3 :rows 2  :lit 0.32}                     ; plant
+   {:tint [86 84 80]    :cols 2 :rows 1  :lit 0.02}])                   ; yard
+
+;; `buildings/build-group!` looks a facade up as `(mod mat (count facades))`, so
+;; a zone without one here does not fail -- it silently wraps round and draws a
+;; barn's windows on a factory. One assert is cheaper than finding that.
+(assert (= (count zone-facades) (count worldgen/building-zones))
+        "every building zone needs a facade, in the same order")
 
 (defn- tyre-canvas [seed size]
   (let [c   (canvas size)
