@@ -86,7 +86,11 @@
                          :yaw (aget arr (+ o 3))
                          :sx (aget arr (+ o 4)) :sy (aget arr (+ o 5))
                          :sz (aget arr (+ o 6))
-                         :tint (int (aget arr (+ o 9)))})))
+                         ;; Left as it came. For a flat part this is a packed
+                         ;; colour and for a wall it is a shade multiplier --
+                         ;; see `worldgen/chunk-structures` -- and truncating
+                         ;; it here turned every wall's shade into zero.
+                         :tint (aget arr (+ o 9))})))
             {} (range n))))
 
 (defn- build-group!
@@ -102,9 +106,14 @@
       (.set (.-scale scratch) sx sy sz)
       (.updateMatrix scratch)
       (.setMatrixAt m i (.-matrix scratch))
-      (when plain?
-        (.setHex colour tint)
-        (.setColorAt m i colour)))
+      (if plain?
+        (.setHex colour (int tint))
+        ;; A wall's tint modulates its zone's facade rather than replacing it,
+        ;; so it is one number applied to all three channels -- and it may be
+        ;; greater than one, which is why it is set as a float rather than
+        ;; packed into a hex.
+        (.setRGB colour tint tint tint))
+      (.setColorAt m i colour))
     ;; A chunk's instances span 256 m, which the unit shape's own bounding sphere
     ;; knows nothing about; leaving culling on makes whole blocks wink out when
     ;; the chunk origin leaves the frustum.

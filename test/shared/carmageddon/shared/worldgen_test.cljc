@@ -581,15 +581,28 @@
       (is (every? (fn [i]
                     (let [o (* i w/building-part-stride)
                           prim (aget* parts (+ o 7))
-                          mat  (aget* parts (+ o 8))
-                          tint (aget* parts (+ o 9))]
+                          mat  (aget* parts (+ o 8))]
                       (and (<= 0 prim) (< prim (count w/building-prims))
                            (or (= mat w/plain-mat)
-                               (and (<= 0 mat) (< mat (count w/building-zones))))
-                           (<= 0 tint 0xffffff)
-                           ;; A float32 holds integers exactly only up to 2^24;
-                           ;; a packed 24-bit colour is the largest that fits.
-                           (= tint (Math/floor tint)))))
+                               (and (<= 0 mat) (< mat (count w/building-zones)))))))
+                  (range np))))
+    (testing "the last slot means two things, and the slot before it says which"
+      ;; A flat part carries a packed colour; a wall carries a shade
+      ;; multiplier for its zone's facade. Reading one as the other draws a
+      ;; wall in black or a roof somewhere near the origin of the colour cube.
+      (is (every? (fn [i]
+                    (let [o (* i w/building-part-stride)
+                          mat  (aget* parts (+ o 8))
+                          tint (aget* parts (+ o 9))]
+                      (if (= mat w/plain-mat)
+                        (and (<= 0 tint 0xffffff)
+                             ;; A float32 holds integers exactly only up to
+                             ;; 2^24; a packed 24-bit colour is the largest
+                             ;; that fits.
+                             (= tint (Math/floor tint)))
+                        ;; Near white, either side of it: a wall that is
+                        ;; modulated to nothing is a black hole in a terrace.
+                        (< 0.5 tint 1.5))))
                   (range np))))
     (testing "no part is inside out or of zero size"
       (is (every? (fn [i]

@@ -1916,6 +1916,16 @@
             sy (js-sin yaw) cy (js-cos yaw)
             bx (- x (* sy back))
             bz (- z (* cy back))
+            ;; A shade for this building's walls, drawn once and shared by
+            ;; every one of them.
+            ;;
+            ;; The facade texture is per *zone*, so before this a street of
+            ;; offices was not merely similar, it was the same building
+            ;; repeated -- identical windows, identical brick, as far as the
+            ;; fog. A multiplier rather than a colour, because it modulates
+            ;; the texture rather than replacing it, and it is allowed above
+            ;; 1.0 as well as below so the average street does not darken.
+            shade (prng/next-range! r 0.78 1.18)
             corners [[bx bz]
                      [(- bx bhx) (- bz bhz)] [(+ bx bhx) (- bz bhz)]
                      [(- bx bhx) (+ bz bhz)] [(+ bx bhx) (+ bz bhz)]]
@@ -1937,7 +1947,10 @@
             (conj! parts (:sx pt)) (conj! parts (:sy pt)) (conj! parts (:sz pt))
             (conj! parts (double (prim-index (:prim pt))))
             (conj! parts (if (:facade? pt) (double zi) plain-mat))
-            (conj! parts (double (:tint pt)))))))
+            ;; The last slot means two things, and which one is decided by the
+            ;; slot before it: a packed colour for a flat part, and a shade
+            ;; multiplier for a wall, whose colour is its zone's texture.
+            (conj! parts (double (if (:facade? pt) shade (:tint pt))))))))
     (let [bv (persistent! boxes)
           pv (persistent! parts)
           ba (farray (count bv))

@@ -16,9 +16,13 @@
             [carmageddon.client.cars :as cars]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.textures :as textures]
+            [carmageddon.shared.prng :as prng]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.shared.constants :as k]))
 
+;; Three stops rather than two: a real sky is deepest overhead and pales into
+;; the horizon, and one ramp between two colours misses the deep part entirely.
+(def ^:private sky-zenith 0x2f6ab4)
 (def ^:private sky-top 0x4d86c6)
 (def ^:private sky-horizon 0xbdd6e8)
 (def ^:private ground-bounce 0x54503f)
@@ -124,6 +128,9 @@
   [{:keys [^js scene chunk-material]} data]
   (let [[x0 z0] (:origin data)
         ^js m (three/Mesh. (chunk-geometry data) chunk-material)]
+    ;; Named so the weather can find the shared material and make it wet. Every
+    ;; chunk shares one, so finding any of them finds all of them.
+    (set! (.-name m) "ground")
     (.set (.-position m) x0 0 z0)
     ;; Terrain receives but does not cast. Casting would double the shadow
     ;; pass for hills that mostly shadow themselves, and self-shadowing a
@@ -140,27 +147,74 @@
   (.remove scene m)
   (.dispose (.-geometry m)))
 
-(defn- sky-texture
-  "A vertical gradient, painted once into a 2 x 256 canvas.
+(def ^:private sky-w 1024)
+(def ^:private sky-h 512)
 
-  Treated as an equirectangular map, so it works both as the background and --
-  once run through the PMREM generator -- as the environment the cars reflect.
-  A gradient is all an equirect needs when the sky has no clouds in it, and two
-  pixels wide is all it needs when nothing varies with bearing."
-  []
+(defn- sky-texture
+  "The sky, painted once as an equirectangular canvas.
+
+  It was two pixels wide: a vertical gradient, on the reasoning that nothing
+  varied with bearing. Nothing did, and that was the problem. This is the
+  background behind every shot and, through the PMREM generator, the only thing
+  the cars have to reflect -- so a sky with nothing in it is a flat sky *and*
+  paintwork with nothing on it. Everything above the roofline was one colour.
+
+  Clouds are soft radial blobs, thickest in a band above the horizon where a
+  driver actually sees them and thinning towards the zenith. Each is drawn
+  again a full turn away so the seam at due north has no edge in it, and each
+  is squashed horizontally, because a cloud seen from below is longer than it
+  is tall."
+  [seed]
   (let [^js c (js/document.createElement "canvas")
-        _ (set! (.-width c) 2)
-        _ (set! (.-height c) 256)
+        _ (set! (.-width c) sky-w)
+        _ (set! (.-height c) sky-h)
         ^js g (.getContext c "2d")
-        grad (.createLinearGradient g 0 0 0 256)
-        hex (fn [n] (str "#" (.padStart (.toString n 16) 6 "0")))]
-    (.addColorStop grad 0.0 (hex sky-top))
+        grad (.createLinearGradient g 0 0 0 sky-h)
+        hex (fn [n] (str "#" (.padStart (.toString n 16) 6 "0")))
+        rng (prng/make seed)
+        puff (fn [x y r a]
+               ;; Drawn three times, a full turn apart each way, so a cloud
+               ;; that runs off one edge arrives on the other.
+               (doseq [ox [0 (- sky-w) sky-w]]
+                 (let [rg (.createRadialGradient g (+ x ox) y 0 (+ x ox) y r)]
+                   (.addColorStop rg 0.0 (str "rgba(255,255,255," a ")"))
+                   (.addColorStop rg 0.55 (str "rgba(246,249,253," (* 0.5 a) ")"))
+                   (.addColorStop rg 1.0 "rgba(255,255,255,0)")
+                   (set! (.-fillStyle g) rg)
+                   (.beginPath g)
+                   (.ellipse g (+ x ox) y r (* 0.42 r) 0 0 6.283185307179586)
+                   (.fill g))))]
+    (.addColorStop grad 0.0 (hex sky-zenith))
+    (.addColorStop grad 0.30 (hex sky-top))
     (.addColorStop grad 0.52 (hex sky-horizon))
     ;; Below the horizon is haze, not ground: the terrain covers it, and the
     ;; only place this shows is in the cars' reflections.
     (.addColorStop grad 1.0 (hex 0x8e9384))
     (set! (.-fillStyle g) grad)
-    (.fillRect g 0 0 2 256)
+    (.fillRect g 0 0 sky-w sky-h)
+    ;; A soft brightening where the sun is, which is most of what gives a sky
+    ;; a direction rather than merely a top and a bottom.
+    (let [sx (* 0.30 sky-w) sy (* 0.30 sky-h)
+          rg (.createRadialGradient g sx sy 0 sx sy (* 0.42 sky-w))]
+      (.addColorStop rg 0.0 "rgba(255,246,214,0.5)")
+      (.addColorStop rg 1.0 "rgba(255,246,214,0)")
+      (set! (.-fillStyle g) rg)
+      (.fillRect g 0 0 sky-w sky-h))
+    ;; Cumulus. Three puffs per cloud rather than one, because a single ellipse
+    ;; reads as a smudge.
+    (dotimes [_ 46]
+      (let [x (prng/next-range! rng 0 sky-w)
+            ;; Biased towards the horizon: `t` near 1 is just above it, which
+            ;; is where a driver looks, and near 0 is the zenith, which is not.
+            t (js/Math.pow (prng/next-double! rng) 0.55)
+            y (* sky-h (- 0.46 (* 0.34 t)))
+            r (prng/next-range! rng (* 0.035 sky-w) (* 0.085 sky-w))
+            a (* (prng/next-range! rng 0.20 0.44) (+ 0.5 (* 0.5 t)))]
+        (dotimes [_ 3]
+          (puff (+ x (* r (prng/next-range! rng -0.7 0.7)))
+                (+ y (* r (prng/next-range! rng -0.22 0.22)))
+                (* r (prng/next-range! rng 0.6 1.0))
+                a))))
     (doto (three/CanvasTexture. c)
       (-> .-mapping (set! (.-EquirectangularReflectionMapping three)))
       (-> .-colorSpace (set! (.-SRGBColorSpace three))))))
@@ -170,9 +224,9 @@
 
   The environment map is what turns flat-shaded boxes into cars: paint with
   nothing to reflect reads as coloured cardboard whatever the lighting does."
-  [^js renderer]
+  [^js renderer seed]
   (let [scene   (three/Scene.)
-        tex     (sky-texture)
+        tex     (sky-texture seed)
         ^js pmrem (three/PMREMGenerator. renderer)
         env     (.-texture (.fromEquirectangular pmrem tex))
         ^js sun (three/DirectionalLight. 0xfff0d4 2.8)]
@@ -575,7 +629,7 @@
         _            (set! (.-enabled (.-shadowMap renderer)) true)
         _            (set! (.-type (.-shadowMap renderer)) (.-PCFSoftShadowMap three))
         tex          (textures/build! renderer seed)
-        [scene sun]  (build-scene! renderer)
+        [scene sun]  (build-scene! renderer seed)
         [meshes cars] (build-cars! scene sim tex)
         ^js cam      (three/PerspectiveCamera. 70 1 0.3 2000)]
     {:renderer       renderer

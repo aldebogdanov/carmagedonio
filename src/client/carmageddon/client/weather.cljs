@@ -58,6 +58,12 @@
         ;; dark car into a hole in the road.
         ^js fill (.getObjectByName scene "fill")]
     (atom {:scene scene
+           ;; Resolved on first use, not here: the scene has no ground in it
+           ;; when the weather is created -- the first chunk is still being
+           ;; generated in a worker. Every chunk shares one material, so
+           ;; finding any of them finds all of them.
+           :ground nil
+           :shine0 nil
            :sun sun
            :fill fill
            :fill0 (when fill (.-intensity fill))
@@ -94,8 +100,11 @@
 (defn update!
   "Advance the weather and push it into the scene. `t` is wall-clock seconds."
   [ws t dt]
-  (let [{:keys [seed ^js sun ^js fill ^js renderer scene wet sun0 fill0 fog0
-                exposure0]} @ws
+  (let [_ (when-not (:ground @ws)
+            (when-let [^js g (.getObjectByName ^js (:scene @ws) "ground")]
+              (swap! ws assoc :ground g :shine0 (.-shininess (.-material g)))))
+        {:keys [seed ^js sun ^js fill ^js ground ^js renderer scene wet sun0
+                fill0 fog0 shine0 exposure0]} @ws
         rain (rain-at seed t)
         cloud (cloud-at seed t)
         ;; Up fast, down slow. Chasing the rain symmetrically would mean the
@@ -110,6 +119,20 @@
     ;; the key light and the hard shadow and replaces both with a bright, flat
     ;; fill. Modelling only the first half is what made a storm read as night.
     (when fill (set! (.-intensity fill) (* fill0 (+ 1.0 (* 0.35 cloud)))))
+    ;; And the road turns to glass.
+    ;;
+    ;; Wetness already changed the grip and the sound of the thing and nothing
+    ;; at all about how it looked, which is the one place a player is actually
+    ;; looking. Standing water is a mirror: the specular exponent climbs and
+    ;; the highlight tightens, so a wet street carries the sun and the sky
+    ;; along it instead of staying the same matt grey it is in the dry.
+    (when ground
+      (let [^js m (.-material ground)]
+        ;; Tight and not too bright. The terrain is a heightfield with eight
+        ;; metres between vertices, so a broad highlight spreads across whole
+        ;; facets and reads as polished metal; a narrow one stays a reflection.
+        (set! (.-shininess m) (+ shine0 (* wet' 180.0)))
+        (.setScalar (.-specular m) (+ 0.04 (* wet' 0.30)))))
     (when-let [^js fog (.-fog scene)]
       (set! (.-far fog) (* fog0 (- 1.0 (* 0.45 rain))))
       (.setHex (.-color fog) (if (> cloud 0.35) 0x8d95a0 0xbdd6e8)))
