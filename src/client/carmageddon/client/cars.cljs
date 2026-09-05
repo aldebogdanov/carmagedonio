@@ -128,30 +128,6 @@
               [-0.86 0.30 0.75 0.06 0.24 0.95 :paint]     ; bed sides
               [0.86  0.30 0.75 0.06 0.24 0.95 :paint]]}
 
-   :truck
-   {:name    "Truck"
-    :half    [1.22 0.80 3.55]
-    :density 176.0                 ; ~5400 kg
-    ;; Same roll-threshold arithmetic as the tractor, and it matters more here:
-    ;; a box body five metres high over a 1.1 m half-track went over at full
-    ;; lock at 60 km/h. Wider, lower, and on tyres it runs out of before the
-    ;; inside wheels come up.
-    :wheels  {:radius 0.52 :width 0.38
-              :front-track 1.18 :rear-track 1.22 :wheelbase 2.45 :axle-y -0.52}
-    :driven  #{2 3}
-    :paint   0x8e9299
-    :tuning  {:engine-torque 3600.0 :top-speed 32.0
-              :grip 1.12 :load-sensitivity 0.18
-              :suspension-rest 0.44 :spring-rate 130000.0
-              :nominal-load 13200.0 :max-load 95000.0
-              :damper-compression 11000.0 :damper-rebound 14000.0
-              :brake-torque 7000.0 :handbrake-torque 8000.0
-              :wheel-inertia 7.0
-              :max-steer 0.36 :steer-speed-falloff 0.030 :steer-rate 3.2}
-    :body    [[0.0 1.05 -2.25 1.12 0.95 1.25 :glass]      ; cab over the axle
-              [0.0 0.60 1.10  1.20 0.75 2.35 :paint]      ; box body
-              [0.0 0.20 -3.60 1.15 0.30 0.14 :trim]]}     ; bull bar
-
    :tractor
    {:name    "Tractor"
     :half    [0.78 0.55 1.55]
@@ -182,8 +158,15 @@
 
 (def kinds
   "Catalogue order. The player cycles through this and rivals are drawn from it,
-  so it is a vector rather than the map's key order."
-  [:muscle :hatchback :pickup :truck :tractor])
+  so it is a vector rather than the map's key order.
+
+  The truck was removed rather than retired into an unused slot. That moves the
+  tractor's wire index from 4 to 3, so a saved run in one comes back as the
+  reference car -- `kind-at` falls back rather than throwing on an index it no
+  longer has -- and a client mid-deploy would draw somebody else's tractor as a
+  truck until it reloaded. Both are one round's worth of wrong, which is
+  cheaper than a permanent hole in the catalogue."
+  [:muscle :hatchback :pickup :tractor])
 
 (def default-kind :muscle)
 
