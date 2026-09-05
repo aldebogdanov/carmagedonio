@@ -70,12 +70,6 @@
   []
   (if-let [t @touch] @t {:steer 0.0 :gas false :brake false :handbrake false}))
 
-(defn driving?
-  "Is the throttle down, by key or by thumb? For the engine note, which is not
-  a `Command` and must never become one."
-  []
-  (or (down? :fwd) (:gas (pad))))
-
 (defn lights-forced?
   "Has the driver switched the lights on themselves?
 

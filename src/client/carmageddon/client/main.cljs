@@ -27,7 +27,6 @@
             [carmageddon.client.render :as render]
             [carmageddon.client.rivals :as rivals]
             [carmageddon.client.sim :as sim]
-            [carmageddon.client.sound :as sound]
             [carmageddon.client.touch :as touch]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.client.weather :as weather]
@@ -158,7 +157,7 @@
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
                                   bridges rvs cock fire-state powerups-state
-                                  weather-state remotes events audio]}]
+                                  weather-state remotes events]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -179,7 +178,6 @@
           (when (and (game/running? game)
                      (>= (vehicle/damage (sim/player-vehicle sim)) 1.0))
             (let [{:keys [r life seeds blast push]} player-fire]
-              (sound/boom! audio 0.8)
               (fire/ignite! fire-state (sim/player-x sim) (sim/player-y sim)
                             (sim/player-z sim) r life :player seeds)
               (sim/blast! sim [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
@@ -223,7 +221,6 @@
               ;; against it by the server, so it has to be counted here rather
               ;; than added to a running total.
               (let [name (powerups/kind-name kind)]
-                (sound/chime! audio (contains? #{:coin :nugget} name))
                 (case name
                   :coin   (game/coin-taken! game)
                   :nugget (game/nugget-taken! game)
@@ -364,21 +361,6 @@
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
              :car        (cars/display-name kind)})))
-;; What the car sounds like, from what it is doing. Every frame,
-        ;; because an engine note that updates twice a second is a siren.
-        (let [kind (sim/kind-of sim 0)]
-          (sound/engine! audio
-                         {:speed (sim/player-speed sim)
-                          :top (:top-speed @(cars/tuning kind) 62.0)
-                          :throttle (if (input/driving?) 1.0 0.0)
-                          :airborne? (< (sim/wheels-on-ground sim) 2)})
-          ;; Tyres complain about sideslip, and about the handbrake whether or
-          ;; not the car has started to slide yet.
-          (sound/tyres! audio
-                        (max (min 1.0 (/ (- (js/Math.abs (sim/sideslip-now sim)) 9.0) 30.0))
-                             (if (and (input/handbrake-held?)
-                                      (> (js/Math.abs (sim/player-speed sim)) 3.0))
-                               0.55 0.0))))
         (render/draw! rs sim alpha dt (gloom-now weather-state)
                       (set (keys (powerups/active powerups-state)))))
 
@@ -455,11 +437,6 @@
         ;; so the same seed makes the same city either way.
         pd        (peds/create (:world @s) (:scene rs) ov mode)
         ev        (events/create!)
-        ;; Built here rather than at boot: a browser will not start an
-        ;; AudioContext without a gesture, and one created too early is not
-        ;; merely silent, it is permanently suspended. By this point the player
-        ;; has clicked DRIVE.
-        au        (sound/create!)
         gm        (game/create (fn [kind points seconds]
                                 (events/note! ev kind points seconds)))
         rvs       (rivals/create seed opponent-count)
@@ -505,10 +482,8 @@
                         d-cam   (camera/attach! (:camera-state rs) canvas)
                         d-map   (minimap/attach! mm)
                         ;; nil on a device that does not want them.
-                        d-touch (touch/attach!)
-                        d-sound (sound/attach! au)]
-                    (fn [] (d-input) (d-cam) (d-map) (d-sound)
-                      (when d-touch (d-touch))))
+                        d-touch (touch/attach!)]
+                    (fn [] (d-input) (d-cam) (d-map) (when d-touch (d-touch))))
         [sx _ sz] (:spawn @s)]
            ;; The one place physics impacts become gameplay.
            ;;
@@ -531,7 +506,6 @@
                             (when (props/prop? ps hit)
                               (when-let [d (props/destroy! ps hit)]
                                 (game/prop-wrecked! gm)
-                                (sound/smash! au)
                                 ;; Tell the room: this is the only world state
                                 ;; that ever crosses the network.
                                 (net/-send! transport (wire/encode-delta (assoc d :kind :prop)))
@@ -542,7 +516,6 @@
                                 ;; terminates because each is gone from the
                                 ;; chunk before the next round looks at it.
                                 (when (:volatile? d)
-                                  (sound/boom! au 0.45)
                                   (loop [seeds [d], depth 0]
                                     (when (and (seq seeds) (< depth 4))
                                       (recur
@@ -573,7 +546,6 @@
                                   (when (:volatile? d)
                                     (let [[bx by bz] (:pos d)
                                           {:keys [r life seeds blast push]} tanker-fire]
-                                      (sound/boom! au 1.0)
                                       (fire/ignite! fr bx by bz r life :player seeds)
                                       (sim/blast! s [bx by bz] blast push)
                                       ;; It is not a tanker any more. Pieces,
@@ -625,14 +597,6 @@
                               ;; properly. Capped per event so one scrape spread
                               ;; over many contacts cannot write a car off in a
                               ;; single tick.
-                              ;; Only the player's own collisions are heard.
-                              ;; Two rivals grinding against each other on the
-                              ;; far side of a block is not a thing you were
-                              ;; there for.
-                              (when (zero? vi)
-                                (sound/thump!
-                                 au (min 1.0 (/ (max 0.0 (- force damage-force-floor))
-                                                (* 0.6 damage-force-scale)))))
                               (vehicle/add-damage!
                                veh
                                (min (if other-veh
@@ -676,14 +640,13 @@
                                                  :overlay ov
                                                  :minimap mm
                                                  :peds-state pd :game gm :events ev
-                                                 :audio au
                                                  :rvs rvs
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
                                  :landmarks lm :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
                                  :overlay ov :minimap mm :cockpit ck :game gm
-                                 :rivals rvs :remotes remotes :events ev :audio au
+                                 :rivals rvs :remotes remotes :events ev
                                  :stop stop :detach detach}))
                   (js/console.log "carmagedonio up:" (:loaded cs) "chunks,"
                                   (:live (props/stats ps)) "props,"
