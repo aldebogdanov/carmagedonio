@@ -82,7 +82,8 @@
   [sim i kind]
   (let [{:keys [world bodies ^js by-collider]} @sim
         ^js body (aget bodies i)
-        v (vehicle/create world body (cars/layout kind) (cars/tuning kind))]
+        v (vehicle/create world body (cars/layout kind) (cars/tuning kind)
+                          (cars/toughness kind))]
     (swap! sim update :vehicles (fnil conj []) v)
     ;; Contact events arrive as collider handles. Resolving one back to a
     ;; vehicle used to mean comparing against the player's handle and nothing

@@ -131,7 +131,13 @@
    :tractor
    {:name    "Tractor"
     :half    [0.78 0.55 1.55]
-    :density 372.0                 ; ~1980 kg, most of it over the back axle
+    ;; ~4900 kg in a body the size of a hatchback. It was 1980 -- fifty kilos
+    ;; more than the pickup -- which made it a slow car rather than a heavy
+    ;; one, and losing a collision is not what a tractor is for.
+    :density 920.0
+    ;; And it takes damage at less than half the rate of everything else.
+    ;; Slow is the cost; being hard to stop is what is bought with it.
+    :toughness 2.4
     ;; Small at the front, enormous at the back -- the whole silhouette. Per
     ;; wheel radii, not one number, which is why `layout` carries four.
     ;; The mounts sit high and the track is wide for the size, which is the
@@ -143,15 +149,22 @@
               :front-track 0.66 :rear-track 0.95 :wheelbase 1.15 :axle-y -0.12}
     :driven  #{2 3}
     :paint   0x5aa83e                ; lifted: see `render/paint-mat`
-    :tuning  {:engine-torque 4200.0 :top-speed 12.0     ; all torque, no pace
+    ;; Every load figure below is sized to the mass above, and they were not:
+    ;; at 4900 kg on springs meant for 2000 the suspension sat bottomed out and
+    ;; every corner was carrying two and a half times the load its tyres were
+    ;; rated for, which `load-sensitivity` then punished. Lateral grip came out
+    ;; at 0.15 g -- a tractor that could not turn at all, which is not fit, it
+    ;; is broken. `nominal-load` is the static load on one corner: mass times g
+    ;; over four.
+    :tuning  {:engine-torque 9200.0 :top-speed 12.0     ; all torque, no pace
               ;; Agricultural tyres on tarmac, and deliberately below the roll
               ;; threshold: it should slide before it tips.
               :grip 1.02 :load-sensitivity 0.15
-              :suspension-rest 0.22 :spring-rate 60000.0
-              :nominal-load 4900.0 :max-load 40000.0
-              :damper-compression 6000.0 :damper-rebound 7000.0
-              :brake-torque 3200.0 :handbrake-torque 4000.0
-              :wheel-inertia 9.0 :max-steer 0.62 :steer-speed-falloff 0.030}
+              :suspension-rest 0.22 :spring-rate 148000.0
+              :nominal-load 12000.0 :max-load 96000.0
+              :damper-compression 15000.0 :damper-rebound 17500.0
+              :brake-torque 8000.0 :handbrake-torque 10000.0
+              :wheel-inertia 14.0 :max-steer 0.62 :steer-speed-falloff 0.030}
     :body    [[0.0 0.72 0.55  0.56 0.55 0.55 :glass]      ; cab
               [0.0 0.30 -1.25 0.44 0.30 0.35 :paint]      ; bonnet
               [-0.30 1.05 -0.90 0.07 0.50 0.07 :trim]]}})  ; exhaust stack
@@ -182,6 +195,12 @@
   (get kinds i default-kind))
 
 (defn spec [kind] (get catalogue kind (get catalogue default-kind)))
+
+(defn toughness
+  "How much of an impact this vehicle shrugs off, as a divisor on the damage
+  that arrives. 1.0 for anything not built to be hit."
+  [kind]
+  (:toughness (spec kind) 1.0))
 
 (defn- lights
   "The lamp cluster for a hull of half-extents `half`. Forward is -Z.

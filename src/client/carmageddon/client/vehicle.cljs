@@ -84,9 +84,16 @@
 ;; --- construction -----------------------------------------------------------
 
 (defn create
-  "Attach a vehicle to an existing chassis rigid body."
-  [world ^js body layout tuning]
+  "Attach a vehicle to an existing chassis rigid body.
+
+  `toughness` divides every impact this vehicle takes. It is a property of what
+  the vehicle *is* rather than of what it is carrying, which is why it sits
+  beside the damage and not in the boost array -- a power-up clears the boosts
+  and a tractor does not stop being a tractor."
+  ([world body layout tuning] (create world body layout tuning 1.0))
+  ([world ^js body layout tuning toughness]
   {:world     world
+   :toughness (max 0.05 toughness)
    :body      body
    :layout    layout          ; {:connections [[x y z] x4] :radius r :steered #{} :driven #{}}
    :tuning    tuning          ; atom
@@ -124,7 +131,7 @@
    ;; them from the velocity, which gets a car coasting downhill wrong in both
    ;; directions -- it is slowing down and no pedal is down, and it is picking
    ;; up speed backwards with the brake pedal buried.
-   :lights    (js/Float64Array. 2)})
+   :lights    (js/Float64Array. 2)}))
 
 (def ^:const boost-engine 0)
 (def ^:const boost-grip 1)
@@ -201,10 +208,11 @@
   the car was moving into takes half again as much, so a driver who only ever
   hits things nose-first cooks the engine well before the car is finished. A
   car that has only ever been rear-ended still pulls."
-  [{:keys [^js damage ^js boost] :as veh} amount]
+  [{:keys [^js damage ^js boost toughness] :as veh} amount]
   ;; Armour divides what arrives, so a plated car takes the same hits and keeps
-  ;; more of itself.
-  (let [amount (/ amount (max 0.05 (aget boost boost-armour)))
+  ;; more of itself -- and so does the vehicle's own build, which is the same
+  ;; arithmetic for a reason that does not expire.
+  (let [amount (/ amount (max 0.05 (aget boost boost-armour)) (or toughness 1.0))
         p (impact-panel veh)]
     (aset damage dmg-total (min 1.0 (+ (aget damage dmg-total) amount)))
     (aset damage p (min 1.0 (+ (aget damage p) (* 1.5 amount))))))
