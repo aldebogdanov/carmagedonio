@@ -169,11 +169,22 @@
         i (mod (js/Math.round (/ (* 8 a) (* 2 js/Math.PI))) 8)]
     (nth compass i)))
 
+(def ^:private rural #{:wild :woods :farm :village})
+
 (defn area-here
-  "The label for the chunk the player is standing in."
+  "The label for the chunk the player is standing in.
+
+  Out of town the region comes first, because out of town it is the thing that
+  changed: the trees, the ground colour and the landmark all follow it. In a
+  city it is left off -- a region does nothing to downtown, and a label that
+  names something the view does not show is worse than a shorter one."
   [ms x z]
-  (let [[cx cz] (worldgen/chunk-of x z)]
-    (worldgen/area-labels (kind-at ms cx cz))))
+  (let [[cx cz] (worldgen/chunk-of x z)
+        kind (kind-at ms cx cz)
+        reg  (worldgen/region (:seed ms) x z)]
+    (if (and (rural kind) (not= :heartland reg))
+      (str (worldgen/region-labels reg) " \u00b7 " (worldgen/area-labels kind))
+      (worldgen/area-labels kind))))
 
 ;; The map is anchored on the *car*, not on the chunk it happens to be in. That
 ;; is the whole difference between a map that scrolls and one that jumps: with

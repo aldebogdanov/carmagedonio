@@ -714,6 +714,114 @@
   (let [d (* 3.5 k/chunk-size)]
     (noise/fbm2d (+ seed 8123) (/ x d) (/ z d) 3)))
 
+;; --- regions ----------------------------------------------------------------
+;;
+;; Two more fields, an order of magnitude coarser than the city one: how warm a
+;; place is and how wet it is. A region comes out ten to twenty kilometres
+;; across, which is twenty districts -- far enough that you drive *out of* one
+;; over several minutes rather than past it in one.
+;;
+;; What a region changes is deliberately only the countryside: what grows,
+;; what colour the ground is, and which landmark a village gets. A city is a
+;; city everywhere, and trying to make downtown regional would mean four sets
+;; of facades for something you see from inside a car at 90 km/h anyway.
+
+(def region-kinds [:heartland :taiga :sierra :paddies])
+
+(def region-labels
+  {:heartland "the heartland" :taiga "the taiga" :sierra "the sierra"
+   :paddies "the paddies"})
+
+(def ^:private region-scale (* 42.0 k/chunk-size))   ; ~10.7 km
+
+(defn warmth
+  "How warm a point is, in fbm's own [0,1]. One of the two axes a region is
+  read off."
+  [seed x z]
+  (noise/fbm2d (+ seed 9311) (/ x region-scale) (/ z region-scale) 2))
+
+(defn damp
+  "How wet a point is -- the other axis. Independent of `river`, which is a
+  channel; this is a climate."
+  [seed x z]
+  (noise/fbm2d (+ seed 4177) (/ x region-scale) (/ z region-scale) 2))
+
+(defn region-of
+  "Which region a (warmth, damp) pair falls in.
+
+  Split out from `region` because the ground tint interpolates the two fields
+  across a chunk rather than sampling them at every vertex, and has to bucket
+  the interpolated pair the same way this does or the colour and the trees
+  would disagree about where the taiga starts."
+  [w m]
+  ;; Thresholds are percentiles of the two fields, measured, not guessed: fbm
+  ;; sits well below 0.5 at the median, and a nominal-looking 0.44 for "cold"
+  ;; made nearly half the world taiga.
+  (cond
+    (< w 0.30) :taiga
+    (and (> w 0.58) (< m 0.47)) :sierra
+    (and (> w 0.54) (> m 0.55)) :paddies
+    :else :heartland))
+
+(defn region [seed x z] (region-of (warmth seed x z) (damp seed x z)))
+
+(def ^:private region-ground
+  "What a region does to its own open ground: how hard to pull, and where to.
+
+  A lerp towards a target rather than a multiplier over the crop tint. That was
+  the first attempt and it does not work, for the same reason it did not work
+  for the industrial estates: the ground texture is painted green, a vertex
+  colour multiplies it, and multiplying a green by numbers near one gives a
+  lighter green however the numbers are chosen. Changing the *hue* needs a
+  colour that actively cancels it, which means a lerp towards one.
+
+  The strength is what keeps the field patchwork: at 1.0 a region would be one
+  flat wash, and the patchwork is most of what makes farmland read as farmland.
+  The sierra pulls hardest because sand is the furthest from green of the
+  three, and it is the region a player is most likely to be able to name.
+
+  Every number here is the colour wanted divided by the ground texture's, and
+  divided by it *after gamma*. That second step is the one that took three
+  attempts: the texture is sRGB and three.js linearises it before multiplying,
+  which stretches its green lead over its red from 1.24 to 1.58. A vertex
+  colour that beats 1.24 and reads as sand on paper still comes out olive on
+  screen, which is exactly what the first two sets of numbers here did."
+  {:heartland [0.0  1.00 1.00 1.00]
+   :taiga     [0.50 1.15 0.80 1.05]
+   :sierra    [1.00 2.45 0.78 1.06]
+   :paddies   [0.50 0.72 0.86 0.46]})
+
+(defn- region-blend
+  "The ground treatment at a (warmth, damp) pair, blended rather than bucketed:
+  [strength r g b].
+
+  `region-of` draws a hard line, which is right for a tree -- it is a birch or
+  it is a cactus -- and wrong for the ground, where it drew a visible contour
+  across the terrain wherever warmth happened to cross the threshold. The
+  weights below are the same three conditions with soft edges, so the sand
+  fades into the grass over a couple of hundred metres the way it does on the
+  ground."
+  [w m]
+  (let [warm (smootherstep-clamped (/ (- w 0.50) 0.20))
+        cold (smootherstep-clamped (/ (- 0.36 w) 0.16))
+        wet  (smootherstep-clamped (/ (- m 0.46) 0.20))
+        ws   (* warm (- 1.0 wet) (- 1.0 cold))
+        wp   (* warm wet (- 1.0 cold))
+        wt   cold
+        [ss sr sg sb] (region-ground :sierra)
+        [ps pr pg pb] (region-ground :paddies)
+        [ts tr tg tb] (region-ground :taiga)
+        tot  (+ ws wp wt)]
+    (if (< tot 1.0e-4)
+      [0.0 1.0 1.0 1.0]
+      ;; Normalised by the total weight so the *colour* is an average of
+      ;; whichever regions are in play, while the *strength* still falls to
+      ;; zero out in the heartland where none of them are.
+      [(min 1.0 (/ (+ (* ws ss) (* wp ps) (* wt ts)) 1.0))
+       (/ (+ (* ws sr) (* wp pr) (* wt tr)) tot)
+       (/ (+ (* ws sg) (* wp pg) (* wt tg)) tot)
+       (/ (+ (* ws sb) (* wp pb) (* wt tb)) tot)])))
+
 ;; --- what a place is --------------------------------------------------------
 
 (def area-kinds
@@ -1015,7 +1123,13 @@
 (def ^:private flora-tint
   {:trunk   0x5a4432
    :hedge   0x3d5f33
-   :conifer 0x2c4f2e})
+   :conifer 0x2c4f2e
+   ;; Regional species. A birch trunk is the one tree anybody can name at
+   ;; distance, and it is the whole reason the taiga reads as somewhere else.
+   :birch   0xd6d2c4
+   :cactus  0x4a7c46
+   :palm    0x7b6240
+   :frond   0x6f9a34})
 
 (def ^:private leaf-tints [0x3f6b32 0x4a7a38 0x35602c 0x54803c])
 
@@ -1027,22 +1141,78 @@
   {:woodland 0.88 :orchard 0.80 :scrub 0.17 :pasture 0.05
    :fallow 0.07 :wheat 0.012 :plough 0.008 :rape 0.010})
 
+;; How much of that a region actually grows. The sierra is the point of this
+;; table: scrub at the heartland's odds is not a desert, it is a slightly thin
+;; wood, and a cactus every eleven metres reads as an orchard of cacti.
+(def ^:private region-tree-odds
+  {:heartland 1.0 :taiga 1.15 :sierra 0.45 :paddies 1.10})
+
 (defn- tree-parts!
   "A trunk and a canopy at (x, y, z). The trunk is solid and the canopy is not:
-  a tree stops a car, and its branches are for driving through."
-  [emit seed x y z h]
+  a tree stops a car, and its branches are for driving through.
+
+  Four species, one per region. Everything below is the same two or three
+  volumes rearranged -- which is the only budget a tree has when there are two
+  hundred of them in view -- but trunk colour and canopy shape between them are
+  enough that you can tell where you are without reading the map."
+  [emit seed x y z h region]
   (let [k (prng/hash-coords (+ seed 3313) (long (* x 4.0)) (long (* z 4.0)))
-        conifer? (zero? (bit-and (prng/shr32 k 5) 3))
-        r (* h (if conifer? 0.20 0.30))
-        trunk (* h (if conifer? 0.30 0.45))
-        leaf (nth leaf-tints (bit-and (prng/shr32 k 9) 3))]
-    (emit x (+ y (* 0.5 trunk)) z 0.0 0.0
-          (* 0.28 h 0.5) trunk (* 0.28 h 0.5) :cylinder (:trunk flora-tint) 1.0)
-    (if conifer?
-      (emit x (+ y trunk (* 0.5 (- h trunk))) z 0.0 0.0
-            (* 2.0 r) (- h trunk) (* 2.0 r) :pyramid (:conifer flora-tint) 0.0)
-      (emit x (+ y trunk (* 0.5 (- h trunk))) z 0.0 0.0
-            (* 2.0 r) (- h trunk) (* 2.2 r) :blob leaf 0.0))))
+        pick (bit-and (prng/shr32 k 5) 3)
+        leaf (nth leaf-tints (bit-and (prng/shr32 k 9) 3))
+        stem (fn [tint frac girth]
+               (emit x (+ y (* 0.5 frac h)) z 0.0 0.0
+                     (* girth h) (* frac h) (* girth h)
+                     :cylinder tint 1.0))]
+    (case region
+      ;; Birch and spruce. The birches are pale and narrow and the spruces are
+      ;; nearly black, so a taiga wood is striped rather than uniform.
+      :taiga
+      (if (< pick 2)
+        (do (stem (:conifer flora-tint) 0.26 0.09)
+            (emit x (+ y (* 0.26 h) (* 0.37 h)) z 0.0 0.0
+                  (* 0.36 h) (* 0.74 h) (* 0.36 h)
+                  :pyramid (:conifer flora-tint) 0.0))
+        (do (stem (:birch flora-tint) 0.55 0.055)
+            (emit x (+ y (* 0.55 h) (* 0.24 h)) z 0.0 0.0
+                  (* 0.40 h) (* 0.48 h) (* 0.40 h) :blob leaf 0.0)))
+
+      ;; A saguaro: one column and one or two arms. No canopy at all, which is
+      ;; most of why the sierra looks empty even where things are growing.
+      :sierra
+      (let [ah (* 0.42 h)]
+        (stem (:cactus flora-tint) 1.0 0.11)
+        (emit (+ x (* 0.16 h)) (+ y (* 0.62 h)) z 0.0 0.0
+              (* 0.30 h) (* 0.09 h) (* 0.09 h) :box (:cactus flora-tint) 0.0)
+        (emit (+ x (* 0.29 h)) (+ y (* 0.62 h) (* 0.5 ah)) z 0.0 0.0
+              (* 0.09 h) ah (* 0.09 h) :cylinder (:cactus flora-tint) 0.0)
+        (when (odd? pick)
+          (emit (- x (* 0.14 h)) (+ y (* 0.50 h)) z 0.0 0.0
+                (* 0.26 h) (* 0.09 h) (* 0.09 h) :box (:cactus flora-tint) 0.0)
+          (emit (- x (* 0.25 h)) (+ y (* 0.50 h) (* 0.18 h)) z 0.0 0.0
+                (* 0.09 h) (* 0.36 h) (* 0.09 h)
+                :cylinder (:cactus flora-tint) 0.0)))
+
+      ;; A palm: all trunk, with the crown pushed out sideways rather than up.
+      :paddies
+      (do (stem (:palm flora-tint) 0.82 0.055)
+          (emit x (+ y (* 0.86 h)) z 0.0 0.0
+                (* 0.95 h) (* 0.16 h) (* 0.95 h) :blob (:frond flora-tint) 0.0)
+          (emit x (+ y (* 0.80 h)) z 0.0 0.0
+                (* 0.16 h) (* 0.14 h) (* 0.16 h) :blob (:frond flora-tint) 0.0))
+
+      ;; The heartland keeps what was here before: broadleaf, one conifer in
+      ;; four.
+      (let [conifer? (zero? pick)
+            r (* h (if conifer? 0.20 0.30))
+            trunk (* h (if conifer? 0.30 0.45))]
+        (emit x (+ y (* 0.5 trunk)) z 0.0 0.0
+              (* 0.28 h 0.5) trunk (* 0.28 h 0.5)
+              :cylinder (:trunk flora-tint) 1.0)
+        (if conifer?
+          (emit x (+ y trunk (* 0.5 (- h trunk))) z 0.0 0.0
+                (* 2.0 r) (- h trunk) (* 2.0 r) :pyramid (:conifer flora-tint) 0.0)
+          (emit x (+ y trunk (* 0.5 (- h trunk))) z 0.0 0.0
+                (* 2.0 r) (- h trunk) (* 2.2 r) :blob leaf 0.0))))))
 
 (defn chunk-flora
   "Trees, orchards and hedgerows for one chunk, in the generic parts layout.
@@ -1075,7 +1245,9 @@
                                    (- (/ (bit-and (prng/shr32 h 8) 0xff) 127.5) 1.0)))
             x (+ bx jx) z (+ bz jz)]
         (when (and (<= x0 x) (< x x1) (<= z0 z) (< z z1))
-          (let [odds (get crop-tree-odds crop 0.0)
+          (let [reg  (region seed x z)
+                odds (* (get crop-tree-odds crop 0.0)
+                        (get region-tree-odds reg 1.0))
                 roll (/ (bit-and (prng/shr32 h 16) 0x3ff) 1024.0)]
             (when (< roll odds)
               (let [u (urbanness seed x z)
@@ -1084,7 +1256,7 @@
                 ;; the lamp posts are.
                 (when (and (< u tree-urban) (< (river seed x z) 0.3) (< road 0.12))
                   (let [hh (+ 5.0 (* 6.0 (/ (bit-and (prng/shr32 h 26) 0x3f) 63.0)))]
-                    (tree-parts! emit seed x y z hh)))))))))
+                    (tree-parts! emit seed x y z hh reg)))))))))
     ;; Hedgerows along the field boundaries the streets have not already taken.
     (doseq [gx (range (dec (grid-floor x0 street-spacing))
                       (inc (inc (grid-floor x1 street-spacing))))
@@ -1451,7 +1623,9 @@
 (def landmark-kinds
   [:stadium :mall :park :plaza :works :silos :church :monument :mast
    :tower :station :museum :funfair :school :refinery :scrapyard
-   :windmill :water-tower :ruins :drive-in])
+   :windmill :water-tower :ruins :drive-in
+   :airport :bazaar :statue :speedway :windfarm :cemetery :quarry
+   :izbas :cantina :pagoda])
 
 (def landmark-labels
   {:stadium "the stadium" :mall "the shopping centre" :park "the park"
@@ -1461,7 +1635,11 @@
    :museum "the museum" :funfair "the funfair" :school "the school"
    :refinery "the refinery" :scrapyard "the scrapyard"
    :windmill "the windmill" :water-tower "the water tower"
-   :ruins "the ruins" :drive-in "the drive-in"})
+   :ruins "the ruins" :drive-in "the drive-in"
+   :airport "the airfield" :bazaar "the flea market" :statue "the statue"
+   :speedway "the speedway" :windfarm "the wind farm"
+   :cemetery "the cemetery" :quarry "the quarry"
+   :izbas "the log village" :cantina "the cantina" :pagoda "the pagoda"})
 
 (defn district-of
   "Which district a chunk belongs to. Floor division, so it keeps working west
@@ -1476,21 +1654,32 @@
 
   Drawn from the area kind rather than at random, because a grain silo in the
   middle of downtown is not a landmark, it is a mistake."
-  [kind r]
-  (let [pick (fn [ks] (nth ks (prng/next-int! r (count ks))))]
+  [kind region r]
+  (let [pick (fn [ks] (nth ks (prng/next-int! r (count ks))))
+        ;; What the region builds, and only out of town: a hamlet of log huts
+        ;; is a landmark in the taiga and a mistake in the middle of a city.
+        ;; Weighted at two entries so a region reads as itself without the
+        ;; countryside becoming one repeated building.
+        home (case region
+               :taiga :izbas :sierra :cantina :paddies :pagoda nil)
+        rural (fn [ks] (pick (if home (into [home home] ks) ks)))]
     (case kind
-      :downtown (pick [:tower :tower :station :museum :stadium :plaza :mall])
-      :city     (pick [:tower :station :museum :funfair :stadium :mall :park
-                       :plaza])
-      :suburb   (pick [:school :funfair :water-tower :mall :park :church
-                       :museum])
-      :industry (pick [:works :refinery :scrapyard])
-      :village  (pick [:church :park :school :funfair :windmill :water-tower])
-      :farm     (pick [:silos :mast :windmill :water-tower :drive-in])
+      :downtown (pick [:tower :tower :station :museum :statue :stadium :plaza
+                       :mall])
+      :city     (pick [:tower :station :museum :funfair :statue :bazaar
+                       :stadium :mall :park :plaza])
+      :suburb   (pick [:school :funfair :cemetery :bazaar :water-tower :mall
+                       :park :church :museum])
+      :industry (pick [:works :refinery :scrapyard :quarry])
+      :village  (rural [:church :park :school :funfair :bazaar :cemetery
+                        :windmill :water-tower])
+      :farm     (rural [:silos :mast :windmill :water-tower :drive-in :airport
+                        :windfarm])
       ;; Open country is most of the world, so it needs more than one answer or
       ;; half the landmarks anywhere are the same ring of stones.
-      :woods    (pick [:monument :mast :ruins :windmill])
-      :wild     (pick [:monument :mast :ruins :drive-in :scrapyard :silos])
+      :woods    (rural [:monument :mast :ruins :windmill :cemetery :quarry])
+      :wild     (rural [:monument :mast :ruins :drive-in :scrapyard :silos
+                        :airport :speedway :windfarm :quarry])
       :monument)))
 
 (defn landmark
@@ -1520,7 +1709,8 @@
                   [cx cz] (chunk-of x z)]
               (if wet?
                 (recur (inc i))
-                {:kind   (landmark-for-place (area-kind seed cx cz) r)
+                {:kind   (landmark-for-place (area-kind seed cx cz)
+                                            (region seed x z) r)
                  :cell   [gx gz]
                  :x x :z z
                  :half-x (* 0.5 (- x1 x0))
@@ -1548,7 +1738,10 @@
    :brick 0x9a5f47 :metal 0x8b9199 :roof 0x6b4a3c :stone 0x8f8a80
    :tarmac 0x3a3a3e :white 0xd8d0c4 :timber 0x6f5238 :leaf 0x3f6b32
    :red 0xa33b30 :glass 0x7c98ad :rust 0x7b4630 :sign 0xd8b23c
-   :sand 0xc0ad8c})
+   :sand 0xc0ad8c :adobe 0xc19a6e :lacquer 0x8e2f26 :gold 0xc9a63c
+   :bronze 0x6f6244 :fur 0x5b4130 :log 0x8a6b46 :rubber 0x2a2a2c
+   :cactus 0x4a7c46 :cloth-a 0xc4442f :cloth-b 0x2f7fa8 :cloth-c 0xd8a63a
+   :cloth-d 0x4a8c52})
 
 (defn- lp
   "One landmark part, in the cell's own frame: centre at (0,0), y from the
@@ -2003,6 +2196,373 @@
      (lp (+ (* -0.8 hx) (* j 0.4 hx)) 1.0 (+ (* -0.44 hz) (* i 0.32 hz)) 0.0
          0.25 2.0 0.25 :cylinder :dark 1.0))))
 
+;; --- landmarks worth the detour ---------------------------------------------
+;;
+;; The catalogue up to here answers "what sort of place is this". These answer
+;; "why would I drive over there", which is a different question: each is
+;; either a shape nothing else in the world has (a wheel, a runway, a colossus)
+;; or somewhere with room to drive *inside* it. `chunk-pickups` puts a ring of
+;; coins round every one of them, so the answer is also literally worth money.
+
+(defmethod landmark-shapes :airport [_ hx hz r]
+  (let [rw (* 1.8 hx)
+        ax (* 0.1 hx) az (* 0.2 hz)]
+    (concat
+     [(apron hx hz :grass)
+      ;; A runway is a flat grey stripe a hundred metres long, and nothing else
+      ;; in the world is that shape. It does the whole job of identification on
+      ;; its own; everything below is what stops it being a car park.
+      (lp 0.0 0.12 (* -0.4 hz) 0.0 rw 0.3 15.0 :box :tarmac 0.0)
+      (lp 0.0 0.16 (* 0.1 hz) 0.0 (* 1.2 hx) 0.3 9.0 :box :tarmac 0.0)
+      ;; Control tower.
+      (lp (* -0.62 hx) 8.0 (* 0.62 hz) 0.0 6.0 16.0 6.0 :box :concrete 1.0)
+      (lp (* -0.62 hx) 17.5 (* 0.62 hz) 0.0 9.0 4.0 9.0 :box :glass 1.0)
+      (lp (* -0.62 hx) 20.2 (* 0.62 hz) 0.0 9.6 1.4 9.6 :box :dark 0.0)
+      (lp (* -0.62 hx) 24.0 (* 0.62 hz) 0.0 0.4 6.0 0.4 :cylinder :metal 0.0)
+      ;; Terminal, then the hangar with its doors facing the apron.
+      (lp (* 0.05 hx) 3.5 (* 0.66 hz) 0.0 (* 0.55 hx) 7.0 (* 0.35 hz)
+          :box :white 1.0)
+      (lp (* 0.05 hx) 7.4 (* 0.66 hz) 0.0 (* 0.57 hx) 1.0 (* 0.37 hz)
+          :box :metal 0.0)
+      (lp (* 0.72 hx) 6.0 (* 0.62 hz) 0.0 (* 0.35 hx) 12.0 (* 0.4 hz)
+          :box :metal 1.0)
+      (lp (* 0.72 hx) 14.0 (* 0.62 hz) quarter (* 0.42 hz) 5.0 (* 0.36 hx)
+          :gable :metal 0.0)
+      ;; The windsock: two volumes, and the detail that names the place.
+      (lp (* -0.92 hx) 4.0 (* 0.05 hz) 0.0 0.3 8.0 0.3 :cylinder :white 1.0)
+      (lp (* -0.92 hx) 7.6 (* 0.05 hz) 0.0 1.4 1.8 3.8 :cylinder :red 0.0)]
+     ;; Centreline.
+     (for [i (range 7)]
+       (lp (+ (* -0.39 rw) (* i 0.13 rw)) 0.24 (* -0.4 hz) 0.0
+           (* 0.06 rw) 0.3 1.2 :box :white 0.0))
+     ;; And an aeroplane on the apron. Fuselage, nose, wing, two engines,
+     ;; tailplane, fin -- seven volumes, and unmistakable from anywhere.
+     [(tilt (lp ax 4.6 az 0.0 3.2 22.0 3.2 :cylinder :white 1.0) quarter)
+      (lp ax 4.6 (- az 10.5) 0.0 3.2 3.0 3.4 :blob :white 0.0)
+      (lp ax 3.4 az 0.0 26.0 0.8 5.5 :box :white 1.0)
+      (tilt (lp (- ax 7.0) 2.4 (+ az 1.0) 0.0 2.4 5.5 2.4
+                :cylinder :metal 0.0) quarter)
+      (tilt (lp (+ ax 7.0) 2.4 (+ az 1.0) 0.0 2.4 5.5 2.4
+                :cylinder :metal 0.0) quarter)
+      (lp ax 3.6 (+ az 9.0) 0.0 10.0 0.7 3.0 :box :white 0.0)
+      (lp ax 7.4 (+ az 9.8) 0.0 0.7 6.6 4.5 :box :red 1.0)])))
+
+(defmethod landmark-shapes :bazaar [_ hx hz r]
+  (let [cloths [:cloth-a :cloth-b :cloth-c :cloth-d]]
+    (concat
+     [(apron hx hz :tarmac)
+      (lp 0.0 0.16 0.0 0.0 (* 1.8 hx) 0.32 (* 1.8 hz) :box :stone 0.0)
+      ;; The banner over the way in, which is what you see before the stalls.
+      (lp (* -0.88 hx) 3.2 (* 0.92 hz) 0.0 0.6 6.4 0.6 :cylinder :timber 1.0)
+      (lp (* 0.88 hx) 3.2 (* 0.92 hz) 0.0 0.6 6.4 0.6 :cylinder :timber 1.0)
+      (lp 0.0 5.6 (* 0.92 hz) 0.0 (* 1.8 hx) 2.4 0.3 :box :cloth-a 0.0)
+      ;; A couple of vans that brought it all, parked at the back.
+      (lp (* -0.62 hx) 1.6 (* -0.86 hz) 0.0 6.0 3.2 2.6 :box :cloth-b 1.0)
+      (lp (* 0.66 hx) 1.6 (* -0.86 hz) 0.4 6.0 3.2 2.6 :box :white 1.0)]
+     ;; Three rows of stalls with aisles between them: a market is a grid you
+     ;; drive down, not a heap you park beside.
+     (mapcat
+      (fn [[x z]]
+        (let [c (nth cloths (prng/next-int! r 4))
+              a (prng/next-range! r -0.12 0.12)]
+          [(lp x 0.5 z a 5.4 1.0 2.0 :box :timber 1.0)
+           (lp x 1.35 z a 0.16 1.7 0.16 :cylinder :timber 0.0)
+           (lp x 2.7 z a 6.0 1.1 3.0 :gable c 0.0)
+           ;; The junk on the ground beside it, which is the whole idea.
+           (lp (+ x (prng/next-range! r -2.4 2.4)) 0.45
+               (+ z (prng/next-range! r 1.6 2.4)) (prng/next-range! r 0.0 tau)
+               1.1 0.9 1.1 :box :timber 1.0)]))
+      (for [row (range 3), col (range 4)]
+        [(+ (* -0.62 hx) (* col 0.42 hx))
+         (+ (* -0.55 hz) (* row 0.5 hz))])))))
+
+(defmethod landmark-shapes :statue [_ hx hz r]
+  (let [ph 7.0                          ; plinth
+        y0 (+ 3.3 ph)                   ; where the boots start
+        arm 7.5]
+    (concat
+     [(apron hx hz :stone)
+      (lp 0.0 0.16 0.0 0.0 (* 1.85 hx) 0.32 (* 1.85 hz) :box :stone 0.0)
+      ;; Two steps and a plinth, and the plinth is half the height of the whole
+      ;; thing. That proportion is what makes it a monument rather than a very
+      ;; large man standing in a square.
+      (lp 0.0 0.7 0.0 0.0 24.0 1.4 24.0 :box :stone 1.0)
+      (lp 0.0 1.9 0.0 0.0 19.0 1.2 19.0 :box :stone 1.0)
+      (lp 0.0 (+ 2.5 (* 0.5 ph)) 0.0 0.0 12.0 ph 12.0 :box :white 1.0)
+      (lp 0.0 (+ 2.5 ph 0.3) 0.0 0.0 13.2 1.0 13.2 :box :stone 0.0)
+      (lp 0.0 (+ 2.5 (* 0.5 ph)) 6.2 0.0 8.0 2.2 0.3 :box :gold 0.0)
+      ;; Him. Boots, coat, chest, head, cap -- and one arm out over the square,
+      ;; which is the pose and the only part that has to read at two hundred
+      ;; metres.
+      (lp -1.9 (+ y0 2.6) 0.0 0.0 2.2 5.2 2.6 :box :bronze 1.0)
+      (lp 1.9 (+ y0 2.6) 0.0 0.0 2.2 5.2 2.6 :box :bronze 1.0)
+      (lp 0.0 (+ y0 8.0) 0.0 0.0 7.0 6.6 4.4 :box :bronze 1.0)
+      (lp 0.0 (+ y0 12.2) 0.0 0.0 7.8 2.4 4.8 :box :bronze 1.0)
+      (lp 0.0 (+ y0 14.6) 0.0 0.0 3.2 3.4 3.2 :blob :bronze 0.0)
+      (lp 0.0 (+ y0 16.2) 0.0 0.0 4.2 0.9 4.2 :cylinder :bronze 0.0)
+      (lp -4.4 (+ y0 9.0) 0.0 0.0 1.9 7.6 2.0 :box :bronze 1.0)]
+     ;; The raised arm, a spoke in the world's vertical plane at 55 degrees.
+     (let [a 0.95]
+       [(tilt (lp (+ 3.6 (* 0.5 arm (js-sin a)))
+                  (+ y0 11.4 (* 0.5 arm (js-cos a))) 0.0
+                  quarter 2.0 arm 1.9 :box :bronze 0.0)
+              (- a))])
+     ;; Benches round the edge, so the square has something in it besides him.
+     (for [[x z a] (ring 6 (* 0.88 hx) (* 0.88 hz))]
+       (lp x 0.7 z a 4.6 0.5 1.4 :box :timber 1.0)))))
+
+(defmethod landmark-shapes :speedway [_ hx hz r]
+  (let [rx (* 0.5 hx) rz (* 0.5 hz)]
+    (concat
+     [(apron hx hz :grass)
+      ;; A dirt oval: the graded surface, then the infield cut back out of it.
+      ;; Same two-ellipse trick as the stadium, in the colour of a shale track
+      ;; rather than tarmac.
+      (lp 0.0 0.30 0.0 0.0 (* 3.4 rx) 0.5 (* 3.4 rz) :cylinder :rust 0.0)
+      (lp 0.0 0.36 0.0 0.0 (* 2.2 rx) 0.5 (* 2.2 rz) :cylinder :grass 0.0)
+      ;; Grandstand down the near side.
+      (lp 0.0 2.6 (* 2.05 rz) 0.0 (* 2.4 rx) 5.2 8.0 :box :timber 1.0)
+      (lp 0.0 6.6 (* 2.2 rz) 0.0 (* 2.45 rx) 2.6 10.0 :gable :metal 0.0)
+      ;; And the gantry over the start line.
+      (lp (* -1.55 rx) 4.0 (* 1.1 rz) 0.0 1.0 8.0 1.0 :box :metal 1.0)
+      (lp (* -1.55 rx) 8.6 (* 1.1 rz) quarter 1.0 0.9 (* 2.4 rz)
+          :box :metal 0.0)
+      (lp (* -1.55 rx) 9.8 (* 1.1 rz) quarter 1.6 2.2 (* 1.6 rz)
+          :box :sign 0.0)]
+     ;; The tyre wall, which is what you actually hit.
+     (for [[x z a] (ring 20 (* 1.62 rx) (* 1.62 rz))]
+       (lp x 0.55 z a (* 0.22 (+ rx rz)) 1.1 1.0 :box :rubber 1.0))
+     ;; Floodlights.
+     (mapcat (fn [[x z _]]
+               [(lp x 9.0 z 0.0 1.0 18.0 1.0 :cylinder :metal 1.0)
+                (lp x 18.8 z 0.0 4.0 1.6 1.2 :box :white 0.0)])
+             (ring 4 (* 1.95 rx) (* 1.95 rz)))
+     ;; Two of last week's, still in the infield.
+     (for [_ (range 2)]
+       (lp (prng/next-range! r (* -1.3 rx) (* 1.3 rx)) 0.9
+           (prng/next-range! r (* -1.3 rz) (* 1.3 rz))
+           (prng/next-range! r 0.0 tau) 4.6 1.8 2.2 :box :rust 1.0)))))
+
+(defmethod landmark-shapes :windfarm [_ hx hz r]
+  (let [th 38.0 br 13.0]
+    (concat
+     [(apron hx hz :grass)
+      (lp 0.0 0.14 0.0 0.0 (* 1.8 hx) 0.28 (* 1.8 hz) :box :grass 0.0)
+      (lp (* 0.78 hx) 2.0 (* 0.82 hz) 0.0 8.0 4.0 6.0 :box :concrete 1.0)]
+     (mapcat
+      (fn [[tx tz]]
+        (let [a0 (prng/next-range! r 0.0 tau)
+              hy (+ th 1.0)
+              hzz (- tz 4.5)]
+          (concat
+           [(lp tx 0.6 tz 0.0 9.0 1.2 9.0 :cylinder :concrete 1.0)
+            (lp tx (* 0.5 th) tz 0.0 2.8 th 2.8 :cylinder :white 1.0)
+            ;; The nacelle, lying along Z with the rotor in front of it.
+            (tilt (lp tx hy (- tz 2.0) 0.0 2.6 7.0 2.6 :cylinder :white 0.0)
+                  quarter)]
+           ;; Three blades from the hub outward -- offset half a length along
+           ;; their own direction, because a part centred on the hub would come
+           ;; out the other side and give six.
+           (for [i (range 3)
+                 :let [a (+ a0 (* tau (/ (double i) 3.0)))]]
+             (tilt (lp (- tx (* 0.5 br (js-sin a)))
+                       (+ hy (* 0.5 br (js-cos a))) hzz
+                       quarter 0.5 br 1.5 :box :white 0.0)
+                   a)))))
+      [[(* -0.6 hx) (* -0.45 hz)]
+       [(* 0.55 hx) (* -0.15 hz)]
+       [(* -0.1 hx) (* 0.6 hz)]]))))
+
+(defmethod landmark-shapes :cemetery [_ hx hz r]
+  (concat
+   [(apron hx hz :grass)
+    (lp 0.0 0.14 0.0 0.0 (* 1.8 hx) 0.28 (* 1.8 hz) :box :grass 0.0)
+    ;; The chapel: small, and with the one spire that says what it is.
+    (lp (* -0.6 hx) 3.5 (* -0.5 hz) 0.0 10.0 7.0 14.0 :box :stone 1.0)
+    (lp (* -0.6 hx) 8.6 (* -0.5 hz) 0.0 10.6 3.2 14.6 :gable :roof 0.0)
+    (lp (* -0.6 hx) 12.4 (* -0.5 hz) 0.0 1.0 5.0 1.0 :box :stone 0.0)
+    (lp (* -0.6 hx) 13.6 (* -0.5 hz) 0.0 3.0 0.8 0.7 :box :stone 0.0)
+    ;; The gate piers.
+    (lp -4.0 1.8 (* 0.96 hz) 0.0 1.6 3.6 1.6 :box :stone 1.0)
+    (lp 4.0 1.8 (* 0.96 hz) 0.0 1.6 3.6 1.6 :box :stone 1.0)]
+   ;; The wall, with the gate left out of it.
+   (keep-indexed
+    (fn [i [x z a]]
+      (when-not (= i 6)
+        (lp x 0.9 z a (* 0.6 hx) 1.8 0.6 :box :stone 1.0)))
+    (ring 10 (* 0.95 hx) (* 0.95 hz)))
+   ;; Rows of headstones, none quite square to the next -- which is the only
+   ;; thing separating a graveyard from a car park with bollards in it.
+   (for [i (range 6), j (range 6)
+         :let [h (prng/next-range! r 0.9 1.8)
+               a (prng/next-range! r -0.16 0.16)]]
+     (lp (+ (* -0.5 hx) (* i 0.2 hx) (prng/next-range! r -0.6 0.6))
+         (* 0.5 h)
+         (+ (* -0.3 hz) (* j 0.22 hz) (prng/next-range! r -0.5 0.5))
+         a 1.1 h 0.35 :box :stone 1.0))
+   ;; Two tombs and a rank of cypresses.
+   (for [_ (range 2)]
+     (lp (prng/next-range! r (* -0.6 hx) (* 0.6 hx)) 0.9
+         (prng/next-range! r (* -0.7 hz) (* 0.7 hz))
+         (prng/next-range! r -0.2 0.2) 2.6 1.8 4.2 :box :white 1.0))
+   (mapcat (fn [[x z _]]
+             [(lp x 3.0 z 0.0 1.0 6.0 1.0 :cylinder :timber 1.0)
+              (lp x 8.0 z 0.0 3.2 12.0 3.2 :pyramid :leaf 0.0)])
+           (take 4 (ring 9 (* 0.82 hx) (* 0.82 hz))))))
+
+(defmethod landmark-shapes :quarry [_ hx hz r]
+  (concat
+   [(apron hx hz :sand)
+    ;; The ground is a heightfield the collider is built from, so nothing here
+    ;; can dig a hole in it. The pit is made by building the *rim* up instead,
+    ;; which from a car is the same picture and from a plan is a ring of spoil.
+    (lp 0.0 0.3 0.0 0.0 (* 1.5 hx) 0.6 (* 1.5 hz) :cylinder :sand 0.0)
+    (lp (* 0.3 hx) 0.42 (* 0.25 hz) 0.0 (* 0.55 hx) 0.6 (* 0.45 hz)
+        :cylinder :water 0.0)
+    ;; Crusher, and the conveyor running up to the top of it.
+    (lp (* -0.6 hx) 7.0 (* -0.5 hz) 0.0 9.0 14.0 9.0 :box :rust 1.0)
+    (lp (* -0.6 hx) 15.0 (* -0.5 hz) 0.0 10.0 2.0 10.0 :box :metal 0.0)
+    (tilt (lp (* -0.3 hx) 7.5 (* -0.28 hz) quarter 1.4 26.0 3.2
+              :box :metal 0.0)
+          (* 0.33 tau))
+    ;; The stockpile it drops onto.
+    (lp (* -0.02 hx) 3.0 (* -0.1 hz) 0.0 15.0 6.0 15.0 :pyramid :sand 1.0)]
+   ;; Spoil on the rim.
+   (for [[x z _] (ring 7 (* 0.92 hx) (* 0.92 hz))]
+     (lp x 3.2 z 0.0 15.0 6.4 15.0 :pyramid :sand 1.0))
+   ;; And the dumpers that put it there.
+   (for [_ (range 3)]
+     (lp (prng/next-range! r (* -0.7 hx) (* 0.7 hx)) 1.5
+         (prng/next-range! r (* -0.7 hz) (* 0.7 hz))
+         (prng/next-range! r 0.0 tau) 6.4 3.0 3.4 :box :sign 1.0))))
+
+;; --- landmarks that say where in the world you are --------------------------
+;;
+;; One per region, and they only appear out of town. The point of them is not
+;; accuracy, it is that the countryside stops being interchangeable: you can be
+;; four kilometres from anything and still know which part of the map you are
+;; on, because the huts have log walls or the roofs have no pitch at all.
+
+(defmethod landmark-shapes :izbas [_ hx hz r]
+  (let [bx 0.0 by 0.0 bz 0.0]           ; where the bear stands: the green
+    (concat
+     [(apron hx hz :grass)
+      (lp 0.0 0.14 0.0 0.0 (* 1.8 hx) 0.28 (* 1.8 hz) :box :grass 0.0)
+      ;; The well, which is what the huts are arranged around.
+      (lp (* 0.5 hx) 0.7 (* -0.45 hz) 0.0 3.0 1.4 3.0 :cylinder :stone 1.0)
+      (lp (* 0.5 hx) 2.6 (* -0.45 hz) 0.0 0.3 4.0 0.3 :cylinder :log 0.0)
+      (lp (* 0.5 hx) 4.8 (* -0.45 hz) 0.0 3.6 1.6 3.6 :gable :roof 0.0)
+      ;; A woodpile, because there is always a woodpile.
+      (lp (* -0.65 hx) 0.9 (* 0.6 hz) 0.35 6.0 1.8 2.2 :box :log 1.0)]
+     ;; Five log huts round the green, each turned its own way. Steep roofs and
+     ;; a carved board on the gable end: two details, and neither is a shape
+     ;; any other building in the game has.
+     (mapcat
+      (fn [[x z a]]
+        (let [w (prng/next-range! r 6.0 8.0)
+              d (prng/next-range! r 7.0 9.0)]
+          [(lp x 2.1 z a w 4.2 d :box :log 1.0)
+           (lp x 5.8 z a (* 1.12 w) 3.4 (* 1.1 d) :gable :timber 0.0)
+           (lp x 4.6 (+ z (* 0.52 d)) a (* 0.8 w) 0.5 0.3 :box :white 0.0)
+           (lp x 1.4 (+ z (* 0.52 d)) a 1.4 2.6 0.3 :box :timber 0.0)]))
+      (ring 5 (* 0.66 hx) (* 0.66 hz)))
+     ;; Birches, which are the other half of the picture.
+     (mapcat (fn [[x z _]]
+               [(lp x 3.4 z 0.0 0.5 6.8 0.5 :cylinder :white 1.0)
+                (lp x 8.6 z 0.0 4.4 5.6 4.4 :blob :leaf 0.0)])
+             (take 6 (ring 11 (* 0.88 hx) (* 0.88 hz))))
+     ;; And a bear on its hind legs with a balalaika. It is the single most
+     ;; ridiculous object in the world and it is worth every one of its eleven
+     ;; volumes: nobody who sees it once forgets where the taiga is.
+     [(lp (- bx 0.7) (+ by 0.8) bz 0.0 0.8 1.6 0.9 :cylinder :fur 1.0)
+      (lp (+ bx 0.7) (+ by 0.8) bz 0.0 0.8 1.6 0.9 :cylinder :fur 1.0)
+      (lp bx (+ by 2.6) bz 0.0 2.4 2.6 1.9 :blob :fur 1.0)
+      (lp bx (+ by 4.3) bz 0.0 1.5 1.5 1.5 :blob :fur 0.0)
+      (lp bx (+ by 4.1) (+ bz 0.75) 0.0 0.7 0.6 0.8 :blob :fur 0.0)
+      (lp (- bx 0.62) (+ by 4.9) bz 0.0 0.5 0.5 0.4 :blob :fur 0.0)
+      (lp (+ bx 0.62) (+ by 4.9) bz 0.0 0.5 0.5 0.4 :blob :fur 0.0)
+      ;; The balalaika: a triangle and a neck, held across the chest.
+      (tilt (lp (- bx 0.35) (+ by 2.5) (+ bz 1.15) 0.0 1.5 1.1 0.22
+                :gable :timber 0.0) 0.35)
+      (tilt (lp (+ bx 0.95) (+ by 3.3) (+ bz 1.05) quarter 0.16 2.2 0.16
+                :box :timber 0.0) 2.1)
+      ;; Both arms, one over the strings and one on the neck.
+      (tilt (lp (- bx 1.15) (+ by 2.9) (+ bz 0.9) quarter 0.45 2.0 0.5
+                :box :fur 0.0) 2.5)
+      (tilt (lp (+ bx 1.25) (+ by 3.2) (+ bz 0.85) quarter 0.45 2.0 0.5
+                :box :fur 0.0) 3.9)])))
+
+(defmethod landmark-shapes :cantina [_ hx hz r]
+  (concat
+   [(apron hx hz :sand)
+    (lp 0.0 0.16 0.0 0.0 (* 1.8 hx) 0.32 (* 1.8 hz) :box :sand 0.0)
+    ;; Adobe, and a flat roof with a parapet. Every other building in the game
+    ;; has a pitch on it; this one having none is most of what places it.
+    (lp 0.0 3.0 (* -0.35 hz) 0.0 (* 1.05 hx) 6.0 (* 0.65 hz) :box :adobe 1.0)
+    (lp 0.0 6.5 (* -0.35 hz) 0.0 (* 1.09 hx) 1.0 (* 0.69 hz) :box :adobe 0.0)
+    ;; The porch across the front, on rough posts.
+    (lp 0.0 4.4 (* 0.16 hz) 0.0 (* 1.05 hx) 0.4 (* 0.4 hz) :box :timber 0.0)
+    (lp 0.0 1.4 (* 0.02 hz) 0.0 3.0 2.8 0.3 :box :timber 0.0)
+    ;; And the sign, which is the only straight-edged thing on it.
+    (lp 0.0 8.0 (* -0.02 hz) 0.0 (* 0.6 hx) 2.2 0.3 :box :lacquer 0.0)]
+   (for [i (range 5)]
+     (lp (+ (* -0.9 hx) (* i 0.45 hx)) 2.2 (* 0.34 hz) 0.0
+         0.5 4.4 0.5 :cylinder :timber 1.0))
+   ;; Barrels stacked by the door, a cart, and agave along the front.
+   (for [i (range 6)]
+     (lp (+ (* 0.5 hx) (* (mod i 3) 1.7)) (+ 0.8 (* 1.6 (quot i 3)))
+         (* 0.22 hz) 0.0 1.5 1.5 1.5 :cylinder :timber 1.0))
+   [(lp (* -0.62 hx) 1.0 (* 0.6 hz) 0.3 4.4 1.0 2.4 :box :timber 1.0)
+    (lp (* -0.62 hx) 0.6 (* 0.6 hz) 0.3 0.4 1.2 1.2 :cylinder :log 0.0)]
+   (mapcat (fn [[x z _]]
+             (for [k (range 5)]
+               (tilt (lp x 1.4 z quarter 0.28 3.0 0.9 :box :cactus 0.0)
+                     (+ (* 0.42 (- (double k) 2.0))
+                        (* 0.35 (js-sin (* 2.1 (double k))))))))
+           (take 5 (ring 9 (* 0.85 hx) (* 0.85 hz))))
+   ;; Two of the regulars, in hats, not moving.
+   (mapcat
+    (fn [[x z]]
+      [(lp x 0.85 z 0.0 0.8 1.7 0.8 :cylinder :white 1.0)
+       (lp x 2.1 z 0.0 2.0 1.3 2.0 :pyramid :cloth-a 0.0)
+       (lp x 2.75 z 0.0 0.55 0.6 0.55 :blob :adobe 0.0)
+       (lp x 3.05 z 0.0 2.2 0.14 2.2 :cylinder :sand 0.0)
+       (lp x 3.3 z 0.0 0.8 0.5 0.8 :cylinder :sand 0.0)])
+    [[(* -0.2 hx) (* 0.28 hz)] [(* 0.16 hx) (* 0.3 hz)]])))
+
+(defmethod landmark-shapes :pagoda [_ hx hz r]
+  (concat
+   [(apron hx hz :stone)
+    (lp 0.0 0.16 0.0 0.0 (* 1.8 hx) 0.32 (* 1.8 hz) :box :stone 0.0)
+    ;; A pond with a red bridge over it.
+    (lp (* 0.58 hx) 0.24 (* 0.5 hz) 0.0 (* 0.62 hx) 0.4 (* 0.62 hz)
+        :cylinder :water 0.0)
+    (lp (* 0.58 hx) 1.1 (* 0.5 hz) 0.4 (* 0.72 hx) 0.5 2.6 :box :lacquer 1.0)
+    ;; The gate: two posts and two beams, which is a silhouette everybody
+    ;; already knows.
+    (lp (* -0.22 hx) 4.2 (* 0.86 hz) 0.0 1.0 8.4 1.0 :cylinder :lacquer 1.0)
+    (lp (* 0.22 hx) 4.2 (* 0.86 hz) 0.0 1.0 8.4 1.0 :cylinder :lacquer 1.0)
+    (lp 0.0 8.8 (* 0.86 hz) 0.0 (* 0.66 hx) 0.9 1.4 :box :lacquer 0.0)
+    (lp 0.0 7.2 (* 0.86 hz) 0.0 (* 0.5 hx) 0.6 1.0 :box :lacquer 0.0)]
+   ;; Five tiers, each smaller than the one below, each with the wide flat roof
+   ;; that is the entire silhouette. Nothing else in the game overhangs.
+   (mapcat
+    (fn [i]
+      (let [w (- 13.0 (* 1.7 (double i)))
+            y (+ 1.0 (* 6.2 (double i)))]
+        [(lp (* -0.15 hx) (+ y 2.2) (* -0.2 hz) 0.0 w 4.4 w
+             :box (if (even? i) :white :adobe) 1.0)
+         (lp (* -0.15 hx) (+ y 5.2) (* -0.2 hz) 0.0 (* 1.7 w) 2.0 (* 1.7 w)
+             :pyramid :lacquer 0.0)
+         (lp (* -0.15 hx) (+ y 4.5) (* -0.2 hz) 0.0 (* 1.05 w) 0.6 (* 1.05 w)
+             :box :timber 0.0)]))
+    (range 5))
+   [(lp (* -0.15 hx) 33.0 (* -0.2 hz) 0.0 0.6 5.0 0.6 :cylinder :gold 0.0)]
+   ;; Lanterns on a line from the gate.
+   (for [i (range 6)]
+     (lp (+ (* -0.5 hx) (* i 0.2 hx)) 2.6 (* 0.62 hz) 0.0
+         1.0 1.2 1.0 :blob :lacquer 0.0))))
+
 (defn chunk-landmarks
   "The landmark this chunk owns, as a flat parts array in the same layout as
   `chunk-bridges`. Empty for the fifteen chunks in a district that do not own
@@ -2449,6 +3009,7 @@
 (def ^:private coin-run-max 9)
 (def ^:private coin-spacing 4.6)    ; metres between coins in a trail
 (def ^:private nugget-odds 0.4)     ; per chunk
+(def ^:private landmark-coins 16)   ; in the ring round a landmark
 
 (defn chunk-pickups
   "Crates of something useful, sitting on the carriageway.
@@ -2521,6 +3082,46 @@
              [bx bz] (nth pts (inc i))]
          (when (< roll nugget-odds)
            (emit (+ ax (* t (- bx ax))) (+ az (* t (- bz az))) nugget-kind 1.1))))
+     ;; And whatever is worth having at the landmark, if this chunk owns one.
+     ;;
+     ;; Until now there was no reason to drive to a landmark: you could see it
+     ;; from a district away and there was nothing in it. A ring round the
+     ;; apron rather than a heap in the middle, because a ring is a lap -- you
+     ;; arrive, you go round, you leave -- and a heap is a full stop.
+     ;;
+     ;; Ground height is sampled once, at the centre, and reused for the whole
+     ;; ring. That is not a shortcut: the landmark itself is built to one
+     ;; height off one sample and given a plinth deep enough to bury the
+     ;; slope, so a coin that followed the terrain instead would be the one
+     ;; thing in the cell that did.
+     (let [[dx dz] (district-of cx cz)]
+       (doseq [ddx [-1 0 1], ddz [-1 0 1]
+               :let [lm (landmark seed (+ dx ddx) (+ dz ddz))]
+               :when lm
+               :let [{:keys [x z half-x half-z]} lm
+                     [ox oz] (chunk-of x z)]
+               :when (and (= ox cx) (= oz cz))]
+         (let [y0 (height-at seed x z)
+               put (fn [px pz kind lift]
+                     (conj! out px) (conj! out (+ y0 lift)) (conj! out pz)
+                     (conj! out (double kind)))
+               ph (prng/next-range! r 0.0 tau)]
+           (dotimes [i landmark-coins]
+             (let [a (+ ph (* tau (/ (double i) landmark-coins)))]
+               (put (+ x (* 1.15 half-x (js-sin a)))
+                    (+ z (* 1.15 half-z (js-cos a)))
+                    coin-kind 0.9)))
+           ;; One big one on the far side, so the lap is worth finishing, and
+           ;; two power-ups where the ring meets the road.
+           (put (+ x (* 1.15 half-x (js-sin (+ ph 3.14159265))))
+                (+ z (* 1.15 half-z (js-cos (+ ph 3.14159265))))
+                nugget-kind 1.1)
+           (dotimes [i 2]
+             (let [a (+ ph 1.5707963 (* i 3.14159265))]
+               (put (+ x (* 1.35 half-x (js-sin a)))
+                    (+ z (* 1.35 half-z (js-cos a)))
+                    (prng/next-int! r (- (count pickup-kinds) 2))
+                    1.0))))))
      (let [v (persistent! out)
            a (farray (count v))]
        (dotimes [i (count v)] (fput! a i (nth v i)))
@@ -2915,6 +3516,19 @@
         ;; fifty streets six times and was, by the end, most of the cost of a
         ;; chunk.
         owned (chunk-lines seed cx cz)
+        ;; The two region fields, at the chunk's four corners. A region is
+        ;; forty chunks across, so bilinear interpolation over one chunk is
+        ;; indistinguishable from sampling it -- and because the corners are
+        ;; shared with the neighbours, the interpolation is continuous across
+        ;; the border, which per-chunk sampling would not be. Two noise calls
+        ;; per vertex on top of the four already here is not affordable; eight
+        ;; per chunk is free.
+        x1'   (+ x0 k/chunk-size)
+        z1'   (+ z0 k/chunk-size)
+        w00 (warmth seed x0 z0) w10 (warmth seed x1' z0)
+        w01 (warmth seed x0 z1') w11 (warmth seed x1' z1')
+        m00 (damp seed x0 z0)   m10 (damp seed x1' z0)
+        m01 (damp seed x0 z1')  m11 (damp seed x1' z1')
         heights (farray (* n n))
         colors  (farray (* n n 3))]
     ;; The ground comes first, and everything else is then placed on it. That
@@ -2957,6 +3571,21 @@
               tr   (* tr (+ 1.0 (* farm (- cr 1.0))))
               tg   (* tg (+ 1.0 (* farm (- cg 1.0))))
               tb   (* tb (+ 1.0 (* farm (- cb 1.0))))
+              ;; And what part of the world this is. Same mask as the crops --
+              ;; a region colours its countryside, not its cities and not its
+              ;; rivers -- and the same hue-cancelling arithmetic, because the
+              ;; ground texture is green and sand is not a lighter green.
+              fu   (/ (double i) cells)
+              fv   (/ (double j) cells)
+              wq   (+ (* (- 1.0 fu) (- 1.0 fv) w00) (* fu (- 1.0 fv) w10)
+                      (* (- 1.0 fu) fv w01)         (* fu fv w11))
+              mq   (+ (* (- 1.0 fu) (- 1.0 fv) m00) (* fu (- 1.0 fv) m10)
+                      (* (- 1.0 fu) fv m01)         (* fu fv m11))
+              [qs qr qg qb] (region-blend wq mq)
+              q    (* qs farm)
+              tr   (+ tr (* q (- (* gr qr) tr)))
+              tg   (+ tg (* q (- (* gr qg) tg)))
+              tb   (+ tb (* q (- (* gr qb) tb)))
               ;; Hardstanding. An estate is not built on grass -- the ground
               ;; between the sheds is concrete, oil and gravel, and it was
               ;; coming out the same bright green as a meadow because the only

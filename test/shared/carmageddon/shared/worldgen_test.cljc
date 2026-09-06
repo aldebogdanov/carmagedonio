@@ -769,6 +769,85 @@
       (is (= cell [(long (Math/floor (/ x w/street-spacing)))
                    (long (Math/floor (/ z w/street-spacing)))])))))
 
+(deftest regions-are-large-and-all-four-happen
+  (let [at (fn [i j] (w/region seed (* i 260.0) (* j 260.0)))]
+    (testing "every region exists, and none of them is most of the world"
+      (let [freq (frequencies (for [i (range 160), j (range 160)] (at i j)))]
+        (is (= (set w/region-kinds) (set (keys freq)))
+            (str "missing: " (remove freq w/region-kinds)))
+        ;; The first thresholds were nominal-looking round numbers rather than
+        ;; percentiles of the two fields, and made 45% of the world taiga.
+        (is (< (apply max (vals freq)) (* 0.62 (reduce + (vals freq))))
+            (str "one region dominates: " freq))))
+
+    (testing "and a region is a place you drive out of, not past"
+      ;; Ten kilometres across means neighbouring samples 260 m apart are
+      ;; almost always the same region. A field an order of magnitude finer
+      ;; would still pass every other test here and would look like confetti.
+      (let [pairs (for [i (range 120), j (range 120)] [(at i j) (at (inc i) j)])
+            same  (count (filter (fn [[a b]] (= a b)) pairs))]
+        ;; 0.96 measured; a region field an order of magnitude finer comes out
+        ;; around 0.7 and is what this is here to catch.
+        (is (> (/ (double same) (count pairs)) 0.95)
+            (str "region changes every " (/ (count pairs) (- (count pairs) same))
+                 " samples"))))))
+
+(deftest the-countryside-is-regional-and-the-city-is-not
+  ;; The three regional landmarks are the payload of the whole region field:
+  ;; if a cantina can turn up in the taiga they are just three more entries in
+  ;; the catalogue, and the map stops meaning anything.
+  (let [home {:izbas :taiga :cantina :sierra :pagoda :paddies}
+        town #{:downtown :city :suburb :industry}
+        found (for [dx (range -14 14), dz (range -14 14)
+                    :let [lm (w/landmark seed dx dz)]
+                    :when (and lm (contains? home (:kind lm)))
+                    :let [{:keys [kind x z]} lm
+                          [cx cz] (w/chunk-of x z)]]
+                [kind (w/region seed x z) (w/area-kind seed cx cz)])]
+    (is (seq found) "no regional landmarks at all")
+    (doseq [[kind reg area] found]
+      (is (= (home kind) reg)
+          (str kind " built in " reg " rather than " (home kind)))
+      (is (not (town area)) (str kind " built in " area)))))
+
+(deftest a-landmark-is-worth-driving-to
+  ;; A landmark you can see from a district away and get nothing for reaching
+  ;; is scenery. Every one of them gets a ring of coins round the apron.
+  (let [owner (fn [dx dz]
+                (when-let [{:keys [x z] :as lm} (w/landmark seed dx dz)]
+                  (let [[cx cz] (w/chunk-of x z)]
+                    [lm cx cz])))
+        cases (keep identity (for [dx (range -3 3), dz (range -3 3)]
+                               (owner dx dz)))
+        n-of  (fn [cx cz] (/ (alen* (w/chunk-pickups seed cx cz))
+                             w/pickup-stride))]
+    (is (seq cases))
+    (doseq [[{:keys [kind x z half-x half-z]} cx cz] cases]
+      (let [a (w/chunk-pickups seed cx cz)
+            n (/ (alen* a) w/pickup-stride)
+            coins (for [i (range n)
+                        :let [o (* i w/pickup-stride)]
+                        :when (= 6.0 (double (aget* a (+ o 3))))]
+                    [(double (aget* a o)) (double (aget* a (+ o 2)))])
+            ;; Measured in units of the apron rather than in metres, so a
+            ;; landmark on a small cell is judged by the same rule as one on a
+            ;; big cell. Anything on the ring lands at 1.15.
+            ring (filter (fn [[px pz]]
+                           (let [u (/ (- px x) half-x)
+                                 v (/ (- pz z) half-z)
+                                 d #?(:clj (Math/sqrt (+ (* u u) (* v v)))
+                                      :cljs (js/Math.sqrt (+ (* u u) (* v v))))]
+                             (< 0.95 d 1.5)))
+                         coins)]
+        (is (>= (count ring) 12)
+            (str kind " has " (count ring) " coins round it"))
+        ;; And it is a lap rather than a pile: the coins go all the way round,
+        ;; not in an arc on the side the road happens to be.
+        (let [quads (set (for [[px pz] ring]
+                           [(pos? (- px x)) (pos? (- pz z))]))]
+          (is (= 4 (count quads))
+              (str kind " put its coins in " (count quads) " quadrants")))))))
+
 (deftest a-landmark-clears-its-block
   (testing "none of the cell's own lots survive into the chunk"
     ;; Compared against `cell-lots` for the claimed cell rather than against a
@@ -822,7 +901,9 @@
   ;; `landmark-parts-are-well-formed` builds whatever sixty-four districts
   ;; happen to contain, which is most kinds and never all of them -- a refinery
   ;; needs an industrial district, and there is roughly one of those in a
-  ;; hundred. This walks the catalogue instead: every kind named in
+  ;; hundred -- and a cantina needs a rural one inside the sierra, which is
+  ;; about one in four hundred. This walks the catalogue instead: every kind
+  ;; named in
   ;; `landmark-kinds` gets found somewhere, built, and checked. A kind added to
   ;; the list with no shapes behind it throws here rather than a fortnight
   ;; later in whichever district first asks for one.
@@ -832,8 +913,8 @@
                             acc
                             (assoc acc kind [dx dz]))))
                       {}
-                      (for [dx (range -8 8), dz (range -8 8)] [dx dz]))]
-    (testing "every kind exists somewhere in a thousand square kilometres"
+                      (for [dx (range -14 14), dz (range -14 14)] [dx dz]))]
+    (testing "every kind exists somewhere in eight hundred districts"
       (is (empty? (remove found w/landmark-kinds))
           (str "never placed: " (vec (remove found w/landmark-kinds)))))
     (testing "and every kind has a name the map can print"
