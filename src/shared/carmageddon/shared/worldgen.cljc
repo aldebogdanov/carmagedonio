@@ -1449,13 +1449,19 @@
   (long (/ (* district-chunks k/chunk-size) street-spacing)))
 
 (def landmark-kinds
-  [:stadium :mall :park :plaza :works :silos :church :monument :mast])
+  [:stadium :mall :park :plaza :works :silos :church :monument :mast
+   :tower :station :museum :funfair :school :refinery :scrapyard
+   :windmill :water-tower :ruins :drive-in])
 
 (def landmark-labels
   {:stadium "the stadium" :mall "the shopping centre" :park "the park"
    :plaza "the plaza" :works "the works" :silos "the grain silos"
    :church "the church" :monument "the standing stones"
-   :mast "the transmitter"})
+   :mast "the transmitter" :tower "the tower" :station "the station"
+   :museum "the museum" :funfair "the funfair" :school "the school"
+   :refinery "the refinery" :scrapyard "the scrapyard"
+   :windmill "the windmill" :water-tower "the water tower"
+   :ruins "the ruins" :drive-in "the drive-in"})
 
 (defn district-of
   "Which district a chunk belongs to. Floor division, so it keeps working west
@@ -1471,18 +1477,21 @@
   Drawn from the area kind rather than at random, because a grain silo in the
   middle of downtown is not a landmark, it is a mistake."
   [kind r]
-  (case kind
-    :downtown (nth [:stadium :plaza :mall] (prng/next-int! r 3))
-    :city     (nth [:stadium :mall :park :plaza] (prng/next-int! r 4))
-    :suburb   (nth [:mall :park :church] (prng/next-int! r 3))
-    :industry :works
-    :village  (if (prng/next-bool! r) :church :park)
-    :farm     (if (prng/next-bool! r) :silos :mast)
-    ;; Open country is most of the world, so it needs more than one answer or
-    ;; half the landmarks anywhere are the same ring of stones.
-    :woods    (if (prng/next-bool! r) :monument :mast)
-    :wild     (nth [:monument :mast :monument :silos] (prng/next-int! r 4))
-    :monument))
+  (let [pick (fn [ks] (nth ks (prng/next-int! r (count ks))))]
+    (case kind
+      :downtown (pick [:tower :tower :station :museum :stadium :plaza :mall])
+      :city     (pick [:tower :station :museum :funfair :stadium :mall :park
+                       :plaza])
+      :suburb   (pick [:school :funfair :water-tower :mall :park :church
+                       :museum])
+      :industry (pick [:works :refinery :scrapyard])
+      :village  (pick [:church :park :school :funfair :windmill :water-tower])
+      :farm     (pick [:silos :mast :windmill :water-tower :drive-in])
+      ;; Open country is most of the world, so it needs more than one answer or
+      ;; half the landmarks anywhere are the same ring of stones.
+      :woods    (pick [:monument :mast :ruins :windmill])
+      :wild     (pick [:monument :mast :ruins :drive-in :scrapyard :silos])
+      :monument)))
 
 (defn landmark
   "The landmark of district (dx, dz): {:kind :cell [gx gz] :x :z :radius}, or
@@ -1538,15 +1547,26 @@
   {:concrete 0xb8b4ac :dark 0x4a4a4e :grass 0x4c7a3e :water 0x35617f
    :brick 0x9a5f47 :metal 0x8b9199 :roof 0x6b4a3c :stone 0x8f8a80
    :tarmac 0x3a3a3e :white 0xd8d0c4 :timber 0x6f5238 :leaf 0x3f6b32
-   :red 0xa33b30})
+   :red 0xa33b30 :glass 0x7c98ad :rust 0x7b4630 :sign 0xd8b23c
+   :sand 0xc0ad8c})
 
 (defn- lp
   "One landmark part, in the cell's own frame: centre at (0,0), y from the
   ground the landmark was levelled to."
   ([x y z sx sy sz prim tint] (lp x y z 0.0 sx sy sz prim tint 1.0))
   ([x y z yaw sx sy sz prim tint solid]
-   {:x x :y y :z z :yaw yaw :sx sx :sy sy :sz sz :prim prim
+   {:x x :y y :z z :yaw yaw :pitch 0.0 :sx sx :sy sy :sz sz :prim prim
     :tint (landmark-tints tint) :solid solid}))
+
+(defn- tilt
+  "The same part, tipped about its own X axis.
+
+  Rotations are applied yaw first, so a part yawed a quarter turn and then
+  tilted stands in the world's XY plane -- which is the only way to build a
+  spoke, a sail or anything else that leans out of the horizontal, since the
+  wire format carries one angle per axis and no full basis."
+  [p a]
+  (assoc p :pitch a))
 
 (defn- apron
   "The slab a landmark stands on.
@@ -1695,6 +1715,294 @@
    (for [y [18.0 40.0 66.0]]
      (lp 0.0 y 0.0 0.0 7.0 0.8 7.0 :box :metal 0.0))))
 
+(def ^:private quarter (* 0.25 tau))
+
+;; The nine originals were one per area kind and no more, so a district read as
+;; its category rather than as a place: every industrial district in the world
+;; was the same works. What follows is the second answer for each kind -- and
+;; the third and fourth for open country, which is most of the map.
+
+(defmethod landmark-shapes :tower [_ hx hz r]
+  (let [w  (* 0.30 hx)
+        d  (* 0.30 hz)
+        ;; Three setbacks. The steps are the whole point: a single extrusion of
+        ;; the same volume reads as a block of flats however tall it is.
+        h1 (prng/next-range! r 34.0 46.0)]
+    (concat
+     [(apron hx hz :stone)
+      (lp 0.0 0.16 0.0 0.0 (* 1.85 hx) 0.32 (* 1.85 hz) :box :stone 0.0)
+      (lp 0.0 (* 0.5 h1) 0.0 0.0 (* 2.0 w) h1 (* 2.0 d) :box :glass 1.0)
+      (lp 0.0 (+ h1 14.0) 0.0 0.0 (* 1.5 w) 28.0 (* 1.5 d) :box :glass 1.0)
+      (lp 0.0 (+ h1 34.0) 0.0 0.0 w 12.0 d :box :concrete 1.0)
+      (lp 0.0 (+ h1 41.0) 0.0 0.0 (* 1.15 w) 2.0 (* 1.15 d) :box :metal 0.0)
+      (lp 0.0 (+ h1 54.0) 0.0 0.0 0.7 24.0 0.7 :cylinder :red 0.0)]
+     ;; Planters, which is what the plaza round the foot of one is made of.
+     (for [[x z a] (ring 6 (* 0.88 hx) (* 0.88 hz))]
+       (lp x 0.9 z a 4.5 1.8 4.0 :box :stone 1.0)))))
+
+(defmethod landmark-shapes :station [_ hx hz r]
+  (let [len (* 1.6 hx)]
+    (concat
+     [(apron hx hz :concrete)
+      ;; The shed: two long walls with a roof over the tracks between them.
+      (lp 0.0 5.0 (* -0.62 hz) 0.0 len 10.0 2.0 :box :brick 1.0)
+      (lp 0.0 5.0 (* 0.62 hz) 0.0 len 10.0 2.0 :box :brick 1.0)
+      (lp 0.0 11.5 0.0 quarter (* 1.32 hz) 5.0 len :gable :metal 0.0)
+      ;; Head house and clock tower: the half of a station that faces the road
+      ;; rather than the track, and the half you navigate by.
+      (lp (* -0.74 hx) 4.5 (* 0.15 hz) 0.0 (* 0.4 hx) 9.0 (* 1.2 hz)
+          :box :stone 1.0)
+      (lp (* -0.74 hx) 13.5 (* 0.6 hz) 0.0 7.0 27.0 7.0 :box :stone 1.0)
+      (lp (* -0.74 hx) 28.5 (* 0.6 hz) 0.0 7.6 3.5 7.6 :pyramid :roof 0.0)
+      ;; Island platform, with a road either side of it.
+      (lp 0.0 0.6 0.0 0.0 len 1.2 5.0 :box :concrete 1.0)]
+     (for [z [(* -0.38 hz) (* 0.38 hz)]]
+       (lp 0.0 0.14 z 0.0 len 0.28 3.4 :box :dark 0.0))
+     ;; Something standing at the near platform, because an empty station is a
+     ;; shed.
+     (for [i (range 3)]
+       (lp (* (- (double i) 1.0) 0.34 len) 2.8 (* -0.38 hz) 0.0
+           (* 0.3 len) 4.4 3.0 :box :red 1.0)))))
+
+(defmethod landmark-shapes :museum [_ hx hz r]
+  (let [w (* 1.15 hx) d (* 0.85 hz)]
+    (concat
+     [(apron hx hz :stone)
+      (lp 0.0 0.16 0.0 0.0 (* 1.85 hx) 0.32 (* 1.85 hz) :box :stone 0.0)
+      ;; Steps, terrace, block, cornice -- the order a classical front is read
+      ;; in, and the reason it does not need a sign on it.
+      (lp 0.0 0.7 (* 0.95 hz) 0.0 (* 0.8 w) 1.4 (* 0.28 hz) :box :white 1.0)
+      (lp 0.0 1.4 (* 0.1 hz) 0.0 (* 1.05 w) 2.8 (* 1.5 d) :box :white 1.0)
+      (lp 0.0 9.0 (* -0.15 hz) 0.0 w 12.0 d :box :white 1.0)
+      (lp 0.0 15.6 (* -0.15 hz) 0.0 (* 1.06 w) 1.2 (* 1.08 d) :box :stone 0.0)
+      ;; A drum and a dome. The icosahedron is a ball, so most of it is buried
+      ;; in the drum and only the cap shows.
+      (lp 0.0 17.0 (* -0.15 hz) 0.0 (* 0.44 w) 3.6 (* 0.44 w)
+          :cylinder :stone 0.0)
+      (lp 0.0 19.0 (* -0.15 hz) 0.0 (* 0.46 w) (* 0.46 w) (* 0.46 w)
+          :blob :white 0.0)
+      ;; The portico: entablature and pediment over the columns.
+      (lp 0.0 12.6 (* 0.52 hz) 0.0 (* 0.62 w) 2.0 (* 0.5 d) :box :white 0.0)
+      (lp 0.0 15.4 (* 0.52 hz) 0.0 (* 0.64 w) 4.0 (* 0.52 d) :gable :white 0.0)]
+     (for [i (range 6)]
+       (lp (+ (* -0.26 w) (* i 0.104 w)) 6.5 (* 0.52 hz) 0.0
+           1.6 11.0 1.6 :cylinder :white 1.0)))))
+
+(defmethod landmark-shapes :funfair [_ hx hz r]
+  (let [wr (min 18.0 (* 0.62 hz))            ; wheel radius
+        wx (* -0.42 hx)                      ; and where it stands
+        cy (+ wr 5.0)]
+    (concat
+     [(apron hx hz :tarmac)
+      ;; Big top and carousel, so the wheel has a fair round it.
+      (lp (* 0.5 hx) 3.5 (* 0.42 hz) 0.0 (* 0.66 hx) 7.0 (* 0.66 hz)
+          :cylinder :white 1.0)
+      (lp (* 0.5 hx) 11.0 (* 0.42 hz) 0.0 (* 0.72 hx) 9.0 (* 0.72 hz)
+          :pyramid :red 0.0)
+      (lp (* 0.46 hx) 2.2 (* -0.5 hz) 0.0 10.0 4.4 10.0 :cylinder :sign 1.0)
+      (lp (* 0.46 hx) 5.6 (* -0.5 hz) 0.0 11.0 3.2 11.0 :pyramid :red 0.0)
+      ;; The wheel stands in the plane z = wx, so its spokes and rim are parts
+      ;; yawed a quarter turn and then tilted -- the only way to lean anything
+      ;; out of the horizontal.
+      (lp wx cy 0.0 0.0 2.4 2.4 4.0 :cylinder :metal 1.0)]
+     (for [sx' [-1.0 1.0], sz' [-1.0 1.0]]
+       (lp (+ wx (* sx' 0.34 wr)) (* 0.5 cy) (* sz' 0.5 wr) 0.0
+           1.4 cy 1.4 :box :metal 1.0))
+     (for [i (range 8) :let [a (* tau (/ (double i) 16.0))]]
+       (tilt (lp wx cy 0.0 quarter 0.7 (* 2.0 wr) 0.9 :box :metal 0.0) a))
+     (for [i (range 16) :let [a (* tau (/ (double i) 16.0))]]
+       (tilt (lp (+ wx (* wr (js-sin a))) (+ cy (* wr (js-cos a))) 0.0 quarter
+                 0.7 (* 0.42 wr) 0.7 :box :metal 0.0)
+             (+ a quarter)))
+     ;; Gondolas, hung round the rim.
+     (for [i (range 8) :let [a (* tau (/ (double i) 8.0))]]
+       (lp (+ wx (* wr (js-sin a))) (- (+ cy (* wr (js-cos a))) 2.0) 0.0 0.0
+           2.8 2.6 3.0 :box :sign 0.0)))))
+
+(defmethod landmark-shapes :school [_ hx hz r]
+  (concat
+   [(apron hx hz :tarmac)
+    (lp 0.0 0.14 (* -0.45 hz) 0.0 (* 1.8 hx) 0.28 (* 0.95 hz) :box :grass 0.0)
+    ;; Two wings, one of them a storey taller, and flat roofs on both. Nobody
+    ;; has ever built a school that looked like anything else.
+    (lp (* -0.45 hx) 5.0 (* 0.42 hz) 0.0 (* 0.9 hx) 10.0 (* 0.5 hz)
+        :box :brick 1.0)
+    (lp (* 0.55 hx) 4.0 (* 0.42 hz) 0.0 (* 0.55 hx) 8.0 (* 0.5 hz)
+        :box :brick 1.0)
+    (lp (* -0.45 hx) 10.6 (* 0.42 hz) 0.0 (* 0.92 hx) 1.2 (* 0.53 hz)
+        :box :roof 0.0)
+    (lp (* 0.55 hx) 8.6 (* 0.42 hz) 0.0 (* 0.57 hx) 1.2 (* 0.53 hz)
+        :box :roof 0.0)
+    ;; The court, which is the half of the site you can actually drive on.
+    (lp 0.0 0.2 (* -0.45 hz) 0.0 (* 0.95 hx) 0.32 (* 0.62 hz) :box :dark 0.0)
+    (lp (* 0.92 hx) 6.5 (* 0.8 hz) 0.0 0.4 13.0 0.4 :cylinder :white 1.0)
+    (lp (* 0.92 hx) 11.8 (* 0.8 hz) 0.0 3.0 1.8 0.2 :box :red 0.0)]
+   (mapcat (fn [z] [(lp 0.0 1.7 z 0.0 0.5 3.4 0.5 :cylinder :metal 1.0)
+                    (lp 0.0 3.9 z 0.0 3.0 1.8 0.3 :box :white 0.0)])
+           [(* -0.88 hz) (* -0.04 hz)])))
+
+(defmethod landmark-shapes :refinery [_ hx hz r]
+  (let [tr (max 6.0 (min 11.0 (* 0.34 hx)))]
+    (concat
+     [(apron hx hz :concrete)
+      ;; The flare. It is the one part of a refinery anybody can name, and the
+      ;; only part visible from the next district.
+      (lp (* -0.82 hx) 26.0 (* -0.72 hz) 0.0 2.0 52.0 2.0 :cylinder :metal 1.0)
+      (lp (* -0.82 hx) 54.0 (* -0.72 hz) 0.0 2.6 5.0 2.6 :cylinder :red 0.0)
+      ;; A pipe rack across the whole yard, on trestles.
+      (lp 0.0 6.4 (* 0.66 hz) 0.0 (* 1.7 hx) 1.6 3.0 :box :rust 1.0)
+      (lp 0.0 8.2 (* 0.66 hz) 0.0 (* 1.7 hx) 1.2 2.2 :box :metal 0.0)]
+     (for [i (range 5)]
+       (lp (+ (* -0.7 hx) (* i 0.35 hx)) 3.2 (* 0.66 hz) 0.0
+           1.0 6.4 1.0 :box :metal 1.0))
+     ;; Distillation columns on a common plinth, no two the same height.
+     (cons
+      (lp (* -0.25 hx) 0.5 (* -0.12 hz) 0.0 (* 1.0 hx) 1.0 (* 0.55 hz)
+          :box :concrete 0.0)
+      (for [i (range 4)
+            :let [h (+ 24.0 (* 9.0 (js-sin (* 2.3 (double i)))))]]
+        (lp (+ (* -0.62 hx) (* i 0.25 hx)) (* 0.5 h) (* -0.12 hz) 0.0
+            5.0 h 5.0 :cylinder :white 1.0)))
+     ;; Tank farm, each tank inside its own bund.
+     (mapcat (fn [[x z _]]
+               [(lp x 0.6 z 0.0 (* 2.4 tr) 1.2 (* 2.4 tr) :box :concrete 1.0)
+                (lp x 5.0 z 0.0 (* 2.0 tr) 10.0 (* 2.0 tr) :cylinder :metal 1.0)
+                (lp x 10.4 z 0.0 (* 2.05 tr) 1.0 (* 2.05 tr)
+                    :cylinder :white 0.0)])
+             (ring 3 (* 0.6 hx) (* 0.6 hz))))))
+
+(defmethod landmark-shapes :scrapyard [_ hx hz r]
+  (concat
+   [(apron hx hz :dark)
+    ;; The crane, with its jib out over the yard, and the shed it feeds.
+    (lp (* 0.4 hx) 9.0 (* -0.3 hz) 0.0 3.0 18.0 3.0 :box :rust 1.0)
+    (tilt (lp (* 0.4 hx) 19.0 (* -0.3 hz) quarter 1.0 (* 0.95 hx) 1.4
+              :box :rust 0.0)
+          (* 0.3 tau))
+    (lp (* -0.4 hx) 3.5 (* 0.45 hz) 0.0 (* 0.5 hx) 7.0 (* 0.4 hz)
+        :box :metal 1.0)]
+   ;; Stacks of what used to be cars, three or four high, none of them square
+   ;; to the next.
+   (mapcat
+    (fn [_]
+      (let [x (prng/next-range! r (* -0.8 hx) (* 0.8 hx))
+            z (prng/next-range! r (* -0.8 hz) (* 0.8 hz))
+            n (+ 2 (prng/next-int! r 3))]
+        (for [i (range n)]
+          (lp (+ x (prng/next-range! r -0.5 0.5)) (+ 0.8 (* i 1.5))
+              (+ z (prng/next-range! r -0.5 0.5))
+              (prng/next-range! r 0.0 tau)
+              4.6 1.5 2.3 :box
+              (nth [:red :rust :white :metal :sign] (prng/next-int! r 5))
+              1.0))))
+    (range 9))
+   ;; The fence, with a gap where the gate is -- a yard you can only look into
+   ;; is scenery, not a landmark.
+   (keep-indexed
+    (fn [i [x z a]]
+      (when-not (= i 2)
+        (lp x 1.6 z a (* 0.7 hx) 3.2 0.5 :box :rust 1.0)))
+    (ring 10 (* 0.95 hx) (* 0.95 hz)))))
+
+(defmethod landmark-shapes :windmill [_ hx hz r]
+  (let [th 22.0                              ; tower height
+        sr 11.0                              ; sail radius
+        hy (+ th 1.0)                        ; and the height of the shaft
+        a0 (prng/next-range! r 0.0 tau)]
+    (concat
+     [(apron hx hz :grass)
+      (lp 0.0 0.14 0.0 0.0 (* 1.8 hx) 0.28 (* 1.8 hz) :box :grass 0.0)
+      ;; A tower mill: stone tower, cap, windshaft, and four sails on the
+      ;; front of it. The shaft is a cylinder tipped on its side, which is what
+      ;; the pitch angle is for.
+      (lp 0.0 (* 0.5 th) 0.0 0.0 11.0 th 11.0 :cylinder :stone 1.0)
+      (lp 0.0 (+ th 1.5) 0.0 0.0 9.5 5.0 9.5 :blob :dark 0.0)
+      (tilt (lp 0.0 hy -4.0 0.0 1.4 8.0 1.4 :cylinder :metal 0.0) quarter)
+      ;; The mill house, and a cart track up to its door.
+      (lp (* 0.6 hx) 3.0 (* 0.5 hz) 0.0 12.0 6.0 9.0 :box :stone 1.0)
+      (lp (* 0.6 hx) 7.5 (* 0.5 hz) 0.0 13.0 3.0 10.0 :gable :roof 0.0)]
+     ;; Sails: an arm across the full diameter and a panel of cloth on each.
+     (mapcat
+      (fn [i]
+        (let [a (+ a0 (* tau (/ (double i) 4.0)))
+              ax (* -0.5 sr (js-sin a))
+              ay (* 0.5 sr (js-cos a))]
+          [(tilt (lp 0.0 hy -7.5 quarter 0.7 (* 2.0 sr) 0.9 :box :timber 0.0) a)
+           (tilt (lp ax (+ hy ay) -7.8 quarter 0.3 (* 0.85 sr) 3.4
+                     :box :white 0.0)
+                 a)]))
+      (range 4)))))
+
+(defmethod landmark-shapes :water-tower [_ hx hz r]
+  (let [h  26.0
+        lr (* 0.5 (max 9.0 (min 16.0 (* 0.55 hx))))]   ; half the leg spread
+    (concat
+     [(apron hx hz :grass)
+      (lp 0.0 0.14 0.0 0.0 (* 1.8 hx) 0.28 (* 1.8 hz) :box :grass 0.0)
+      ;; Tank, ring beam, cap.
+      (lp 0.0 (+ h 5.0) 0.0 0.0 (* 4.4 lr) 10.0 (* 4.4 lr) :cylinder :metal 1.0)
+      (lp 0.0 h 0.0 0.0 (* 4.5 lr) 1.4 (* 4.5 lr) :cylinder :white 0.0)
+      (lp 0.0 (+ h 11.5) 0.0 0.0 (* 4.2 lr) 4.0 (* 4.2 lr) :pyramid :roof 0.0)
+      ;; The ladder, and the pump house it starts behind.
+      (lp 0.0 (* 0.5 h) (* 1.15 lr) 0.0 1.2 h 0.4 :box :metal 0.0)
+      (lp (* 0.62 hx) 2.4 (* 0.5 hz) 0.0 10.0 4.8 8.0 :box :brick 1.0)
+      (lp (* 0.62 hx) 5.6 (* 0.5 hz) 0.0 11.0 2.4 9.0 :gable :roof 0.0)]
+     ;; Four legs and the bracing between them, which is the whole silhouette.
+     (for [sx' [-1.0 1.0], sz' [-1.0 1.0]]
+       (lp (* sx' lr) (* 0.5 h) (* sz' lr) 0.0 1.6 h 1.6 :cylinder :metal 1.0))
+     (for [y [(* 0.35 h) (* 0.75 h)], s [-1.0 1.0]]
+       (lp (* s lr) y 0.0 quarter (* 2.0 lr) 0.7 0.7 :box :metal 0.0))
+     (for [y [(* 0.35 h) (* 0.75 h)], s [-1.0 1.0]]
+       (lp 0.0 y (* s lr) 0.0 (* 2.0 lr) 0.7 0.7 :box :metal 0.0)))))
+
+(defmethod landmark-shapes :ruins [_ hx hz r]
+  (concat
+   [(lp 0.0 -0.6 0.0 0.0 (* 1.6 hx) 2.0 (* 1.6 hz) :box :grass 0.0)
+    ;; The keep, standing to full height on one side and sheared off on the
+    ;; other, plus the one corner tower that survived.
+    (lp (* -0.25 hx) 7.0 0.0 0.0 (* 0.5 hx) 14.0 (* 0.45 hz) :box :stone 1.0)
+    (lp (* -0.25 hx) 16.0 (* -0.26 hz) 0.0 (* 0.51 hx) 4.0 (* 0.2 hz)
+        :box :stone 1.0)
+    (lp (* 0.15 hx) 11.0 (* 0.32 hz) 0.0 9.0 22.0 9.0 :cylinder :stone 1.0)
+    (lp (* 0.15 hx) 22.5 (* 0.32 hz) 0.0 9.6 2.0 9.6 :cylinder :stone 0.0)]
+   ;; The curtain wall: a run of merlons with pieces missing out of it.
+   (for [i (range 9)
+         :when (not (#{2 6} i))
+         :let [h (prng/next-range! r 3.5 7.5)]]
+     (lp (+ (* -0.85 hx) (* i 0.21 hx)) (* 0.5 h) (* 0.82 hz) 0.0
+         (* 0.19 hx) h 2.4 :box :stone 1.0))
+   ;; Fallen blocks, lying where they landed.
+   (for [_ (range 10)]
+     (lp (prng/next-range! r (* -0.9 hx) (* 0.9 hx)) 0.7
+         (prng/next-range! r (* -0.9 hz) (* 0.9 hz))
+         (prng/next-range! r 0.0 tau)
+         (prng/next-range! r 1.6 3.4) 1.4 (prng/next-range! r 1.4 2.8)
+         :box :stone 1.0))
+   ;; And the trees that grew up through it afterwards.
+   (mapcat (fn [[x z _]] (tree-at x z (+ 7.0 (prng/next-range! r 0.0 5.0))))
+           (take 4 (ring 7 (* 0.82 hx) (* 0.82 hz))))))
+
+(defmethod landmark-shapes :drive-in [_ hx hz r]
+  (concat
+   [(apron hx hz :tarmac)
+    ;; The screen: a billboard the size of a house, which is why a drive-in is
+    ;; the one thing you can pick out of flat country besides the mast.
+    (lp 0.0 11.0 (* -0.82 hz) 0.0 (* 1.5 hx) 22.0 1.0 :box :white 1.0)
+    (lp 0.0 22.5 (* -0.82 hz) 0.0 (* 1.52 hx) 1.0 1.6 :box :red 0.0)
+    (lp 0.0 5.0 (* -0.9 hz) 0.0 (* 1.4 hx) 10.0 0.8 :box :dark 1.0)
+    ;; Projection hut, and the sign out at the gate.
+    (lp 0.0 2.5 (* 0.62 hz) 0.0 7.0 5.0 6.0 :box :white 1.0)
+    (lp (* 0.85 hx) 6.0 (* 0.88 hz) 0.0 0.8 12.0 0.8 :cylinder :metal 1.0)
+    (lp (* 0.85 hx) 13.0 (* 0.88 hz) 0.0 6.0 4.0 0.6 :box :sign 0.0)]
+   ;; The ramps: a low bank under each row, so the cars point up at the screen.
+   (for [i (range 4)]
+     (lp 0.0 0.35 (+ (* -0.5 hz) (* i 0.32 hz)) 0.0
+         (* 1.6 hx) 0.7 2.2 :box :sand 0.0))
+   ;; Speaker posts down each row.
+   (for [i (range 4), j (range 5)]
+     (lp (+ (* -0.8 hx) (* j 0.4 hx)) 1.0 (+ (* -0.44 hz) (* i 0.32 hz)) 0.0
+         0.25 2.0 0.25 :cylinder :dark 1.0))))
+
 (defn chunk-landmarks
   "The landmark this chunk owns, as a flat parts array in the same layout as
   `chunk-bridges`. Empty for the fifteen chunks in a district that do not own
@@ -1715,9 +2023,10 @@
             ;; Its own generator, so adding a landmark kind cannot shift the
             ;; trees in the next district.
             r  (prng/chunk-rng seed cx cz (+ 97 (:landmarks k/salt)))]
-        (doseq [{:keys [x y z yaw sx sy sz prim tint solid]}
+        (doseq [{:keys [x y z yaw pitch sx sy sz prim tint solid]
+                 :or {pitch 0.0}}
                 (remove nil? (flatten (landmark-shapes kind half-x half-z r)))]
-          (doseq [v [(+ (:x lm) x) (+ y0 y) (+ (:z lm) z) yaw 0.0 sx sy sz
+          (doseq [v [(+ (:x lm) x) (+ y0 y) (+ (:z lm) z) yaw pitch sx sy sz
                      (double (prim-index prim)) (double tint) solid]]
             (conj! out v)))))
     (let [v (persistent! out)

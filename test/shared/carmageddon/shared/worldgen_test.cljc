@@ -818,6 +818,55 @@
         (is (some (fn [i] (and (pos? (at a i 10)) (> (at a i 6) 3.0))) (range n))
             (str kind " is scenery you can drive through"))))))
 
+(deftest every-landmark-kind-is-buildable
+  ;; `landmark-parts-are-well-formed` builds whatever sixty-four districts
+  ;; happen to contain, which is most kinds and never all of them -- a refinery
+  ;; needs an industrial district, and there is roughly one of those in a
+  ;; hundred. This walks the catalogue instead: every kind named in
+  ;; `landmark-kinds` gets found somewhere, built, and checked. A kind added to
+  ;; the list with no shapes behind it throws here rather than a fortnight
+  ;; later in whichever district first asks for one.
+  (let [found (reduce (fn [acc [dx dz]]
+                        (let [{:keys [kind]} (w/landmark seed dx dz)]
+                          (if (or (nil? kind) (contains? acc kind))
+                            acc
+                            (assoc acc kind [dx dz]))))
+                      {}
+                      (for [dx (range -8 8), dz (range -8 8)] [dx dz]))]
+    (testing "every kind exists somewhere in a thousand square kilometres"
+      (is (empty? (remove found w/landmark-kinds))
+          (str "never placed: " (vec (remove found w/landmark-kinds)))))
+    (testing "and every kind has a name the map can print"
+      (is (empty? (remove w/landmark-labels w/landmark-kinds))))
+    (testing "and every kind builds finite, sane geometry"
+      (doseq [kind w/landmark-kinds
+              :let [[dx dz] (found kind)]
+              :when dx
+              :let [{:keys [x z]} (w/landmark seed dx dz)
+                    [cx cz] (w/chunk-of x z)
+                    a (w/chunk-landmarks seed cx cz)
+                    n (/ (alen* a) w/part-stride)]]
+        (is (pos? n) (str kind " generated nothing"))
+        (is (every? (fn [i]
+                      (let [o (* i w/part-stride)
+                            v (map #(double (aget* a (+ o %))) (range 8))]
+                        ;; `(== x x)` rather than isNaN: NaN is the one value
+                        ;; not equal to itself, and it is the same test on both
+                        ;; platforms, which `Double/isNaN` is not.
+                        (every? #(and (== % %) (< (abs %) 1.0e6)) v)))
+                    (range n))
+            (str kind " has a part that is not a number"))
+        ;; Nothing may reach the sky. The tallest thing in the catalogue is the
+        ;; transmitter at ninety-five metres, and a landmark taller than that
+        ;; is arithmetic that went wrong, not a design decision.
+        (is (every? (fn [i]
+                      (let [o (* i w/part-stride)]
+                        (< (+ (double (aget* a (+ o 1)))
+                              (* 0.5 (double (aget* a (+ o 6)))))
+                           (+ (w/height-at seed x z) 140.0))))
+                    (range n))
+            (str kind " built something into orbit"))))))
+
 (deftest bridge-parts-are-well-formed
   (let [[cx cz] (bridge-chunk)
         a (w/chunk-bridges seed cx cz)
