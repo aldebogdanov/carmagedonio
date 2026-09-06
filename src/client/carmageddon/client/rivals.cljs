@@ -280,19 +280,26 @@
 
 (defn score-wrecks!
   "Rivals that have just gone past the damage threshold, as
-  `[{:index i :by who} ...]` -- once each.
+  `[{:index i :by who :at [x y z]} ...]` -- once each.
 
   `:by` is whoever last hurt it inside the blame window, or nil for a rival
-  that wrecked itself. The caller scores its own."
+  that wrecked itself. The caller scores its own.
+
+  `:at` is where it died, because the caller wants to put an explosion there
+  and this is the one moment it is cheap: the vehicle is already in hand. A
+  caller looking the position up afterwards would be reading a body that has
+  by then been shoved by its own blast."
   [{:keys [controllers wrecked blame]} sim now-ms]
   (let [vs (sim/vehicles sim)]
     (vec (for [i (range (count controllers))
+               :let [v (nth vs (inc i))]
                :when (and (not (contains? @wrecked i))
-                          (> (vehicle/damage (nth vs (inc i))) wreck-damage))]
+                          (> (vehicle/damage v) wreck-damage))]
            (let [[by at] (get @blame i)]
              (swap! wrecked conj i)
              (swap! blame dissoc i)
              {:index i
+              :at (vehicle/chassis-position v)
               :by (when (and by (< (- now-ms at) blame-window)) by)})))))
 
 (defn blips

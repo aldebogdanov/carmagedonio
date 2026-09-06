@@ -716,10 +716,16 @@
 
 ;; --- regions ----------------------------------------------------------------
 ;;
-;; Two more fields, an order of magnitude coarser than the city one: how warm a
-;; place is and how wet it is. A region comes out ten to twenty kilometres
-;; across, which is twenty districts -- far enough that you drive *out of* one
-;; over several minutes rather than past it in one.
+;; Two more fields, coarser than the city one but not by much: how warm a place
+;; is and how wet it is. A region comes out about two kilometres across, which
+;; is a couple of districts -- a minute's driving, so a long run passes through
+;; several rather than staying in one.
+;;
+;; The first version made them ten kilometres across on the theory that a
+;; region should be somewhere you drive *out of* rather than past. That is true
+;; of a real country and wrong for this: at 200 km/h a ten-kilometre region is
+;; three minutes of identical scenery, and a whole session can be spent inside
+;; one without ever learning that the others exist.
 ;;
 ;; What a region changes is deliberately only the countryside: what grows,
 ;; what colour the ground is, and which landmark a village gets. A city is a
@@ -732,7 +738,8 @@
   {:heartland "the heartland" :taiga "the taiga" :sierra "the sierra"
    :paddies "the paddies"})
 
-(def ^:private region-scale (* 42.0 k/chunk-size))   ; ~10.7 km
+(def ^:private region-scale (* 8.0 k/chunk-size))    ; ~2 km
+(def ^:private region-lod 64.0)   ; m between ground-colour samples
 
 (defn warmth
   "How warm a point is, in fbm's own [0,1]. One of the two axes a region is
@@ -757,10 +764,14 @@
   ;; Thresholds are percentiles of the two fields, measured, not guessed: fbm
   ;; sits well below 0.5 at the median, and a nominal-looking 0.44 for "cold"
   ;; made nearly half the world taiga.
+  ;;
+  ;; Warm country is always one of the two warm regions rather than sometimes
+  ;; falling back to the heartland. With the earlier, laxer version the
+  ;; heartland took over half the map, which meant most of the countryside was
+  ;; the one region with nothing to say about itself.
   (cond
-    (< w 0.30) :taiga
-    (and (> w 0.58) (< m 0.47)) :sierra
-    (and (> w 0.54) (> m 0.55)) :paddies
+    (< w 0.33) :taiga
+    (> w 0.52) (if (< m 0.48) :sierra :paddies)
     :else :heartland))
 
 (defn region [seed x z] (region-of (warmth seed x z) (damp seed x z)))
@@ -791,8 +802,14 @@
    :sierra    [1.00 2.45 0.78 1.06]
    :paddies   [0.50 0.72 0.86 0.46]})
 
-(defn- region-blend
-  "The ground treatment at a (warmth, damp) pair, blended rather than bucketed:
+;; The three entries above, resolved once. Looking a keyword up in a map and
+;; destructuring the vector it returns is not free at terrain-vertex rate.
+(def ^:private rg-sierra (region-ground :sierra))
+(def ^:private rg-paddies (region-ground :paddies))
+(def ^:private rg-taiga (region-ground :taiga))
+
+(defn- region-blend!
+  "Write the ground treatment at a (warmth, damp) pair into `out` as
   [strength r g b].
 
   `region-of` draws a hard line, which is right for a tree -- it is a birch or
@@ -800,27 +817,35 @@
   across the terrain wherever warmth happened to cross the threshold. The
   weights below are the same three conditions with soft edges, so the sand
   fades into the grass over a couple of hundred metres the way it does on the
-  ground."
-  [w m]
-  (let [warm (smootherstep-clamped (/ (- w 0.50) 0.20))
-        cold (smootherstep-clamped (/ (- 0.36 w) 0.16))
-        wet  (smootherstep-clamped (/ (- m 0.46) 0.20))
+  ground.
+
+  It writes into a caller-owned array instead of returning a vector because
+  `chunk-data` evaluates it twenty-five times per chunk and has nowhere to put
+  the garbage."
+  [^doubles out w m]
+  (let [warm (smootherstep-clamped (/ (- w 0.46) 0.12))
+        cold (smootherstep-clamped (/ (- 0.39 w) 0.12))
+        wet  (smootherstep-clamped (/ (- m 0.44) 0.10))
         ws   (* warm (- 1.0 wet) (- 1.0 cold))
         wp   (* warm wet (- 1.0 cold))
         wt   cold
-        [ss sr sg sb] (region-ground :sierra)
-        [ps pr pg pb] (region-ground :paddies)
-        [ts tr tg tb] (region-ground :taiga)
         tot  (+ ws wp wt)]
     (if (< tot 1.0e-4)
-      [0.0 1.0 1.0 1.0]
-      ;; Normalised by the total weight so the *colour* is an average of
-      ;; whichever regions are in play, while the *strength* still falls to
-      ;; zero out in the heartland where none of them are.
-      [(min 1.0 (/ (+ (* ws ss) (* wp ps) (* wt ts)) 1.0))
-       (/ (+ (* ws sr) (* wp pr) (* wt tr)) tot)
-       (/ (+ (* ws sg) (* wp pg) (* wt tg)) tot)
-       (/ (+ (* ws sb) (* wp pb) (* wt tb)) tot)])))
+      (do (dput! out 0 0.0) (dput! out 1 1.0)
+          (dput! out 2 1.0) (dput! out 3 1.0))
+      ;; The colour is normalised by the total weight, so it is an average of
+      ;; whichever regions are in play; the strength is not, so it still falls
+      ;; to zero out in the heartland where none of them are.
+      (do (dput! out 0 (min 1.0 (+ (* ws (nth rg-sierra 0))
+                                   (* wp (nth rg-paddies 0))
+                                   (* wt (nth rg-taiga 0)))))
+          (dotimes [c 3]
+            (let [k (inc c)]
+              (dput! out k (/ (+ (* ws (nth rg-sierra k))
+                                 (* wp (nth rg-paddies k))
+                                 (* wt (nth rg-taiga k)))
+                              tot))))))
+    out))
 
 ;; --- what a place is --------------------------------------------------------
 
@@ -3516,19 +3541,38 @@
         ;; fifty streets six times and was, by the end, most of the cost of a
         ;; chunk.
         owned (chunk-lines seed cx cz)
-        ;; The two region fields, at the chunk's four corners. A region is
-        ;; forty chunks across, so bilinear interpolation over one chunk is
-        ;; indistinguishable from sampling it -- and because the corners are
-        ;; shared with the neighbours, the interpolation is continuous across
-        ;; the border, which per-chunk sampling would not be. Two noise calls
-        ;; per vertex on top of the four already here is not affordable; eight
-        ;; per chunk is free.
-        x1'   (+ x0 k/chunk-size)
-        z1'   (+ z0 k/chunk-size)
-        w00 (warmth seed x0 z0) w10 (warmth seed x1' z0)
-        w01 (warmth seed x0 z1') w11 (warmth seed x1' z1')
-        m00 (damp seed x0 z0)   m10 (damp seed x1' z0)
-        m01 (damp seed x0 z1')  m11 (damp seed x1' z1')
+        ;; The two region fields, on a lattice of their own. Two more noise
+        ;; calls per terrain vertex on top of the five already there is not
+        ;; affordable, and sampling them once per chunk would step the ground
+        ;; colour at every chunk border -- so they are sampled every 64 m and
+        ;; interpolated between, which is a fiftieth of a region and smooth
+        ;; enough that the join cannot be found.
+        ;;
+        ;; The lattice is in world coordinates, not chunk-relative, so the
+        ;; samples on a chunk edge are the same numbers its neighbour uses and
+        ;; the interpolation is continuous across the border. When this
+        ;; sampled the four *corners* of the chunk it was continuous too, and
+        ;; it was fine while a region was forty chunks across; at eight it
+        ;; creased visibly along every boundary.
+        rn    (inc (long (/ k/chunk-size region-lod)))
+        ;; The *blend* is evaluated on the lattice, not the fields: four
+        ;; numbers per lattice point, interpolated per vertex. Interpolating
+        ;; its output rather than its input is not the same arithmetic, and at
+        ;; 64 m spacing on a 2 km field the difference is below the precision
+        ;; of a vertex colour.
+        ;; Hinted, and the hint is not decoration: `aget` on an unhinted local
+        ;; reflects, and the sixteen of them in the vertex loop below took
+        ;; chunk generation from 27 ms to 76 ms without a warning anybody sees
+        ;; unless they ask for one.
+        ^doubles rq (darray (* rn rn 4))
+        _     (let [^doubles scratch (darray 4)]
+                (dotimes [rj rn]
+                  (dotimes [ri rn]
+                    (let [px (+ x0 (* ri region-lod))
+                          pz (+ z0 (* rj region-lod))
+                          o  (* 4 (+ (* rj rn) ri))]
+                      (region-blend! scratch (warmth seed px pz) (damp seed px pz))
+                      (dotimes [c 4] (dput! rq (+ o c) (aget scratch c)))))))
         heights (farray (* n n))
         colors  (farray (* n n 3))]
     ;; The ground comes first, and everything else is then placed on it. That
@@ -3575,14 +3619,31 @@
               ;; a region colours its countryside, not its cities and not its
               ;; rivers -- and the same hue-cancelling arithmetic, because the
               ;; ground texture is green and sand is not a lighter green.
-              fu   (/ (double i) cells)
-              fv   (/ (double j) cells)
-              wq   (+ (* (- 1.0 fu) (- 1.0 fv) w00) (* fu (- 1.0 fv) w10)
-                      (* (- 1.0 fu) fv w01)         (* fu fv w11))
-              mq   (+ (* (- 1.0 fu) (- 1.0 fv) m00) (* fu (- 1.0 fv) m10)
-                      (* (- 1.0 fu) fv m01)         (* fu fv m11))
-              [qs qr qg qb] (region-blend wq mq)
-              q    (* qs farm)
+              ru   (/ (* i step) region-lod)
+              rv'  (/ (* j step) region-lod)
+              gi   (min (- rn 2) (long ru))
+              gj   (min (- rn 2) (long rv'))
+              fu   (- ru gi)
+              fv   (- rv' gj)
+              ;; Written out rather than looped: this is the innermost line of
+              ;; the whole generator, and a helper closure here is eleven
+              ;; hundred allocations a chunk.
+              o00  (* 4 (+ (* gj rn) gi))
+              o10  (+ o00 4)
+              o01  (+ o00 (* 4 rn))
+              o11  (+ o01 4)
+              c00  (* (- 1.0 fu) (- 1.0 fv))
+              c10  (* fu (- 1.0 fv))
+              c01  (* (- 1.0 fu) fv)
+              c11  (* fu fv)
+              q    (* farm (+ (* c00 (aget rq o00)) (* c10 (aget rq o10))
+                              (* c01 (aget rq o01)) (* c11 (aget rq o11))))
+              qr   (+ (* c00 (aget rq (+ o00 1))) (* c10 (aget rq (+ o10 1)))
+                      (* c01 (aget rq (+ o01 1))) (* c11 (aget rq (+ o11 1))))
+              qg   (+ (* c00 (aget rq (+ o00 2))) (* c10 (aget rq (+ o10 2)))
+                      (* c01 (aget rq (+ o01 2))) (* c11 (aget rq (+ o11 2))))
+              qb   (+ (* c00 (aget rq (+ o00 3))) (* c10 (aget rq (+ o10 3)))
+                      (* c01 (aget rq (+ o01 3))) (* c11 (aget rq (+ o11 3))))
               tr   (+ tr (* q (- (* gr qr) tr)))
               tg   (+ tg (* q (- (* gr qg) tg)))
               tb   (+ tb (* q (- (* gr qb) tb)))

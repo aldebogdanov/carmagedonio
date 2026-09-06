@@ -4,6 +4,7 @@
   every boundary and roads stop connecting -- and in multiplayer, two clients
   end up driving on different ground."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [carmageddon.shared.constants :as k]
             [carmageddon.shared.worldgen :as w]))
 
@@ -769,6 +770,25 @@
       (is (= cell [(long (Math/floor (/ x w/street-spacing)))
                    (long (Math/floor (/ z w/street-spacing)))])))))
 
+#?(:clj
+   (deftest nothing-in-the-generator-reflects
+     ;; Not a style rule. `aget` on an unhinted local compiles to a reflective
+     ;; call, and sixteen of those in the terrain vertex loop took a chunk from
+     ;; 27 ms to 76 ms -- silently, because reflection warnings are off unless
+     ;; something asks for them, and because the result is byte-for-byte
+     ;; identical. Every other assertion in this file passed throughout.
+     ;;
+     ;; JVM only: ClojureScript has no reflection to warn about, and the client
+     ;; is the same code either way.
+     (let [out (java.io.StringWriter.)]
+       (binding [*warn-on-reflection* true, *err* out]
+         (require 'carmageddon.shared.worldgen :reload))
+       (let [lines (->> (str/split-lines (str out))
+                        (filter #(str/includes? % "Reflection warning")))]
+         (is (empty? lines)
+             (str (count lines) " reflective call(s):\n"
+                  (str/join "\n" (take 5 lines))))))))
+
 (deftest regions-are-large-and-all-four-happen
   (let [at (fn [i j] (w/region seed (* i 260.0) (* j 260.0)))]
     (testing "every region exists, and none of them is most of the world"
@@ -780,17 +800,23 @@
         (is (< (apply max (vals freq)) (* 0.62 (reduce + (vals freq))))
             (str "one region dominates: " freq))))
 
-    (testing "and a region is a place you drive out of, not past"
-      ;; Ten kilometres across means neighbouring samples 260 m apart are
-      ;; almost always the same region. A field an order of magnitude finer
-      ;; would still pass every other test here and would look like confetti.
-      (let [pairs (for [i (range 120), j (range 120)] [(at i j) (at (inc i) j)])
-            same  (count (filter (fn [[a b]] (= a b)) pairs))]
-        ;; 0.96 measured; a region field an order of magnitude finer comes out
-        ;; around 0.7 and is what this is here to catch.
-        (is (> (/ (double same) (count pairs)) 0.95)
-            (str "region changes every " (/ (count pairs) (- (count pairs) same))
-                 " samples"))))))
+    (testing "and a region is about a district across"
+      ;; Measured as run length along a straight drive, which is what a player
+      ;; actually experiences, and bounded on *both* sides. Too short and the
+      ;; countryside is confetti. Too long and a whole session happens inside
+      ;; one region without ever learning the others exist -- which is exactly
+      ;; what ten-kilometre regions did, and they passed every other assertion
+      ;; in this test while doing it.
+      (let [runs (mapcat (fn [j]
+                           (let [z (* j 613.0)
+                                 ks (map #(w/region seed (* % 50.0) z) (range 400))]
+                             (map (fn [r] (* 50 (count r)))
+                                  (partition-by identity ks))))
+                         (range 40))
+            sorted (vec (sort runs))
+            median (nth sorted (quot (count sorted) 2))]
+        (is (<= 400 median 3000)
+            (str "median run through a region is " median " m"))))))
 
 (deftest the-countryside-is-regional-and-the-city-is-not
   ;; The three regional landmarks are the payload of the whole region field:
@@ -1179,6 +1205,7 @@
 
 (deftest flora-parts-are-well-formed
   (let [[cx cz] (densest-chunk (fn [u _] (< u 0.08)))
+        field (w/road-field seed cx cz)
         a (flora-of cx cz)
         n (/ (alen* a) w/part-stride)
         at (fn [i o] (double (aget* a (+ o (* i w/part-stride)))))]
@@ -1189,11 +1216,27 @@
                                (contains? #{0.0 1.0} (at i 10))
                                (> (at i 5) 0.0) (> (at i 6) 0.0) (> (at i 7) 0.0)))
                   (range n))))
-    (testing "a trunk stops a car and its branches do not"
-      (let [cyl (part-index-of w/part-prims :cylinder)]
-        (is (every? (fn [i] (= (= (double cyl) (at i 8)) (pos? (at i 10))))
-                    (range n))
-            "something other than a trunk was solid, or a trunk was not")))))
+    (testing "a trunk stops a car and nothing above it does"
+      ;; This used to assert that solid and cylinder were the same set, which
+      ;; held while every tree was a cylinder trunk under a canopy. A saguaro's
+      ;; arms are cylinders too and are five metres up, so the shape is no
+      ;; longer the test: what matters is that the only thing a car can hit is
+      ;; at the bottom, and that every tree has exactly one of them.
+      (let [cyl (part-index-of w/part-prims :cylinder)
+            solid (filter #(pos? (at % 10)) (range n))]
+        (is (seq solid))
+        (is (every? #(= (double cyl) (at % 8)) solid)
+            "something that is not a trunk is solid")
+        (is (every? (fn [i]
+                      ;; Bottom of the part against the terrain under it. `y`
+                      ;; in the array is world height, so this needs the
+                      ;; surface -- comparing against a constant only worked
+                      ;; while the test chunk happened to be near sea level.
+                      (let [ground (first (w/surface seed field
+                                                     (at i 0) (at i 2)))]
+                        (< (- (at i 1) (* 0.5 (at i 6)) ground) 1.0)))
+                    solid)
+            "a solid part floating above the ground")))))
 
 (deftest nothing-grows-on-the-road
   (let [[cx cz] (densest-chunk (fn [u _] (< u 0.10)))

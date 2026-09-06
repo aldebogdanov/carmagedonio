@@ -55,10 +55,11 @@
 
 ;; What a gas cylinder and a tanker are worth, as fire.
 (def ^:private barrel-fire {:r 4.2 :life 12.0 :seeds 0 :blast 9.0 :push 2400.0})
-;; What is left when the player's own car is finished. Between a barrel and a
-;; tanker: a written-off car is worth an explosion, but not the one that takes
-;; the street with it.
-(def ^:private player-fire {:r 6.0 :life 14.0 :seeds 1 :blast 11.0 :push 4200.0})
+;; What is left when a car with a driver in it is finished -- the player's or a
+;; rival's, since they are the same object and the same fuel tank. Between a
+;; barrel and a tanker: a written-off car is worth an explosion, but not the
+;; one that takes the street with it.
+(def ^:private car-fire {:r 6.0 :life 14.0 :seeds 1 :blast 11.0 :push 4200.0})
 
 (defn- claim-props!
   "Score and broadcast a blast's worth of destroyed clutter. Returns the
@@ -177,7 +178,7 @@
           ;; it goes up on the way out.
           (when (and (game/running? game)
                      (>= (vehicle/damage (sim/player-vehicle sim)) 1.0))
-            (let [{:keys [r life seeds blast push]} player-fire]
+            (let [{:keys [r life seeds blast push]} car-fire]
               (fire/ignite! fire-state (sim/player-x sim) (sim/player-y sim)
                             (sim/player-z sim) r life :player seeds)
               (sim/blast! sim [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
@@ -296,7 +297,21 @@
           (let [[fx _ fz] (sim/forward-vector sim)]
             (rivals/leash! rvs sim (js/Math.atan2 fx fz)))
           ;; Only the ones the player actually put out of the race.
-          (doseq [{:keys [by]} (rivals/score-wrecks! rvs sim (js/Date.now))]
+          (doseq [{:keys [by at]} (rivals/score-wrecks! rvs sim (js/Date.now))]
+            ;; A rival that reached 100% damage simply stopped and lay there,
+            ;; which made the kill you had just worked for the quietest event
+            ;; in the game -- and made a wreck indistinguishable from a rival
+            ;; that had parked. It goes up like the player's own car does: same
+            ;; fuel tank, same explosion.
+            ;;
+            ;; The fire belongs to whoever wrecked it, so whatever the fire
+            ;; then takes is scored the same way as a tanker's -- and a rival
+            ;; that wrecked itself leaves a fire that pays nobody.
+            (let [{:keys [r life seeds blast push]} car-fire
+                  [x y z] at]
+              (fire/ignite! fire-state x y z r life (when (= :player by) :player)
+                            seeds)
+              (sim/blast! sim [x y z] blast push))
             (when (= :player by) (game/opponent-wrecked! game)))
           ;; Outbound snapshot rate is deliberately independent of both sim and
           ;; render rate.
