@@ -185,21 +185,28 @@
           n  (/ (.-length arr) st)]
       (vec (for [i (range n)
                  :let [o   (* i st)
-                       i0  (int (aget arr (+ o 6)))
-                       cnt (int (aget arr (+ o 7)))]]
+                       i0  (int (aget arr (+ o 8)))
+                       cnt (int (aget arr (+ o 9)))]]
              {:px (aget arr (+ o 0)) :py (aget arr (+ o 1)) :pz (aget arr (+ o 2))
               ;; 0 is the vertical, 1 is the world Z -- which is the axis every
               ;; wheel in the game turns about, because the sails, the blades
               ;; and the ferris wheel are all built in the world's XY plane.
               :vertical? (zero? (int (aget arr (+ o 3))))
               :rate (aget arr (+ o 4))
-              :orbit? (pos? (aget arr (+ o 5)))
+              :mode (int (aget arr (+ o 5)))
+              :amp (aget arr (+ o 6))
+              :phase (aget arr (+ o 7))
               :parts (vec (for [k (range i0 (+ i0 cnt))
                                 :let [p (nth parts k)]]
                             {:prim (:prim p) :inst (get prim-index k)
                              :x (:x p) :y (:y p) :z (:z p)
                              :yaw (:yaw p) :pitch (:pitch p)
                              :sx (:sx p) :sy (:sy p) :sz (:sz p)}))})))))
+
+;; Must match the numbering `worldgen/spinning` writes.
+(def ^:private mode-orbit 1)
+(def ^:private mode-swing 2)
+(def ^:private mode-blink 3)
 
 (defn spin!
   "Turn every rotor in the loaded world to where it should be at `t` seconds.
@@ -213,13 +220,27 @@
   Rigid parts take the rotation into their orientation as well as their
   position; orbiting ones only move. That is the whole difference between a
   gondola going round a ferris wheel and a gondola going round the inside of a
-  tumble dryer."
+  tumble dryer. A swing is the same arithmetic with the angle bounded, and a
+  blink is no arithmetic at all -- the part is scaled to nothing for part of
+  each cycle, which is how a lamp goes out when there is no lamp, only a
+  matrix."
   [bs t]
   (let [{:keys [chunks ^js scratch ^js q-spin ^js q-base ^js euler
                 ^js axis-y ^js axis-z]} @bs]
     (doseq [[_ {:keys [meshes rotors]}] chunks
-            {:keys [px py pz vertical? rate orbit? parts]} rotors
-            :let [th (* rate t)
+            {:keys [px py pz vertical? rate mode amp phase parts]} rotors
+            :let [u  (+ (* rate t) phase)
+                  ;; `cond` rather than `case`, which would need the mode
+                  ;; numbers written out as literals here -- and a protocol
+                  ;; whose numbering lives in two files as bare digits is one
+                  ;; that gets renumbered in one of them.
+                  th (cond (= mode mode-swing) (* amp (js/Math.sin u))
+                           (= mode mode-blink) 0.0
+                           :else u)
+                  ;; A blink is on for `amp` of the cycle. `mod` rather than a
+                  ;; sine so it is a lamp switching rather than a lamp fading,
+                  ;; which is what an aircraft warning light does.
+                  dark? (and (= mode mode-blink) (>= (mod u 1.0) amp))
                   c (js/Math.cos th)
                   s (js/Math.sin th)
                   _ (.setFromAxisAngle q-spin (if vertical? axis-y axis-z) th)]]
@@ -237,10 +258,12 @@
                     z)))
           (.set euler (- pitch) yaw 0 "YXZ")
           (.setFromEuler q-base euler)
-          (if orbit?
+          (if (= mode mode-orbit)
             (.copy (.-quaternion scratch) q-base)
             (.multiplyQuaternions (.-quaternion scratch) q-spin q-base))
-          (.set (.-scale scratch) sx sy sz)
+          (if dark?
+            (.set (.-scale scratch) 0 0 0)
+            (.set (.-scale scratch) sx sy sz))
           (.updateMatrix scratch)
           (.setMatrixAt m inst (.-matrix scratch))))
       (doseq [prim (distinct (map :prim parts))]

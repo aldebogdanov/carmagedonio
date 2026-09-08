@@ -1776,27 +1776,41 @@
    {:x x :y y :z z :yaw yaw :pitch 0.0 :sx sx :sy sy :sz sz :prim prim
     :tint (landmark-tints tint) :solid solid}))
 
-(def rotor-stride 8)   ; pivot-x pivot-y pivot-z axis rate mode first count
+(def rotor-stride 10)  ; pivot-x pivot-y pivot-z axis rate mode amp phase first count
 
 (defn- spinning
-  "Mark a run of parts as turning together about `axis` through `pivot`.
+  "Mark a run of parts as moving together about `axis` through `pivot`.
 
   Everything in the world is a static instance uploaded once, which is right
   for a building and wrong for a windmill: a mill whose sails do not move is
   not a mill, it is a monument to one. Rather than give every part in the world
-  four more floats it will never use -- flora is by far the largest user of
-  this array and none of it turns -- the turning parts are described separately,
-  as runs: a pivot, a rate, and where in the parts array the run starts.
+  six more floats it will never use -- flora is by far the largest user of this
+  array and none of it moves -- the moving parts are described separately, as
+  runs: where in the parts array the run starts, and what it does.
 
-  `mode` is `:rigid` for something bolted to the hub and `:orbit` for something
-  hanging off it. A ferris wheel needs both: the spokes turn with the wheel and
-  the gondolas go round it while staying the right way up, and drawing the
-  gondolas rigidly puts the people at the top upside down.
+  Four modes, and between them they cover nearly everything in the world that
+  is not a vehicle:
+
+    :rigid  turns about the pivot, orientation and all -- sails, blades,
+            clock hands, a radar
+    :orbit  goes round the pivot the right way up -- a ferris wheel's
+            gondolas, a carousel's horses. Drawing those rigidly puts the
+            passengers at the top upside down
+    :swing  the same rotation, but `amp` radians either side of where it
+            started instead of all the way round -- a windsock, a hanging
+            sign, the beam of a pump jack
+    :blink  no rotation at all: present for `amp` of each cycle and gone for
+            the rest. A red lamp on a mast is the only thing in the catalogue
+            visible from a kilometre away at night
+
+  `phase` offsets the cycle, which is what keeps the two hands of a clock and
+  the lamps down a runway from moving in lockstep.
 
   `pivot` is in the landmark's own frame; `chunk-landmarks` moves it into the
   world along with everything else."
-  [parts {:keys [rate axis mode pivot]}]
-  (let [sp {:rate rate :axis (or axis :z) :mode (or mode :rigid) :pivot pivot}]
+  [parts {:keys [rate axis mode pivot amp phase]}]
+  (let [sp {:rate rate :axis (or axis :z) :mode (or mode :rigid) :pivot pivot
+            :amp (or amp 1.0) :phase (or phase 0.0)}]
     (map #(assoc % :spin sp) parts)))
 
 (defn- tilt
@@ -1947,8 +1961,13 @@
    [(lp 0.0 0.3 0.0 0.0 14.0 1.0 14.0 :box :concrete 0.0)
     ;; A lattice mast: three legs and a stack of platforms. Nothing else in the
     ;; catalogue is visible from a district away in flat country.
-    (lp 0.0 45.0 0.0 0.0 1.4 90.0 1.4 :cylinder :metal 1.0)
-    (lp 0.0 92.0 0.0 0.0 0.7 6.0 0.7 :cylinder :red 0.0)
+    (lp 0.0 45.0 0.0 0.0 1.4 90.0 1.4 :cylinder :metal 1.0)]
+   ;; The warning lamp. Ninety metres up and the only thing in the catalogue
+   ;; you can navigate by after dark, which it cannot do if it is a red stick
+   ;; that never changes.
+   (spinning [(lp 0.0 92.0 0.0 0.0 1.5 4.0 1.5 :cylinder :red 0.0)]
+             {:mode :blink :rate 0.55 :amp 0.42 :pivot [0.0 92.0 0.0]})
+   [
     ;; The compound: a hut and a fence you can drive through the middle of.
     (lp (* 0.4 hx) 2.0 (* 0.4 hz) 0.0 8.0 4.0 6.0 :box :white 1.0)]
    (for [[x z a] (ring 3 5.5 5.5)]
@@ -1976,7 +1995,9 @@
       (lp 0.0 (+ h1 14.0) 0.0 0.0 (* 1.5 w) 28.0 (* 1.5 d) :box :glass 1.0)
       (lp 0.0 (+ h1 34.0) 0.0 0.0 w 12.0 d :box :concrete 1.0)
       (lp 0.0 (+ h1 41.0) 0.0 0.0 (* 1.15 w) 2.0 (* 1.15 d) :box :metal 0.0)
-      (lp 0.0 (+ h1 54.0) 0.0 0.0 0.7 24.0 0.7 :cylinder :red 0.0)]
+      (lp 0.0 (+ h1 52.0) 0.0 0.0 0.6 20.0 0.6 :cylinder :metal 0.0)]
+     (spinning [(lp 0.0 (+ h1 63.0) 0.0 0.0 1.4 1.6 1.4 :blob :red 0.0)]
+               {:mode :blink :rate 0.7 :amp 0.35 :pivot [0.0 (+ h1 63.0) 0.0]})
      ;; Planters, which is what the plaza round the foot of one is made of.
      (for [[x z a] (ring 6 (* 0.88 hx) (* 0.88 hz))]
        (lp x 0.9 z a 4.5 1.8 4.0 :box :stone 1.0)))))
@@ -1996,7 +2017,22 @@
       (lp (* -0.74 hx) 13.5 (* 0.6 hz) 0.0 7.0 27.0 7.0 :box :stone 1.0)
       (lp (* -0.74 hx) 28.5 (* 0.6 hz) 0.0 7.6 3.5 7.6 :pyramid :roof 0.0)
       ;; Island platform, with a road either side of it.
-      (lp 0.0 0.6 0.0 0.0 len 1.2 5.0 :box :concrete 1.0)]
+      (lp 0.0 0.6 0.0 0.0 len 1.2 5.0 :box :concrete 1.0)
+      ;; And the clock. A tower with a blank face on it is a tower; a tower
+      ;; with hands on it is a station, and it is the one clock in the world
+      ;; that anybody can read at two hundred metres.
+      (tilt (lp (* -0.74 hx) 21.5 (+ (* 0.6 hz) 3.5) 0.0 5.0 0.5 5.0
+                :cylinder :white 0.0) quarter)]
+     ;; Clockwise, hence the negative rates: rotation about +Z is
+     ;; anticlockwise seen from +Z, which is the side the face is on.
+     (spinning [(lp (* -0.74 hx) (+ 21.5 0.9) (+ (* 0.6 hz) 3.9) quarter
+                    0.24 1.8 0.24 :box :dark 0.0)]
+               {:mode :rigid :rate -0.0175
+                :pivot [(* -0.74 hx) 21.5 (+ (* 0.6 hz) 3.9)]})
+     (spinning [(lp (* -0.74 hx) (+ 21.5 1.3) (+ (* 0.6 hz) 4.0) quarter
+                    0.18 2.6 0.18 :box :dark 0.0)]
+               {:mode :rigid :rate -0.209
+                :pivot [(* -0.74 hx) 21.5 (+ (* 0.6 hz) 4.0)]})
      (for [z [(* -0.38 hz) (* 0.38 hz)]]
        (lp 0.0 0.14 z 0.0 len 0.28 3.4 :box :dark 0.0))
      ;; Something standing at the near platform, because an empty station is a
@@ -2041,8 +2077,22 @@
       (lp (* 0.5 hx) 11.0 (* 0.42 hz) 0.0 (* 0.72 hx) 9.0 (* 0.72 hz)
           :pyramid :red 0.0)
       (lp (* 0.46 hx) 2.2 (* -0.5 hz) 0.0 10.0 4.4 10.0 :cylinder :sign 1.0)
-      (lp (* 0.46 hx) 5.6 (* -0.5 hz) 0.0 11.0 3.2 11.0 :pyramid :red 0.0)
-      ;; The wheel stands in the plane z = wx, so its spokes and rim are parts
+      (lp (* 0.46 hx) 5.6 (* -0.5 hz) 0.0 11.0 3.2 11.0 :pyramid :red 0.0)]
+     ;; The carousel turns, but a plain drum turning about its own axis is a
+     ;; drum standing still. The horses are what makes it visible -- and they
+     ;; keep facing the way they are going, which is what `:rigid` about the
+     ;; vertical means and what a carousel does.
+     (spinning
+      (mapcat
+       (fn [[x z a]]
+         [(lp (+ (* 0.46 hx) x) 3.6 (+ (* -0.5 hz) z) a 0.24 3.6 0.24
+              :cylinder :gold 0.0)
+          (lp (+ (* 0.46 hx) x) 4.1 (+ (* -0.5 hz) z) a 2.2 1.3 0.9
+              :box :white 0.0)])
+       (ring 6 6.6 6.6))
+      {:mode :rigid :axis :y :rate 0.5
+       :pivot [(* 0.46 hx) 4.0 (* -0.5 hz)]})
+     [;; The wheel stands in the plane z = wx, so its spokes and rim are parts
       ;; yawed a quarter turn and then tilted -- the only way to lean anything
       ;; out of the horizontal.
       (lp wx cy 0.0 0.0 2.4 2.4 4.0 :cylinder :metal 1.0)]
@@ -2084,8 +2134,14 @@
         :box :roof 0.0)
     ;; The court, which is the half of the site you can actually drive on.
     (lp 0.0 0.2 (* -0.45 hz) 0.0 (* 0.95 hx) 0.32 (* 0.62 hz) :box :dark 0.0)
-    (lp (* 0.92 hx) 6.5 (* 0.8 hz) 0.0 0.4 13.0 0.4 :cylinder :white 1.0)
-    (lp (* 0.92 hx) 11.8 (* 0.8 hz) 0.0 3.0 1.8 0.2 :box :red 0.0)]
+    (lp (* 0.92 hx) 6.5 (* 0.8 hz) 0.0 0.4 13.0 0.4 :cylinder :white 1.0)]
+   ;; The flag, flying to one side of the pole and swinging round it. Offset,
+   ;; because a swing about a pivot the part is centred on turns it on the spot
+   ;; and a flag that pirouettes about its own middle is not a flag.
+   (spinning [(lp (+ (* 0.92 hx) 1.7) 11.8 (* 0.8 hz) 0.0
+                  3.0 1.8 0.2 :box :red 0.0)]
+             {:mode :swing :axis :y :rate 1.1 :amp 0.55
+              :pivot [(* 0.92 hx) 11.8 (* 0.8 hz)]})
    (mapcat (fn [z] [(lp 0.0 1.7 z 0.0 0.5 3.4 0.5 :cylinder :metal 1.0)
                     (lp 0.0 3.9 z 0.0 3.0 1.8 0.3 :box :white 0.0)])
            [(* -0.88 hz) (* -0.04 hz)])))
@@ -2097,10 +2153,28 @@
       ;; The flare. It is the one part of a refinery anybody can name, and the
       ;; only part visible from the next district.
       (lp (* -0.82 hx) 26.0 (* -0.72 hz) 0.0 2.0 52.0 2.0 :cylinder :metal 1.0)
-      (lp (* -0.82 hx) 54.0 (* -0.72 hz) 0.0 2.6 5.0 2.6 :cylinder :red 0.0)
       ;; A pipe rack across the whole yard, on trestles.
       (lp 0.0 6.4 (* 0.66 hz) 0.0 (* 1.7 hx) 1.6 3.0 :box :rust 1.0)
       (lp 0.0 8.2 (* 0.66 hz) 0.0 (* 1.7 hx) 1.2 2.2 :box :metal 0.0)]
+     ;; The flare itself, which is a flame and therefore the one thing here
+     ;; that has no business holding still. Fast and uneven rather than a
+     ;; pulse: it reads as burning instead of as a warning light.
+     (spinning [(lp (* -0.82 hx) 54.5 (* -0.72 hz) 0.0 3.0 6.0 3.0
+                    :cylinder :red 0.0)]
+               {:mode :blink :rate 5.5 :amp 0.72
+                :pivot [(* -0.82 hx) 54.5 (* -0.72 hz)]})
+     ;; A pump jack. The walking beam is the reason it is here: a nodding
+     ;; donkey is recognisable from a kilometre away and from any angle, and
+     ;; it is the cheapest moving thing in the catalogue -- one box on a
+     ;; swing.
+     (let [jx (* 0.72 hx) jz (* -0.62 hz)]
+       (concat
+        [(lp jx 0.4 jz 0.0 9.0 0.8 5.0 :box :concrete 1.0)
+         (lp jx 3.4 jz 0.0 1.6 6.0 1.6 :box :rust 1.0)
+         (lp (+ jx 3.6) 1.4 jz 0.0 3.6 2.0 2.6 :box :rust 1.0)]
+        (spinning [(lp jx 6.6 jz 0.0 11.0 1.0 1.0 :box :rust 0.0)
+                   (lp (- jx 5.0) 6.6 jz 0.0 2.4 2.4 1.8 :box :dark 0.0)]
+                  {:mode :swing :rate 1.5 :amp 0.32 :pivot [jx 6.6 jz]})))
      (for [i (range 5)]
        (lp (+ (* -0.7 hx) (* i 0.35 hx)) 3.2 (* 0.66 hz) 0.0
            1.0 6.4 1.0 :box :metal 1.0))
@@ -2277,8 +2351,14 @@
       (lp (* -0.62 hx) 8.0 (* 0.62 hz) 0.0 6.0 16.0 6.0 :box :concrete 1.0)
       (lp (* -0.62 hx) 17.5 (* 0.62 hz) 0.0 9.0 4.0 9.0 :box :glass 1.0)
       (lp (* -0.62 hx) 20.2 (* 0.62 hz) 0.0 9.6 1.4 9.6 :box :dark 0.0)
-      (lp (* -0.62 hx) 24.0 (* 0.62 hz) 0.0 0.4 6.0 0.4 :cylinder :metal 0.0)
-      ;; Terminal, then the hangar with its doors facing the apron.
+      (lp (* -0.62 hx) 24.0 (* 0.62 hz) 0.0 0.4 6.0 0.4 :cylinder :metal 0.0)]
+     ;; The radar. A bar going round on top of the tower, which is what an
+     ;; airfield does when nothing is landing.
+     (spinning [(lp (* -0.62 hx) 27.4 (* 0.62 hz) 0.0 7.0 0.5 1.2
+                    :box :white 0.0)]
+               {:mode :rigid :axis :y :rate 1.1
+                :pivot [(* -0.62 hx) 27.4 (* 0.62 hz)]})
+     [;; Terminal, then the hangar with its doors facing the apron.
       (lp (* 0.05 hx) 3.5 (* 0.66 hz) 0.0 (* 0.55 hx) 7.0 (* 0.35 hz)
           :box :white 1.0)
       (lp (* 0.05 hx) 7.4 (* 0.66 hz) 0.0 (* 0.57 hx) 1.0 (* 0.37 hz)
@@ -2288,8 +2368,16 @@
       (lp (* 0.72 hx) 14.0 (* 0.62 hz) quarter (* 0.42 hz) 5.0 (* 0.36 hx)
           :gable :metal 0.0)
       ;; The windsock: two volumes, and the detail that names the place.
-      (lp (* -0.92 hx) 4.0 (* 0.05 hz) 0.0 0.3 8.0 0.3 :cylinder :white 1.0)
-      (lp (* -0.92 hx) 7.6 (* 0.05 hz) 0.0 1.4 1.8 3.8 :cylinder :red 0.0)]
+      (lp (* -0.92 hx) 4.0 (* 0.05 hz) 0.0 0.3 8.0 0.3 :cylinder :white 1.0)]
+     ;; And the sock on it, which does not point anywhere in particular and
+     ;; never has. It hangs *off* the pole rather than on it -- a swing about a
+     ;; pivot the part is already centred on is a part twisting on the spot,
+     ;; which is a radar and is not a windsock.
+     (spinning [(tilt (lp (- (* -0.92 hx) 2.4) 7.6 (* 0.05 hz) quarter
+                          1.3 4.4 1.3 :cylinder :red 0.0)
+                      quarter)]
+               {:mode :swing :axis :y :rate 0.9 :amp 0.8
+                :pivot [(* -0.92 hx) 7.6 (* 0.05 hz)]})
      ;; Centreline.
      (for [i (range 7)]
        (lp (+ (* -0.39 rw) (* i 0.13 rw)) 0.24 (* -0.4 hz) 0.0
@@ -2314,10 +2402,16 @@
       ;; The banner over the way in, which is what you see before the stalls.
       (lp (* -0.88 hx) 3.2 (* 0.92 hz) 0.0 0.6 6.4 0.6 :cylinder :timber 1.0)
       (lp (* 0.88 hx) 3.2 (* 0.92 hz) 0.0 0.6 6.4 0.6 :cylinder :timber 1.0)
-      (lp 0.0 5.6 (* 0.92 hz) 0.0 (* 1.8 hx) 2.4 0.3 :box :cloth-a 0.0)
       ;; A couple of vans that brought it all, parked at the back.
       (lp (* -0.62 hx) 1.6 (* -0.86 hz) 0.0 6.0 3.2 2.6 :box :cloth-b 1.0)
       (lp (* 0.66 hx) 1.6 (* -0.86 hz) 0.4 6.0 3.2 2.6 :box :white 1.0)]
+     ;; The banner, slung between the two posts and not quite still. A tenth
+     ;; of a radian is nothing to look at and everything to notice: a market
+     ;; where the only cloth in it is rigid reads as a model of a market.
+     (spinning [(lp 0.0 5.6 (* 0.92 hz) 0.0 (* 1.8 hx) 2.4 0.3
+                    :box :cloth-a 0.0)]
+               {:mode :swing :axis :y :rate 1.3 :amp 0.11
+                :pivot [0.0 5.6 (* 0.92 hz)]})
      ;; Three rows of stalls with aisles between them: a market is a grid you
      ;; drive down, not a heap you park beside.
      (mapcat
@@ -2564,8 +2658,13 @@
     ;; The porch across the front, on rough posts.
     (lp 0.0 4.4 (* 0.16 hz) 0.0 (* 1.05 hx) 0.4 (* 0.4 hz) :box :timber 0.0)
     (lp 0.0 1.4 (* 0.02 hz) 0.0 3.0 2.8 0.3 :box :timber 0.0)
-    ;; And the sign, which is the only straight-edged thing on it.
-    (lp 0.0 8.0 (* -0.02 hz) 0.0 (* 0.6 hx) 2.2 0.3 :box :lacquer 0.0)]
+    ]
+   ;; And the sign, which is the only straight-edged thing on it -- and, in a
+   ;; still afternoon in the sierra, the only thing on it that moves.
+   (spinning [(lp 0.0 8.0 (* -0.02 hz) 0.0 (* 0.6 hx) 2.2 0.3
+                  :box :lacquer 0.0)]
+             {:mode :swing :axis :y :rate 0.75 :amp 0.13
+              :pivot [0.0 8.0 (* -0.02 hz)]})
    (for [i (range 5)]
      (lp (+ (* -0.9 hx) (* i 0.45 hx)) 2.2 (* 0.34 hz) 0.0
          0.5 4.4 0.5 :cylinder :timber 1.0))
@@ -2628,11 +2727,11 @@
   "The landmark this chunk owns: `{:parts a :rotors b}`.
 
   `:parts` is a flat array in the same layout as `chunk-bridges`. `:rotors`
-  describes the runs of it that turn -- see `spinning` -- as
-  [pivot-x pivot-y pivot-z axis rate mode first count], with axis 0 for the
-  vertical and 1 for the world Z, and mode 0 for rigid and 1 for orbit. Both
-  are empty for the fifteen chunks in a district that do not own a landmark,
-  which is most of them.
+  describes the runs of it that move -- see `spinning` -- as
+  [pivot-x pivot-y pivot-z axis rate mode amp phase first count], with axis 0
+  for the vertical and 1 for the world Z, and mode 0 rigid, 1 orbit, 2 swing,
+  3 blink. Both are empty for the fifteen chunks in a district that do not own
+  a landmark, which is most of them.
 
   Ownership is by the landmark's centre, the same rule streets use, so exactly
   one chunk builds it however the districts and the chunk grid line up."
@@ -2679,7 +2778,9 @@
                 (doseq [v [(+ (:x lm) pvx) (+ y0 pvy) (+ (:z lm) pvz)
                            (if (= :y (:axis sp)) 0.0 1.0)
                            (:rate sp)
-                           (if (= :orbit (:mode sp)) 1.0 0.0)
+                           (case (:mode sp) :rigid 0.0 :orbit 1.0
+                                 :swing 2.0 :blink 3.0)
+                           (:amp sp) (:phase sp)
                            (double (+ base i)) (double (- j i))]]
                   (conj! rot v))
                 (recur j))

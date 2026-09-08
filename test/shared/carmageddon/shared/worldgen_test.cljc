@@ -979,7 +979,9 @@
   ;; also the fragile one: reorder the parts a landmark emits and the range
   ;; silently starts spinning the wrong volumes -- a windmill whose tower
   ;; rotates and whose sails do not.
-  (let [machines {:windmill 1 :windfarm 3 :funfair 2}
+  (let [machines {:windmill 1 :windfarm 3 :funfair 3 :mast 1 :tower 1
+                  :refinery 2 :airport 2 :station 2 :bazaar 1 :school 1
+                  :cantina 1}
         found (for [dx (range -14 14), dz (range -14 14)
                     :let [lm (w/landmark seed dx dz)]
                     :when (and lm (contains? machines (:kind lm)))
@@ -994,14 +996,21 @@
       (doseq [i (range nr)
               :let [o (* i w/rotor-stride)
                     at (fn [k] (double (aget* rotors (+ o k))))
-                    i0 (long (at 6))
-                    n  (long (at 7))]]
+                    i0 (long (at 8))
+                    n  (long (at 9))]]
         (is (pos? n) (str kind " rotor " i " turns nothing"))
         (is (<= 0 i0) (str kind " rotor " i " starts before the array"))
         (is (<= (+ i0 n) np) (str kind " rotor " i " runs off the end"))
-        (is (pos? (at 4)) (str kind " rotor " i " turns at zero"))
+        (is (not (zero? (at 4))) (str kind " rotor " i " moves at zero"))
         (is (contains? #{0.0 1.0} (at 3)) "axis out of range")
-        (is (contains? #{0.0 1.0} (at 5)) "mode out of range")
+        (is (contains? #{0.0 1.0 2.0 3.0} (at 5)) "mode out of range")
+        ;; A swing that goes further than a right angle is a rotation with a
+        ;; bug in it, and a blink that is on for none or all of its cycle is
+        ;; a part that has been deleted or one that never moves.
+        (when (= 2.0 (at 5))
+          (is (< 0.0 (at 6) 1.6) (str kind " swings " (at 6) " radians")))
+        (when (= 3.0 (at 5))
+          (is (< 0.0 (at 6) 1.0) (str kind " blinks at duty " (at 6))))
         ;; Nothing that turns may carry a collider. Rapier fixed bodies are
         ;; placed once, at chunk load, and never told about the matrices the
         ;; renderer is rewriting -- so a spinning solid part is a blade you can
@@ -1009,6 +1018,35 @@
         (doseq [k (range i0 (+ i0 n))]
           (is (zero? (double (aget* parts (+ (* k w/part-stride) 10))))
               (str kind " turns a part that has a collider"))))
+      ;; A rotor that turns has to actually move something. A blink does not
+      ;; turn anything -- its whole visible effect is going out -- so it is
+      ;; exempt, and a centred cylinder is exactly the right shape for a lamp.
+      ;;
+      ;; The windsock was a cylinder
+      ;; centred on the pivot it swung about: rotationally symmetric, on the
+      ;; spot, about its own axis -- a moving part, correctly implemented,
+      ;; that produced no motion whatever. A box in that position is fine (it
+      ;; visibly turns) and so is a cylinder set off from the pivot (it
+      ;; visibly travels); a centred cylinder is neither.
+      (doseq [i (range nr)
+              :let [o (* i w/rotor-stride)
+                    at (fn [k] (double (aget* rotors (+ o k))))]
+              :when (not= 3.0 (at 5))
+              :let [vertical? (zero? (long (at 3)))
+                    i0 (long (at 8)) n (long (at 9))
+                    cyl (double (part-index-of w/part-prims :cylinder))
+                    moved? (fn [k]
+                             (let [q (* k w/part-stride)
+                                   px (double (aget* parts q))
+                                   py (double (aget* parts (+ q 1)))
+                                   pz (double (aget* parts (+ q 2)))
+                                   d (if vertical?
+                                       (Math/hypot (- px (at 0)) (- pz (at 2)))
+                                       (Math/hypot (- px (at 0)) (- py (at 1))))]
+                               (or (> d 0.3)
+                                   (not= cyl (double (aget* parts (+ q 8)))))))]]
+        (is (some moved? (range i0 (+ i0 n)))
+            (str kind " rotor " i " turns a symmetric part on the spot")))
       ;; And the pivot is inside the landmark rather than out in the next
       ;; district, which is what a local-frame pivot that never got translated
       ;; into the world would look like.
@@ -1016,7 +1054,7 @@
               :let [o (* i w/rotor-stride)
                     px (double (aget* rotors o))
                     pz (double (aget* rotors (+ o 2)))
-                    i0 (long (double (aget* rotors (+ o 6))))
+                    i0 (long (double (aget* rotors (+ o 8))))
                     qx (double (aget* parts (* i0 w/part-stride)))
                     qz (double (aget* parts (+ (* i0 w/part-stride) 2)))]]
         (is (< (abs (- px qx)) 60.0) (str kind " pivot is nowhere near its parts"))
