@@ -53,6 +53,17 @@
 (def ^:private max-vehicle-damage-per-hit 0.10)
 (def ^:private opponent-count 3)
 
+;; When a car has stopped being a car. `stranded-up` is the cosine of the tilt
+;; past which no wheel can reach the ground -- about seventy degrees, so a car
+;; leaning hard against a wall is not caught by it and a car on its side is.
+;;
+;; The wait is not politeness. It is the window in which a rival can arrive and
+;; finish the job, which is the whole reason righting yourself is not instant:
+;; rolling it should cost something.
+(def ^:private stranded-up 0.34)
+(def ^:private stranded-speed 1.6)   ; m/s
+(def ^:private stranded-secs 4.0)
+
 ;; What a gas cylinder and a tanker are worth, as fire.
 (def ^:private barrel-fire {:r 4.2 :life 12.0 :seeds 0 :blast 9.0 :push 2400.0})
 ;; What is left when a car with a driver in it is finished -- the player's or a
@@ -163,7 +174,9 @@
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
   (let [snap-every (/ k/tick-hz k/snapshot-hz)
-        stats      (atom {:fps 0 :tick 0})]
+        stats      (atom {:fps 0 :tick 0})
+        ;; How long the car has been somewhere it cannot drive out of.
+        stranded   (volatile! 0.0)]
     (clock/start!
      {:on-tick
       (fn [tick _dt]
@@ -184,6 +197,19 @@
               (sim/blast! sim [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
                           blast push))
             (game/wrecked! game))
+          ;; Upside down in a ditch used to be the end of a run in every sense
+          ;; that mattered: the car could not move and the only key that freed
+          ;; it put you back at the spawn. It rights itself now, where it lies,
+          ;; keeping its dents.
+          (if (and (game/running? game)
+                   (vehicle/stranded? (sim/player-vehicle sim)
+                                      stranded-up stranded-speed))
+            (do (vswap! stranded + k/dt)
+                (when (>= @stranded stranded-secs)
+                  (vreset! stranded 0.0)
+                  (sim/recover-player! sim)
+                  (cockpit/flash! cock "BACK ON YOUR WHEELS")))
+            (vreset! stranded 0.0))
           ;; Weather, and what it is doing to the road under every car. The
           ;; grip multiplier is pushed onto the vehicles rather than read by
           ;; them, so nothing in the tyre model has to know the sky exists.
@@ -375,6 +401,7 @@
              :powerups   (powerups/bars powerups-state)
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
+             :recovery   (when (pos? @stranded) (- stranded-secs @stranded))
              :car        (cars/display-name kind)})))
         (render/draw! rs sim alpha dt (gloom-now weather-state)
                       (set (keys (powerups/active powerups-state)))))

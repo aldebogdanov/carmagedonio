@@ -244,16 +244,33 @@
             (aset wheels (+ o 1) (if (steered i) (aget steer 0) 0.0))
             (aset wheels (+ o 2) (aget spin i))))))))
 
-(defn- reset-player! [sim]
+(def ^:private recover-lift 1.1)   ; m the car is picked up by before dropping
+
+(defn recover-player!
+  "Set the player back on its wheels where it stands.
+
+  Keeps the place, the heading and every dent. This replaces a reset that put
+  the car back at the *spawn* and undented it, which was fine in the first
+  minute of a run and a worse outcome than the crash four kilometres into open
+  country -- the only way out of being upside down was to throw away the drive
+  that got you there.
+
+  Yaw only: the pitch and the roll are what put it on its roof. And it is
+  lifted before it is dropped rather than placed exactly where it lay, because
+  the ground under a car that has rolled is rarely flat and a body spawned
+  intersecting the terrain is fired into the sky by the solver."
+  [sim]
   (let [^js body (aget (:bodies @sim) 0)
-        [x y z] (:spawn @sim)]
-    (.setTranslation body (vec3 x y z) true)
-    (.setRotation body #js {:x 0.0 :y 0.0 :z 0.0 :w 1.0} true)
+        veh (first (:vehicles @sim))
+        t (.translation body)
+        [fx _ fz] (vehicle/heading veh)]
+    (.setTranslation body (vec3 (.-x t) (+ (.-y t) recover-lift) (.-z t)) true)
+    (.setRotation body (vehicle/upright-quaternion fx fz) true)
     (.setLinvel body (vec3 0 0 0) true)
     (.setAngvel body (vec3 0 0 0) true)
     (.resetForces body true)
     (.resetTorques body true)
-    (vehicle/reset-state! (first (:vehicles @sim)))))
+    (vehicle/clear-motion! veh)))
 
 (defn step!
   "Advance exactly one fixed tick.
@@ -264,7 +281,7 @@
   ([sim cmd opponent-cmds]
   (capture! sim)
   (if (:reset cmd)
-    (reset-player! sim)
+    (recover-player! sim)
     ;; Wheel rays must be cast against the world as it stands *before* the
     ;; solver runs, and the forces they add are consumed by that step, so this
     ;; ordering is required rather than incidental.

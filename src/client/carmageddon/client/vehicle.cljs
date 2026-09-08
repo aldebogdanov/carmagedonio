@@ -519,12 +519,46 @@
     (.fill susp rest) (.fill susp-prev rest)
     (.fill contact 0) (.fill steer 0)))
 
-(defn reset-state! [{:keys [^js damage] :as veh}]
-  (clear-motion! veh)
-  (.fill damage 0))
-
 (defn chassis-position [{:keys [^js body]}]
   (let [t (.translation body)] [(.-x t) (.-y t) (.-z t)]))
+
+(defn upright
+  "How near the roof is to pointing at the sky: 1 on its wheels, 0 on its side,
+  -1 on its roof."
+  [{:keys [^js body]}]
+  (qrot! s-up (.rotation body) 0.0 1.0 0.0)
+  (aget s-up 1))
+
+(defn upright-quaternion
+  "The yaw-only rotation that leaves a chassis pointing where `[fx fz]` points.
+
+  Yaw only, because pitch and roll are exactly what has to go: this is what
+  rights a car that has rolled. The negations are the chassis convention --
+  local forward is -Z, so a heading of (fx, fz) is the yaw whose sine and
+  cosine are their negatives, and getting that backwards puts the car down
+  facing the way it came.
+
+  `fx`/`fz` need not be normalised and the y component is deliberately not
+  taken: the heading of a car lying on its roof still points somewhere useful
+  once it is flattened, which is the only case this function is ever called
+  in."
+  [fx fz]
+  (let [th (js/Math.atan2 (- fx) (- fz))]
+    #js {:x 0.0 :y (js/Math.sin (* 0.5 th)) :z 0.0 :w (js/Math.cos (* 0.5 th))}))
+
+(defn stranded?
+  "Tipped past `up-min` and moving slower than `v-max`.
+
+  Which is the honest definition of a car that cannot drive out of where it
+  is: the wheels are off the ground, and nothing the driver does with them
+  will change that. Speed is in the test as well as tilt because a car in the
+  middle of a barrel roll is upside down and about to land on its wheels, and
+  is not stranded at all."
+  [{:keys [^js body] :as veh} up-min v-max]
+  (and (< (upright veh) up-min)
+       (let [lv (.linvel body)
+             x (.-x lv) y (.-y lv) z (.-z lv)]
+         (< (+ (* x x) (* y y) (* z z)) (* v-max v-max)))))
 
 (defn heading
   "Unit vector the chassis points along, in world space."

@@ -158,7 +158,7 @@
   [{:keys [^js ctx flash]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
            rivals wheels drift? handbrake? lights? online car state ending
-           powerups weather grip]}]
+           powerups weather grip recovery]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -250,6 +250,20 @@
       (when (> until (js/Date.now))
         (text! ctx text 74 148 (str "700 13px " mono) amber "center")))
 
+    ;; The righting countdown, across the top of the cluster. It takes a strip
+    ;; rather than a corner because it is the only thing on the dashboard that
+    ;; is asking the player to do something -- namely, brace -- and a number
+    ;; ticking down in eight-point text beside the rev counter is not a
+    ;; warning, it is trivia.
+    (when recovery
+      (set! (.-fillStyle ctx) "rgba(14,16,20,0.86)")
+      (.beginPath ctx)
+      (.roundRect ctx 0 0 w 30 10)
+      (.fill ctx)
+      (text! ctx (str "ON YOUR ROOF \u00b7 RIGHTING IN "
+                      (js/Math.max 1 (js/Math.ceil recovery)))
+             (/ w 2) 20 (str "700 14px " mono) amber "center"))
+
     ;; A run that has ended used to say so in twelve-point text in the corner,
     ;; while the clock simply stopped and the car kept driving -- which reads
     ;; as the timer having broken rather than as the run being over. It takes
@@ -276,7 +290,7 @@
   to draw a dashboard and deliberately nothing about where a simulation keeps
   its wheels."
   [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
-           lights? online car powerups weather grip]}]
+           lights? online car powerups weather grip recovery]}]
   (let [{:keys [remaining score peds state ending]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
@@ -299,5 +313,6 @@
      :weather   weather
      :grip      grip
      :car       car
+     :recovery  recovery
      :state     state
      :ending    ending}))
