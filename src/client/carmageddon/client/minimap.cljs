@@ -41,10 +41,128 @@
 
 (def ^:private online-colour "#38b6d8")
 
-(def ^:private landmark-colours
-  {:stadium "#e0d24a" :mall "#d97fd0" :park "#6fd66f" :plaza "#e0e0e0"
-   :works "#d9803a" :silos "#e8dcae" :church "#c6c0f0" :monument "#a8a29a"
-   :mast "#ff6b6b"})
+(def landmark-families
+  "Which family a landmark belongs to, and what that family is called.
+
+  The colours used to be per kind and there were nine of them, from when there
+  were nine kinds. Twenty-one kinds later, most landmarks fell through to the
+  default and drew as identical white diamonds -- so the colour on the map
+  answered no question at all, and there was nothing else on the blip to
+  answer it with.
+
+  Now the pictogram says *what* and the colour says *what sort*, which is the
+  division that survives being 13 pixels across: you can pick the industry out
+  of a screenful at a glance and then read the one glyph you are heading for."
+  {:industry {:colour "#e08a3c" :label "industry"
+              :kinds [:works :refinery :scrapyard :quarry :silos]}
+   :transport {:colour "#5aa8e0" :label "transport and power"
+               :kinds [:station :airport :mast :tower :water-tower
+                       :windmill :windfarm]}
+   :sport {:colour "#e8d24a" :label "sport and fun"
+           :kinds [:stadium :speedway :funfair :drive-in]}
+   :market {:colour "#d97fd0" :label "shops and crowds"
+            :kinds [:mall :bazaar]}
+   :civic {:colour "#b9b4f0" :label "civic and sacred"
+           :kinds [:plaza :museum :church :school :statue :pagoda :cemetery]}
+   :green {:colour "#79c96f" :label "green and old"
+           :kinds [:park :monument :ruins :izbas :cantina]}})
+
+(def family-of
+  "Landmark kind -> family key. Inverted once rather than searched per blip."
+  (into {} (for [[fam {:keys [kinds]}] landmark-families, k kinds] [k fam])))
+
+;; --- pictograms -------------------------------------------------------------
+;;
+;; Each draws into a box roughly -5..+5, stroked, on a plate of its family's
+;; colour. Everything here is two to five strokes: at this size a drawing with
+;; more in it is a smudge, and the only question a blip has to answer is which
+;; of the thirty it is.
+
+(defn- ln [^js c x1 y1 x2 y2] (.moveTo c x1 y1) (.lineTo c x2 y2))
+
+(defn- path [^js c pts]
+  (.moveTo c (first (first pts)) (second (first pts)))
+  (doseq [[x y] (rest pts)] (.lineTo c x y)))
+
+(defn- circ [^js c x y r]
+  (.moveTo c (+ x r) y)
+  (.arc c x y r 0 (* 2 js/Math.PI)))
+
+(def ^:private glyphs
+  {;; --- industry
+   :works     (fn [c] (path c [[-5 4] [-5 -1] [0 -1] [0 4]]) (ln c 2 4 2 -5)
+                (ln c 2 4 5 4))
+   :refinery  (fn [c] (ln c -3 4 -3 -2) (ln c 0 4 0 -4) (ln c 3 4 3 0)
+                (path c [[-1 -4] [0 -6] [1 -4]]))
+   :scrapyard (fn [c] (path c [[-5 4] [4 4]]) (path c [[-4 2] [3 2]])
+                (path c [[-3 0] [4 0]]) (path c [[-4 -2] [2 -2]]))
+   :quarry    (fn [c] (path c [[-5 -3] [-2 -3] [-2 0] [1 0] [1 3] [5 3]]))
+   :silos     (fn [c] (ln c -3 4 -3 -2) (ln c 0 4 0 -3) (ln c 3 4 3 -2)
+                (circ c -3 -2 1) (circ c 0 -3 1) (circ c 3 -2 1))
+   ;; --- transport and power
+   ;; A locomotive rather than a length of track: rails came out as a grid of
+   ;; lines and read as a window.
+   :station   (fn [c] (path c [[-4 3] [-4 -2] [-2 -4] [4 -4] [4 3]])
+                (.closePath c) (ln c -4 -1 4 -1) (circ c -2 4 1.2)
+                (circ c 2 4 1.2))
+   :airport   (fn [c] (path c [[0 -5] [1 -1] [5 2] [1 2] [0 5] [-1 2] [-5 2]
+                               [-1 -1]]) (.closePath c))
+   :mast      (fn [c] (path c [[-4 5] [0 -4] [4 5]]) (ln c -2 1 2 1)
+                (circ c 0 -5 1))
+   :tower     (fn [c] (path c [[-3 5] [-3 -1] [-2 -1] [-2 -4] [2 -4] [2 -1]
+                               [3 -1] [3 5]]) (ln c 0 -4 0 -6))
+   :water-tower (fn [c] (path c [[-4 -3] [4 -3] [3 1] [-3 1]]) (.closePath c)
+                  (ln c -2 1 -3 5) (ln c 2 1 3 5))
+   :windmill  (fn [c] (ln c 0 5 0 -1) (ln c -4 -5 4 3) (ln c 4 -5 -4 3))
+   :windfarm  (fn [c] (ln c 0 5 0 0) (ln c 0 0 0 -5) (ln c 0 0 4 3)
+                (ln c 0 0 -4 3))
+   ;; --- sport and fun
+   :stadium   (fn [c] (.ellipse c 0 0 5 3.4 0 0 (* 2 js/Math.PI))
+                (.moveTo c 2.4 0) (.ellipse c 0 0 2.4 1.4 0 0 (* 2 js/Math.PI)))
+   ;; A track with something on it. The bare oval was the stadium's glyph
+   ;; with one line moved, and at thirteen pixels the two were the same badge.
+   :speedway  (fn [c] (.ellipse c 0 0 5.2 3.4 0 0 (* 2 js/Math.PI))
+                (.moveTo c 1.6 1.6) (.rect c -1.8 0.4 3.6 2.2)
+                (ln c -1.2 3.4 -1.2 3.4) (ln c 1.2 3.4 1.2 3.4))
+   :funfair   (fn [c] (circ c 0 -1 4.4) (ln c -4.4 -1 4.4 -1)
+                (ln c 0 -5.4 0 3.4) (ln c -3 -4 3 2) (ln c 3 -4 -3 2))
+   :drive-in  (fn [c] (path c [[-5 -4] [5 -4] [5 1] [-5 1]]) (.closePath c)
+                (ln c -3 1 -3 4) (ln c 3 1 3 4))
+   ;; --- shops and crowds
+   :mall      (fn [c] (path c [[-5 -1] [0 -5] [5 -1]])
+                (path c [[-4 -1] [-4 4] [4 4] [4 -1]]) (ln c -1 4 -1 0)
+                (ln c 2 4 2 0))
+   :bazaar    (fn [c] (path c [[-5 -1] [-3 -4] [-1 -1] [1 -4] [3 -1] [5 -4]])
+                (ln c -5 -1 5 -1) (ln c -3 -1 -3 4) (ln c 3 -1 3 4))
+   ;; --- civic and sacred
+   :plaza     (fn [c] (path c [[0 -5] [1.6 -2] [1.6 3] [-1.6 3] [-1.6 -2]])
+                (.closePath c) (ln c -4 5 4 5))
+   :museum    (fn [c] (path c [[-5 -1] [0 -5] [5 -1]]) (ln c -5 -1 5 -1)
+                (ln c -3 -1 -3 3) (ln c 0 -1 0 3) (ln c 3 -1 3 3)
+                (ln c -5 4 5 4))
+   :church    (fn [c] (ln c 0 -5 0 5) (ln c -3 -1 3 -1))
+   :school    (fn [c] (path c [[-5 -1] [0 -3] [5 -1] [0 1]]) (.closePath c)
+                (ln c 4 -1.4 4 3) (ln c -3 0 -3 4) (ln c 3 0 3 4)
+                (ln c -3 4 3 4))
+   :statue    (fn [c] (circ c 0 -4 1.4) (ln c 0 -2.6 0 2)
+                (ln c -2 0 3 -2) (ln c -1.4 2 -1.4 4) (ln c 1.4 2 1.4 4)
+                (ln c -4 5 4 5))
+   :pagoda    (fn [c] (ln c -2.4 -4 2.4 -4) (ln c -3.6 -1 3.6 -1)
+                (ln c -5 2 5 2) (ln c 0 -6 0 4) (ln c -4 5 4 5))
+   :cemetery  (fn [c] (path c [[-4 5] [-4 0] [-2.5 -2] [-1 0] [-1 5]])
+                (path c [[1 5] [1 -1] [2.5 -3] [4 -1] [4 5]])
+                (ln c 1 1 4 1))
+   ;; --- green and old
+   :park      (fn [c] (ln c 0 5 0 0) (path c [[-4 0] [0 -5] [4 0]])
+                (.closePath c))
+   :monument  (fn [c] (ln c -3.5 4 -3.5 -2) (ln c 3.5 4 3.5 -2)
+                (ln c -5 -2.5 5 -2.5) (ln c 0 4 0 0))
+   :ruins     (fn [c] (path c [[-5 5] [-5 -2] [-3 -2] [-3 1] [-1 1] [-1 -4]
+                               [1 -4] [1 -1] [3 -1] [3 2] [5 2] [5 5]]))
+   :izbas     (fn [c] (path c [[-5 4] [0 -5] [5 4]]) (ln c -5 4 5 4)
+                (ln c -3 4 -3 0) (ln c 3 4 3 0) (ln c -3 0 3 0))
+   :cantina   (fn [c] (ln c 0 5 0 -4) (path c [[-3 0] [-3 -3]])
+                (ln c -3 0 0 0) (path c [[3 -1] [3 -4]]) (ln c 3 -1 0 -1))})
 
 (def ^:private road-colour "rgba(20,20,22,0.55)")
 (def ^:private grid-colour "rgba(0,0,0,0.16)")
@@ -322,27 +440,56 @@
     (set! (.-lineWidth ctx) 2)
     (.strokeRect ctx 1 1 (- size 2) (- size 2))))
 
+(defn glyph-for
+  "The pictogram for a landmark kind, or nil. Public for the test that asserts
+  the table covers the catalogue -- which is the one thing that went wrong with
+  the colour table it replaced."
+  [kind]
+  (glyphs kind))
+
+(def ^:private blip 15.0)   ; px across, which is what a 10 px glyph needs
+
 (defn- draw-landmarks!
-  "A diamond per landmark, coloured by what it is.
+  "One pictogram per landmark, on a plate of its family's colour.
 
   The point of a landmark is that you can navigate by it, and you cannot
-  navigate by something the map does not show you."
+  navigate by something the map draws as the same white diamond as everything
+  else -- which is what thirty kinds and nine colours came to."
   [ms px pz per-m size]
   (let [^js ctx (:ctx ms)
         half (* 0.5 (/ size per-m))
-        x0 (- px half) z0 (- pz half)]
+        x0 (- px half) z0 (- pz half)
+        r (* 0.5 blip)]
     (doseq [{:keys [kind x z]} (landmarks-near ms px pz (* 0.75 (/ size per-m)))
             :let [sx (* (- x x0) per-m)
                   sz (* (- z z0) per-m)]
             :when (and (<= 0 sx size) (<= 0 sz size))]
       (.save ctx)
       (.translate ctx sx sz)
-      (.rotate ctx (/ js/Math.PI 4))
-      (set! (.-fillStyle ctx) (get landmark-colours kind "#fff"))
-      (set! (.-strokeStyle ctx) "rgba(0,0,0,0.8)")
-      (set! (.-lineWidth ctx) 1.5)
-      (.fillRect ctx -4 -4 8 8)
-      (.strokeRect ctx -4 -4 8 8)
+      ;; The plate. Rounded rather than round: a disc at this size is a dot
+      ;; with a smudge on it, and the corners are what makes the glyph inside
+      ;; look deliberate.
+      (set! (.-fillStyle ctx)
+            (get-in landmark-families [(family-of kind) :colour] "#e8e8e8"))
+      (set! (.-strokeStyle ctx) "rgba(0,0,0,0.85)")
+      (set! (.-lineWidth ctx) 1.2)
+      (.beginPath ctx)
+      (.roundRect ctx (- r) (- r) blip blip 3.5)
+      (.fill ctx)
+      (.stroke ctx)
+      ;; And the glyph, in the same near-black as the plate's edge. Scaled so
+      ;; the -5..+5 box the pictograms are drawn in fits inside the plate.
+      (when-let [g (glyphs kind)]
+        (.save ctx)
+        (.scale ctx 0.62 0.62)
+        (set! (.-lineWidth ctx) 1.9)
+        (set! (.-lineJoin ctx) "round")
+        (set! (.-lineCap ctx) "round")
+        (set! (.-strokeStyle ctx) "rgba(12,12,14,0.92)")
+        (.beginPath ctx)
+        (g ctx)
+        (.stroke ctx)
+        (.restore ctx))
       (.restore ctx))))
 
 (defn- draw-rivals!

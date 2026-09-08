@@ -197,7 +197,8 @@
                                                 :forward (vehicle/heading v)
                                                 :speed (vehicle/forward-speed v)}
                                                tgt
-                                               {:commit? (= m mode-charge)})))))
+                                               {:commit? (= m mode-charge)
+                                                :top (vehicle/top-speed v)})))))
           (range (count controllers)))))
 
 (defn modes

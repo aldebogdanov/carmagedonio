@@ -519,6 +519,13 @@
     (.fill susp rest) (.fill susp-prev rest)
     (.fill contact 0) (.fill steer 0)))
 
+(defn top-speed
+  "What this car can actually do, in m/s. Straight off its own tuning, because
+  a driver -- human or otherwise -- that does not know what its car will do
+  asks for things the car cannot give."
+  [{:keys [tuning]}]
+  (:top-speed @tuning))
+
 (defn chassis-position [{:keys [^js body]}]
   (let [t (.translation body)] [(.-x t) (.-y t) (.-z t)]))
 

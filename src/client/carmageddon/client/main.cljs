@@ -87,6 +87,30 @@
     (net/-send! transport (wire/encode-delta (assoc d :kind :prop))))
   (filterv :volatile? ds))
 (def ^:private tanker-fire {:r 8.5 :life 25.0 :seeds 2 :blast 16.0 :push 7000.0})
+
+(defn- detonate!
+  "Set off a wrecked tanker, wherever the wreck came from.
+
+  A tanker is the one traffic vehicle whose wreck means something beyond a
+  wreck, and there are three ways to make one: ram it, burn it, or hit it with
+  a shock. The first two did this and the third did not -- so the strongest
+  weapon in the game was the one thing that could put a fuel tanker on its
+  roof without lighting it. Written once here so the next way of wrecking a
+  car cannot forget it either.
+
+  `owner` is whose fire it becomes, which is what makes the tanker's own kills
+  score to whoever set it off. Returns true if it went up."
+  [{:keys [sim fire-state traffic-state]} d owner]
+  (when (:volatile? d)
+    (let [[bx by bz] (:pos d)
+          {:keys [r life seeds blast push]} tanker-fire]
+      (fire/ignite! fire-state bx by bz r life owner seeds)
+      (sim/blast! sim [bx by bz] blast push)
+      ;; It is not a tanker any more. Pieces, not a whole intact lorry lying
+      ;; in its own fireball.
+      (traffic/shatter-index! traffic-state [(:cx d) (:cz d)] (:index d)
+                              (* 0.001 (js/Date.now)))
+      true)))
 ;; Damage per second at the centre of a pool. Ten seconds parked in one writes
 ;; a car off; driving through the edge of one costs a few per cent.
 (def ^:private burn-rate 0.11)
@@ -275,6 +299,11 @@
                                      (map #(assoc % :kind :ped)
                                           (peds/kill-near! peds-state x z (* 0.6 r))))]
                             (if (= :car (:kind d)) (game/car-wrecked! game) (game/ped-killed! game))
+                            ;; A tanker caught in the bolt goes up like one
+                            ;; that was rammed.
+                            (detonate! {:sim sim :fire-state fire-state
+                                        :traffic-state traffic-state}
+                                       d :player)
                             ;; A bolt to everything it took. The weapon decides
                             ;; what it hits; `powerups` only knows how to draw
                             ;; the line between here and there.
@@ -310,14 +339,9 @@
           (doseq [[d owner] (traffic/burn! traffic-state fire-state tick)]
             (when (= :player owner) (game/car-wrecked! game))
             (net/-send! transport (wire/encode-delta (assoc d :kind :car)))
-            (when (:volatile? d)
-              (let [[bx by bz] (:pos d)
-                    {:keys [r life seeds blast push]} tanker-fire]
-                (fire/ignite! fire-state bx by bz r life owner seeds)
-                (sim/blast! sim [bx by bz] blast push)
-                (traffic/shatter-index! traffic-state
-                                        [(:cx d) (:cz d)] (:index d)
-                                        (* 0.001 (js/Date.now))))))
+            (detonate! {:sim sim :fire-state fire-state
+                        :traffic-state traffic-state}
+                       d owner))
           ;; Rivals that have lost touch are brought back. Checked every tick,
           ;; but only acts after a few seconds out of contact.
           (let [[fx _ fz] (sim/forward-vector sim)]
@@ -589,15 +613,11 @@
                                                (assoc d :kind :car)))
                                   ;; A tanker is the largest thing a player can
                                   ;; set off without a power-up.
-                                  (when (:volatile? d)
+                                  (when (detonate! {:sim s :fire-state fr
+                                                    :traffic-state tf}
+                                                   d :player)
                                     (let [[bx by bz] (:pos d)
-                                          {:keys [r life seeds blast push]} tanker-fire]
-                                      (fire/ignite! fr bx by bz r life :player seeds)
-                                      (sim/blast! s [bx by bz] blast push)
-                                      ;; It is not a tanker any more. Pieces,
-                                      ;; not a whole intact lorry lying in its
-                                      ;; own fireball.
-                                      (traffic/shatter! tf hit (* 0.001 (js/Date.now)))
+                                          blast (:blast tanker-fire)]
                                       (doseq [{:keys [pos]}
                                               (claim-props!
                                                gm transport

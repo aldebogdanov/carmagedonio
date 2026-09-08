@@ -19,7 +19,7 @@
 (def ^:private stuck-speed 1.8)        ; m/s below which we might be stuck
 (def ^:private stuck-ticks 50)         ; ... for this long before reversing
 (def ^:private reverse-ticks 40)
-(def ^:private max-speed 26.0)         ; m/s the controller will ask for
+(def ^:private max-speed 26.0)         ; m/s the controller will ever ask for
 
 (defn controller []
   (atom {:slow 0 :reversing 0 :target nil}))
@@ -49,8 +49,16 @@
   `state` is {:x :z :forward [fx _ fz] :speed}. Kept as plain numbers rather
   than a telemetry map because this runs per opponent per tick."
   ([ctl state target] (drive-toward ctl state target nil))
-  ([ctl {:keys [x z forward speed]} [tx _ tz] {:keys [commit?]}]
-  (let [[fx _ fz] forward
+  ([ctl {:keys [x z forward speed]} [tx _ tz] {:keys [commit? top]}]
+  (let [;; What this car will actually do, not what the controller would like.
+        ;; `max-speed` alone was 26 m/s for everybody, and the tractor's top
+        ;; speed is 12: the error term never went negative, so the throttle was
+        ;; pinned open for the whole run. A tractor at permanent full throttle
+        ;; and 9200 N.m spins its back wheels, slews, and never lifts for a
+        ;; corner -- which is not a physics bug, it is a driver who thinks the
+        ;; car is twice as fast as it is.
+        cap (min max-speed (or top max-speed))
+        [fx _ fz] forward
         dx (- tx x) dz (- tz z)
         dist (js/Math.hypot dx dz)
         ;; Signed angle from where we point to where we want to be, in the
@@ -85,8 +93,8 @@
           ;; should not be sensible about the corner or lift off on arrival --
           ;; arriving slowly is the whole failure mode this exists to fix.
           (let [want (if commit?
-                       max-speed
-                       (min (* max-speed (clamp (- 1.0 (/ abs-ang 2.2)) 0.15 1.0))
+                       cap
+                       (min (* cap (clamp (- 1.0 (/ abs-ang 2.2)) 0.15 1.0))
                             (+ 4.0 (* 0.9 dist))))
                 err  (- want speed)
                 steer (clamp (* ang 1.6) -1.0 1.0)]
