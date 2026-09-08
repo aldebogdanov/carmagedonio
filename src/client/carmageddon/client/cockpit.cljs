@@ -266,22 +266,28 @@
 
     ;; A run that has ended used to say so in twelve-point text in the corner,
     ;; while the clock simply stopped and the car kept driving -- which reads
-    ;; as the timer having broken rather than as the run being over. It takes
-    ;; the whole cluster now.
+    ;; as the timer having broken rather than as the run being over. So it took
+    ;; the whole cluster instead, and that was wrong the other way: the run
+    ;; ends but the car does not stop, and a player who wants to go and look at
+    ;; the rest of the world afterwards was left driving with the speedometer,
+    ;; the damage bar and the map legend behind a slab.
+    ;;
+    ;; A strip, then, like the righting countdown -- loud enough to be the
+    ;; first thing read and small enough that everything under it still works.
     (when (not= :running state)
-      (set! (.-fillStyle ctx) "rgba(14,16,20,0.82)")
+      (set! (.-fillStyle ctx) "rgba(14,16,20,0.88)")
       (.beginPath ctx)
-      (.roundRect ctx 0 0 w h 10)
+      (.roundRect ctx 0 0 w 34 10)
       (.fill ctx)
       (text! ctx (case ending
                    :target "TARGET REACHED"
                    :wreck  "WRECKED"
                    "OUT OF TIME")
-             (/ w 2) 66 (str "700 30px " mono)
-             (if (= :won state) good bad) "center")
-      (text! ctx (str score " points \u00b7 " peds " of " target " pedestrians")
-             (/ w 2) 92 (str "600 13px " mono) ink "center")
-      (text! ctx "reload for a new run" (/ w 2) 114 (str "11px " mono) dim "center"))))
+             12 23 (str "700 17px " mono)
+             (if (= :won state) good bad) "left")
+      (text! ctx (str score " points \u00b7 " peds " of " target
+                      " pedestrians \u00b7 reload for a new run")
+             (- w 12) 23 (str "600 12px " mono) ink "right"))))
 
 (defn state-of
   "Everything the cluster needs, as one value.

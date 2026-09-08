@@ -176,6 +176,7 @@
        :label (js/document.getElementById "where")
        :legend (js/document.getElementById "legend")
        :legend-shown (volatile! false)
+       :blip-zoom (volatile! 0)
        ;; [cx cz] -> kind. Never invalidated: a seed's world does not change.
        :cache (js/Map.)
        ;; Landmarks are cached the same way and for the same reason: one per
@@ -195,6 +196,17 @@
        :zoom (volatile! default-zoom)})))
 
 (def ^:private blip 15.0)   ; px across, which is what a 10 px glyph needs
+
+(def ^:private blip-scales
+  "How big the landmark badges are drawn, smallest first.
+
+  Fifteen pixels is enough to tell thirty pictograms apart if you are looking
+  at the map. It is not enough to tell them apart out of the corner of an eye
+  at 180 km/h, which is when a map is actually read -- hence the key. The top
+  step is deliberately far too big for the 186 px map: at the widest zoom the
+  badges are most of what is worth seeing, and somebody hunting one landmark
+  should be able to make it unmissable."
+  [1.0 1.5 2.1 2.9])
 
 (def ^:private legend-order
   "Families down the panel, in the order they are worth scanning: the ones a
@@ -310,7 +322,7 @@
   Separate from `input/attach!` on purpose, for the same reason the camera's
   controls are: what a local player has chosen to draw on their map is not part
   of the `Command` the simulation consumes and must never reach the wire."
-  [{:keys [show-rivals zoom legend legend-shown] :as ms}]
+  [{:keys [show-rivals zoom legend legend-shown blip-zoom] :as ms}]
   (let [on-key (fn [^js e]
                  (case (.-code e)
                    "KeyM" (do (.preventDefault e) (vswap! show-rivals not))
@@ -331,6 +343,14 @@
                        (vswap! zoom #(min (dec (count zooms)) (inc %))))
                    "BracketLeft"
                    (do (.preventDefault e) (vswap! zoom #(max 0 (dec %))))
+                   ;; Next to the brackets, and the same shape of control:
+                   ;; those two say how much world, these two say how big the
+                   ;; things on it are drawn.
+                   "Equal"
+                   (do (.preventDefault e)
+                       (vswap! blip-zoom #(min (dec (count blip-scales)) (inc %))))
+                   "Minus"
+                   (do (.preventDefault e) (vswap! blip-zoom #(max 0 (dec %))))
                    nil))]
     (.addEventListener js/window "keydown" on-key)
     (fn detach! [] (.removeEventListener js/window "keydown" on-key))))
@@ -579,6 +599,7 @@
   (let [^js ctx (:ctx ms)
         half (* 0.5 (/ size per-m))
         x0 (- px half) z0 (- pz half)
+        s (nth blip-scales @(:blip-zoom ms))
         r (* 0.5 blip)]
     (doseq [{:keys [kind x z]} (landmarks-near ms px pz (* 0.75 (/ size per-m)))
             :let [sx (* (- x x0) per-m)
@@ -586,6 +607,7 @@
             :when (and (<= 0 sx size) (<= 0 sz size))]
       (.save ctx)
       (.translate ctx sx sz)
+      (.scale ctx s s)
       ;; The plate. Rounded rather than round: a disc at this size is a dot
       ;; with a smudge on it, and the corners are what makes the glyph inside
       ;; look deliberate.
