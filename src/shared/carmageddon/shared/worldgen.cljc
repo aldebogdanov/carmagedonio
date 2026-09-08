@@ -1776,6 +1776,29 @@
    {:x x :y y :z z :yaw yaw :pitch 0.0 :sx sx :sy sy :sz sz :prim prim
     :tint (landmark-tints tint) :solid solid}))
 
+(def rotor-stride 8)   ; pivot-x pivot-y pivot-z axis rate mode first count
+
+(defn- spinning
+  "Mark a run of parts as turning together about `axis` through `pivot`.
+
+  Everything in the world is a static instance uploaded once, which is right
+  for a building and wrong for a windmill: a mill whose sails do not move is
+  not a mill, it is a monument to one. Rather than give every part in the world
+  four more floats it will never use -- flora is by far the largest user of
+  this array and none of it turns -- the turning parts are described separately,
+  as runs: a pivot, a rate, and where in the parts array the run starts.
+
+  `mode` is `:rigid` for something bolted to the hub and `:orbit` for something
+  hanging off it. A ferris wheel needs both: the spokes turn with the wheel and
+  the gondolas go round it while staying the right way up, and drawing the
+  gondolas rigidly puts the people at the top upside down.
+
+  `pivot` is in the landmark's own frame; `chunk-landmarks` moves it into the
+  world along with everything else."
+  [parts {:keys [rate axis mode pivot]}]
+  (let [sp {:rate rate :axis (or axis :z) :mode (or mode :rigid) :pivot pivot}]
+    (map #(assoc % :spin sp) parts)))
+
 (defn- tilt
   "The same part, tipped about its own X axis.
 
@@ -2026,16 +2049,24 @@
      (for [sx' [-1.0 1.0], sz' [-1.0 1.0]]
        (lp (+ wx (* sx' 0.34 wr)) (* 0.5 cy) (* sz' 0.5 wr) 0.0
            1.4 cy 1.4 :box :metal 1.0))
-     (for [i (range 8) :let [a (* tau (/ (double i) 16.0))]]
-       (tilt (lp wx cy 0.0 quarter 0.7 (* 2.0 wr) 0.9 :box :metal 0.0) a))
-     (for [i (range 16) :let [a (* tau (/ (double i) 16.0))]]
-       (tilt (lp (+ wx (* wr (js-sin a))) (+ cy (* wr (js-cos a))) 0.0 quarter
-                 0.7 (* 0.42 wr) 0.7 :box :metal 0.0)
-             (+ a quarter)))
-     ;; Gondolas, hung round the rim.
-     (for [i (range 8) :let [a (* tau (/ (double i) 8.0))]]
-       (lp (+ wx (* wr (js-sin a))) (- (+ cy (* wr (js-cos a))) 2.0) 0.0 0.0
-           2.8 2.6 3.0 :box :sign 0.0)))))
+     ;; Spokes and rim, bolted to the hub and turning with it.
+     (spinning
+      (concat
+       (for [i (range 8) :let [a (* tau (/ (double i) 16.0))]]
+         (tilt (lp wx cy 0.0 quarter 0.7 (* 2.0 wr) 0.9 :box :metal 0.0) a))
+       (for [i (range 16) :let [a (* tau (/ (double i) 16.0))]]
+         (tilt (lp (+ wx (* wr (js-sin a))) (+ cy (* wr (js-cos a))) 0.0 quarter
+                   0.7 (* 0.42 wr) 0.7 :box :metal 0.0)
+               (+ a quarter))))
+      {:rate 0.26 :pivot [wx cy 0.0]})
+     ;; Gondolas, hung round the rim: they go round with it and stay the right
+     ;; way up, which is the entire difference between a fairground ride and a
+     ;; tumble dryer.
+     (spinning
+      (for [i (range 8) :let [a (* tau (/ (double i) 8.0))]]
+        (lp (+ wx (* wr (js-sin a))) (- (+ cy (* wr (js-cos a))) 2.0) 0.0 0.0
+            2.8 2.6 3.0 :box :sign 0.0))
+      {:rate 0.26 :mode :orbit :pivot [wx cy 0.0]}))))
 
 (defmethod landmark-shapes :school [_ hx hz r]
   (concat
@@ -2139,17 +2170,20 @@
       ;; The mill house, and a cart track up to its door.
       (lp (* 0.6 hx) 3.0 (* 0.5 hz) 0.0 12.0 6.0 9.0 :box :stone 1.0)
       (lp (* 0.6 hx) 7.5 (* 0.5 hz) 0.0 13.0 3.0 10.0 :gable :roof 0.0)]
-     ;; Sails: an arm across the full diameter and a panel of cloth on each.
-     (mapcat
-      (fn [i]
-        (let [a (+ a0 (* tau (/ (double i) 4.0)))
-              ax (* -0.5 sr (js-sin a))
-              ay (* 0.5 sr (js-cos a))]
-          [(tilt (lp 0.0 hy -7.5 quarter 0.7 (* 2.0 sr) 0.9 :box :timber 0.0) a)
-           (tilt (lp ax (+ hy ay) -7.8 quarter 0.3 (* 0.85 sr) 3.4
-                     :box :white 0.0)
-                 a)]))
-      (range 4)))))
+     ;; Sails: an arm across the full diameter and a panel of cloth on each,
+     ;; and the whole lot turning about the windshaft.
+     (spinning
+      (mapcat
+       (fn [i]
+         (let [a (+ a0 (* tau (/ (double i) 4.0)))
+               ax (* -0.5 sr (js-sin a))
+               ay (* 0.5 sr (js-cos a))]
+           [(tilt (lp 0.0 hy -7.5 quarter 0.7 (* 2.0 sr) 0.9 :box :timber 0.0) a)
+            (tilt (lp ax (+ hy ay) -7.8 quarter 0.3 (* 0.85 sr) 3.4
+                      :box :white 0.0)
+                  a)]))
+       (range 4))
+      {:rate 0.85 :pivot [0.0 hy -7.5]}))))
 
 (defmethod landmark-shapes :water-tower [_ hx hz r]
   (let [h  26.0
@@ -2388,12 +2422,14 @@
            ;; Three blades from the hub outward -- offset half a length along
            ;; their own direction, because a part centred on the hub would come
            ;; out the other side and give six.
-           (for [i (range 3)
-                 :let [a (+ a0 (* tau (/ (double i) 3.0)))]]
-             (tilt (lp (- tx (* 0.5 br (js-sin a)))
-                       (+ hy (* 0.5 br (js-cos a))) hzz
-                       quarter 0.5 br 1.5 :box :white 0.0)
-                   a)))))
+           (spinning
+            (for [i (range 3)
+                  :let [a (+ a0 (* tau (/ (double i) 3.0)))]]
+              (tilt (lp (- tx (* 0.5 br (js-sin a)))
+                        (+ hy (* 0.5 br (js-cos a))) hzz
+                        quarter 0.5 br 1.5 :box :white 0.0)
+                    a))
+            {:rate 1.35 :pivot [tx hy hzz]}))))
       [[(* -0.6 hx) (* -0.45 hz)]
        [(* 0.55 hx) (* -0.15 hz)]
        [(* -0.1 hx) (* 0.6 hz)]]))))
@@ -2589,35 +2625,72 @@
          1.0 1.2 1.0 :blob :lacquer 0.0))))
 
 (defn chunk-landmarks
-  "The landmark this chunk owns, as a flat parts array in the same layout as
-  `chunk-bridges`. Empty for the fifteen chunks in a district that do not own
-  one, which is most of them.
+  "The landmark this chunk owns: `{:parts a :rotors b}`.
+
+  `:parts` is a flat array in the same layout as `chunk-bridges`. `:rotors`
+  describes the runs of it that turn -- see `spinning` -- as
+  [pivot-x pivot-y pivot-z axis rate mode first count], with axis 0 for the
+  vertical and 1 for the world Z, and mode 0 for rigid and 1 for orbit. Both
+  are empty for the fifteen chunks in a district that do not own a landmark,
+  which is most of them.
 
   Ownership is by the landmark's centre, the same rule streets use, so exactly
   one chunk builds it however the districts and the chunk grid line up."
   [seed cx cz]
   (let [[dx dz] (district-of cx cz)
-        out (transient [])]
+        out (transient [])
+        rot (transient [])
+        ;; Parts written so far. A chunk can own two landmarks -- districts and
+        ;; chunks are different grids -- and a rotor's run index is into the
+        ;; whole chunk's array, not into the landmark that produced it.
+        written (volatile! 0)]
     (doseq [ddx [-1 0 1], ddz [-1 0 1]
             :let [lm (landmark seed (+ dx ddx) (+ dz ddz))]
             :when lm
             :let [[ox oz] (chunk-of (:x lm) (:z lm))]
             :when (and (= ox cx) (= oz cz))]
-      (let [{:keys [kind x z half-x half-z]} lm
-            y0 (height-at seed x z)
+      (let [{:keys [kind half-x half-z]} lm
+            y0 (height-at seed (:x lm) (:z lm))
             ;; Its own generator, so adding a landmark kind cannot shift the
             ;; trees in the next district.
-            r  (prng/chunk-rng seed cx cz (+ 97 (:landmarks k/salt)))]
+            r  (prng/chunk-rng seed cx cz (+ 97 (:landmarks k/salt)))
+            shapes (vec (remove nil?
+                                (flatten (landmark-shapes kind half-x half-z r))))
+            base @written]
         (doseq [{:keys [x y z yaw pitch sx sy sz prim tint solid]
-                 :or {pitch 0.0}}
-                (remove nil? (flatten (landmark-shapes kind half-x half-z r)))]
+                 :or {pitch 0.0}} shapes]
           (doseq [v [(+ (:x lm) x) (+ y0 y) (+ (:z lm) z) yaw pitch sx sy sz
                      (double (prim-index prim)) (double tint) solid]]
-            (conj! out v)))))
+            (conj! out v))
+          (vswap! written inc))
+        ;; Runs of consecutive parts that share one spin. Consecutive because
+        ;; the shapes emit them that way: a rotor is a range rather than a list
+        ;; of indices, which keeps it to eight numbers however many blades it
+        ;; turns out to have.
+        (loop [i 0]
+          (when (< i (count shapes))
+            (if-let [sp (:spin (nth shapes i))]
+              (let [j (loop [j i]
+                        (if (and (< j (count shapes))
+                                 (= sp (:spin (nth shapes j))))
+                          (recur (inc j))
+                          j))
+                    [pvx pvy pvz] (:pivot sp)]
+                (doseq [v [(+ (:x lm) pvx) (+ y0 pvy) (+ (:z lm) pvz)
+                           (if (= :y (:axis sp)) 0.0 1.0)
+                           (:rate sp)
+                           (if (= :orbit (:mode sp)) 1.0 0.0)
+                           (double (+ base i)) (double (- j i))]]
+                  (conj! rot v))
+                (recur j))
+              (recur (inc i)))))))
     (let [v (persistent! out)
-          a (farray (count v))]
+          a (farray (count v))
+          w (persistent! rot)
+          b (farray (count w))]
       (dotimes [i (count v)] (fput! a i (nth v i)))
-      a)))
+      (dotimes [i (count w)] (fput! b i (nth w i)))
+      {:parts a :rotors b})))
 
 (defn chunk-lots
   "The plots this chunk owns -- those whose centre lands inside it."
@@ -3227,8 +3300,14 @@
             (dotimes [_ size]
               (let [ox (prng/next-range! r -2.2 2.2)
                     oz (prng/next-range! r -2.2 2.2)
-                    ;; Barely moving. A group that walks is a queue.
-                    speed (prng/next-range! r 0.0 0.45)]
+                    ;; Slower than a passer-by, because a group that walks
+                    ;; at walking pace is a queue -- but not the 0.0 to 0.45
+                    ;; this was, which reads as a group of people who have been
+                    ;; switched off. At a fifth of a metre a second they mill
+                    ;; about, and `panic` still multiplies it by two and a half
+                    ;; when a car turns up, which is the other thing a group
+                    ;; standing at zero could not do.
+                    speed (prng/next-range! r 0.20 0.55)]
                 (when kind
                   ;; Facing the middle of their own group, which is the only
                   ;; thing separating a group from six people who happen to be
@@ -3367,6 +3446,7 @@
 (def ^:private lamp-urbanness 0.32)
 (def ^:private crossing-stripes 5)
 (def ^:private centreline-spacing 9.0)
+(def ^:private edge-inset 0.55)     ; m in from the kerb an edge line is painted
 
 (defn signal-state
   "Colour a signal group shows at world time `t`.
@@ -3460,22 +3540,39 @@
             u   (urbanness seed (* 0.5 (+ ax bx)) (* 0.5 (+ az bz)))]
         ;; A painted centre line is the cheapest thing in the whole generator
         ;; and does more for reading a road as a road than anything else here.
-        ;; Local streets get none, which is also true of most real ones.
-        (when (and (not= :local class) (> len 1.0))
+        ;;
+        ;; Local streets get edge lines instead, and only in town. That is not
+        ;; a stylistic choice, it is the only way they read as roads at all: a
+        ;; local carriageway is 7.6 m wide and the terrain vertices it is
+        ;; coloured on are 8 m apart, so the asphalt is one vertex wide and
+        ;; the quad either side of it is a gradient from road to grass. The
+        ;; result at any distance is a soft dark band that looks like mown
+        ;; verge. Two crisp lines at the kerbs are geometry rather than vertex
+        ;; colour, and they draw the edges the ground cannot.
+        (when (> len 1.0)
           (let [ux (/ dx len) uz (/ dz len)
+                rx (- uz) rz ux
                 n  (long (floor (/ len centreline-spacing)))
-                yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) ux uz)]
-            (dotimes [i n]
-              (let [t (* (+ i 0.5) centreline-spacing)
-                    px (+ ax (* ux t))
-                    pz (+ az (* uz t))
-                    ;; On a span the ground is the riverbed, so the paint has to
-                    ;; follow the deck's chord instead.
-                    y (if bridge?
-                        (+ ya (* (/ t len) (- yb ya)))
-                        (ground px pz))]
-                (emit! out px (+ 0.02 y) pz yaw
-                       (part-index :marking) 1.0 0 0.0)))))
+                yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) ux uz)
+                ;; Nothing on a country lane, which has no markings on it in
+                ;; life either and is the one place the soft edge is right.
+                offs (cond (not= :local class) [0.0]
+                           (> u lamp-urbanness) [(- edge-inset half)
+                                                 (- half edge-inset)]
+                           :else nil)]
+            (when offs
+              (dotimes [i n]
+                (let [t (* (+ i 0.5) centreline-spacing)
+                      ;; On a span the ground is the riverbed, so the paint has
+                      ;; to follow the deck's chord instead.
+                      y (if bridge?
+                          (+ ya (* (/ t len) (- yb ya)))
+                          (ground (+ ax (* ux t)) (+ az (* uz t))))]
+                  (doseq [o offs]
+                    (let [px (+ ax (* ux t) (* rx o))
+                          pz (+ az (* uz t) (* rz o))]
+                      (emit! out px (+ 0.02 y) pz yaw
+                             (part-index :marking) 1.0 0 0.0))))))))
         (when (and (not bridge?) (> u lamp-urbanness) (> len 1.0))
           (let [ux (/ dx len) uz (/ dz len)
                 rx (- uz) rz ux
@@ -3686,7 +3783,7 @@
           furniture (chunk-furniture seed cx cz field owned ground)
           bridges (chunk-bridges seed cx cz owned)
           flora (chunk-flora seed cx cz field)
-          landmarks (chunk-landmarks seed cx cz)
+          {lm-parts :parts lm-rotors :rotors} (chunk-landmarks seed cx cz)
           pickups (chunk-pickups seed cx cz owned)
           traffic (chunk-traffic seed cx cz owned)]
     {:cx cx :cz cz :verts n :size k/chunk-size
@@ -3700,7 +3797,8 @@
      :furniture furniture
      :bridges bridges
      :flora flora
-     :landmarks landmarks
+     :landmarks lm-parts
+     :landmark-rotors lm-rotors
      :pickups pickups
      :traffic traffic
      :biome (biome seed cx cz)})))

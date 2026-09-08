@@ -38,6 +38,13 @@
                                                    :flatShading true})
           :scratch (three/Object3D.)
           :colour (three/Color.)
+          ;; Scratch for `spin!`, allocated once: it runs every frame over
+          ;; every blade in the loaded world.
+          :q-spin (three/Quaternion.)
+          :q-base (three/Quaternion.)
+          :euler (three/Euler.)
+          :axis-y (three/Vector3. 0 1 0)
+          :axis-z (three/Vector3. 0 0 1)
           :chunks {}
           ;; collider handle -> {:key :idx}, for the parts that can be hit
           :by-collider {}
@@ -163,7 +170,86 @@
         (.setMatrixAt m inst (.-matrix scratch))
         (set! (.-needsUpdate (.-instanceMatrix m)) true)))))
 
-(defn add-chunk! [bs key arr]
+(defn- read-rotors
+  "The turning runs of a chunk, resolved to the instances they move.
+
+  Resolved once, here, rather than every frame: a rotor arrives as a range of
+  part indices, and what `spin!` needs is which slot of which InstancedMesh
+  each of those parts ended up in, together with the transform it was built
+  with. Looking that up sixty times a second for every blade in view would
+  cost more than the rotation does."
+  [arr parts prim-index]
+  (if (or (nil? arr) (zero? (.-length arr)))
+    []
+    (let [st worldgen/rotor-stride
+          n  (/ (.-length arr) st)]
+      (vec (for [i (range n)
+                 :let [o   (* i st)
+                       i0  (int (aget arr (+ o 6)))
+                       cnt (int (aget arr (+ o 7)))]]
+             {:px (aget arr (+ o 0)) :py (aget arr (+ o 1)) :pz (aget arr (+ o 2))
+              ;; 0 is the vertical, 1 is the world Z -- which is the axis every
+              ;; wheel in the game turns about, because the sails, the blades
+              ;; and the ferris wheel are all built in the world's XY plane.
+              :vertical? (zero? (int (aget arr (+ o 3))))
+              :rate (aget arr (+ o 4))
+              :orbit? (pos? (aget arr (+ o 5)))
+              :parts (vec (for [k (range i0 (+ i0 cnt))
+                                :let [p (nth parts k)]]
+                            {:prim (:prim p) :inst (get prim-index k)
+                             :x (:x p) :y (:y p) :z (:z p)
+                             :yaw (:yaw p) :pitch (:pitch p)
+                             :sx (:sx p) :sy (:sy p) :sz (:sz p)}))})))))
+
+(defn spin!
+  "Turn every rotor in the loaded world to where it should be at `t` seconds.
+
+  A static world is the single thing that most gives away that a place is
+  scenery, and a windmill whose sails do not move is worse than no windmill.
+  This is deliberately not physics: the rate is a constant, the world has no
+  wind, and nothing anybody does can stop a blade. What it buys is that the
+  three machines in the catalogue that are *for* turning are seen to turn.
+
+  Rigid parts take the rotation into their orientation as well as their
+  position; orbiting ones only move. That is the whole difference between a
+  gondola going round a ferris wheel and a gondola going round the inside of a
+  tumble dryer."
+  [bs t]
+  (let [{:keys [chunks ^js scratch ^js q-spin ^js q-base ^js euler
+                ^js axis-y ^js axis-z]} @bs]
+    (doseq [[_ {:keys [meshes rotors]}] chunks
+            {:keys [px py pz vertical? rate orbit? parts]} rotors
+            :let [th (* rate t)
+                  c (js/Math.cos th)
+                  s (js/Math.sin th)
+                  _ (.setFromAxisAngle q-spin (if vertical? axis-y axis-z) th)]]
+      (doseq [{:keys [prim inst x y z yaw pitch sx sy sz]} parts]
+        (when-let [^js m (get meshes prim)]
+          (let [dx (- x px) dy (- y py) dz (- z pz)]
+            (if vertical?
+              (.set (.-position scratch)
+                    (+ px (- (* dx c) (* dz s)))
+                    y
+                    (+ pz (+ (* dx s) (* dz c))))
+              (.set (.-position scratch)
+                    (+ px (- (* dx c) (* dy s)))
+                    (+ py (+ (* dx s) (* dy c)))
+                    z)))
+          (.set euler (- pitch) yaw 0 "YXZ")
+          (.setFromEuler q-base euler)
+          (if orbit?
+            (.copy (.-quaternion scratch) q-base)
+            (.multiplyQuaternions (.-quaternion scratch) q-spin q-base))
+          (.set (.-scale scratch) sx sy sz)
+          (.updateMatrix scratch)
+          (.setMatrixAt m inst (.-matrix scratch))))
+      (doseq [prim (distinct (map :prim parts))]
+        (when-let [^js m (get meshes prim)]
+          (set! (.-needsUpdate (.-instanceMatrix m)) true))))))
+
+(defn add-chunk!
+  ([bs key arr] (add-chunk! bs key arr nil))
+  ([bs key arr rotor-arr]
   (when (and arr (pos? (.-length arr)))
     (let [parts  (read-parts arr)
           groups (group-by :prim parts)
@@ -179,6 +265,7 @@
              {:meshes meshes
               :colliders (add-fixed! bs parts)
               :breakable breakable
+              :rotors (read-rotors rotor-arr parts prim-index)
               :solid (count (filter #(pos? (:solid %)) parts))})
       (swap! bs update :by-collider into
              (map (fn [{:keys [handle idx]}] [handle {:key key :idx idx}]) breakable))
@@ -186,7 +273,7 @@
       (when-let [ov (:overlay @bs)]
         (doseq [idx (overlay/destroyed ov key :parts)]
           (hide-instance! bs key idx)))
-      meshes)))
+      meshes))))
 
 (defn breakable?
   "Whether that collider handle is a panel something can knock out."

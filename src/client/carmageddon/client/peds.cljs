@@ -29,14 +29,38 @@
             [carmageddon.shared.worldgen :as worldgen]))
 
 (def ^:private walk-every 3)     ; ticks between walk updates; velocity persists
+;; A pedestrian is a capsule with a velocity and no idea what is in front of it,
+;; so one that walks into a wall pushes against it until the end of the run --
+;; still animating, going nowhere, which is what a crowd standing inside the
+;; scenery looks like. Nothing here is pathfinding: every so often, anyone who
+;; has not covered the ground they should have gets turned, and keeps getting
+;; turned until they do.
+(def ^:private unstick-every 90)   ; ticks between progress checks
+(def ^:private unstick-secs (/ unstick-every 60.0))
+(def ^:private unstick-frac 0.35)  ; of the distance they should have walked
+(def ^:private unstick-turn 2.1)   ; rad added per failed check
 
 (def ^:private notice 20.0)      ; how far away a car is worth reacting to
 ;; Past this, a pedestrian is left alone entirely and Rapier puts it to sleep.
-;; A sleeping body costs the solver almost nothing, and a person standing still
-;; a hundred metres away is a person standing still. This is what makes a crowd
-;; of four hundred affordable: with everyone walking, the physics step was 3.4 ms
-;; of a 16 ms frame.
-(def ^:private active 95.0)
+;; A sleeping body costs the solver almost nothing. This is what makes a crowd
+;; of four hundred affordable at all.
+;;
+;; It was 95 m, on the reasoning that a person standing still a hundred metres
+;; away is a person standing still. That is wrong, and it is wrong in the most
+;; visible way there is: a chunk radius holds pedestrians out to seven hundred
+;; metres, so ninety-four per cent of the crowd in view was frozen. A city of
+;; statues with a dozen people walking about at the near end of it.
+;;
+;; 220 m is measured rather than picked. On a loaded city street, with the
+;; solver at 2.41 ms a step and 21 people awake:
+;;
+;;     150 m ->  42 awake, 2.50 ms      320 m -> 163 awake, 3.17 ms
+;;     220 m ->  98 awake, 2.79 ms      500 m -> 291 awake, 3.80 ms
+;;
+;; About 4.8 microseconds per walking person. 220 m buys four times the crowd
+;; for a third of a millisecond, and covers both distance bands where a person
+;; standing rigidly still is obvious rather than a speck.
+(def ^:private active 220.0)
 (def ^:private panic 2.6)        ; multiplier on walking speed when it is
 (def ^:private shamble 1.5)      ; zombies are quicker than a walk, slower than fear
 
@@ -274,6 +298,11 @@
      ;; A fixed per-pedestrian turn rate is enough to stop everyone walking in
      ;; parallel lines forever, and needs no extra randomness at runtime.
      :turn (* 0.20 (- (mod (* idx 0.61803) 1.0) 0.5))
+     ;; [last-x, last-z, heading bias]. A typed array for the same reason
+     ;; `phase` is one: it can be written without rebuilding the chunk's
+     ;; vector, and rebuilding it every second is what this whole namespace is
+     ;; arranged to avoid.
+     :nav (doto (js/Float32Array. 3) (aset 0 x) (aset 1 z))
      :alive? true}))
 
 (defn add-chunk! [ps key arr]
@@ -325,7 +354,8 @@
   [ps tick px pz]
   (when (zero? (mod tick walk-every))
     (let [{:keys [chunks outbreak?]} @ps
-          t (* tick (/ 1.0 60.0))]
+          t (* tick (/ 1.0 60.0))
+          check? (zero? (mod tick unstick-every))]
       (doseq [[_ chunk] chunks
               p chunk
               :when (:alive? p)]
@@ -335,18 +365,34 @@
               dz (- (.-z tr) pz)
               d  (js/Math.hypot dx dz)]
          (when (< d active)
-          (let [person? (zero? (:kind p))
-              chase? (and outbreak? person?)
-              [h sp] (if (< d notice)
-                       ;; Toward or away, and quicker either way.
-                       [(js/Math.atan2 (if chase? (- dz) dz)
-                                       (if chase? (- dx) dx))
-                        (* (:speed p) (if chase? shamble panic))]
-                       [(+ (:heading p) (* (:turn p) t)) (:speed p)])
-                v (.linvel body)]
-            (.setLinvel body #js {:x (* sp (js/Math.cos h))
-                                  :y (.-y v)
-                                  :z (* sp (js/Math.sin h))} true))))))))
+          (let [^js nav (:nav p)]
+            ;; Did the last second and a half get anybody anywhere?
+            (when check?
+              (let [moved (js/Math.hypot (- (.-x tr) (aget nav 0))
+                                         (- (.-z tr) (aget nav 1)))]
+                (when (< moved (* unstick-frac (:speed p) unstick-secs))
+                  ;; Turned rather than teleported, and by more than a right
+                  ;; angle: a smaller kick walks them along the wall they were
+                  ;; already against.
+                  (aset nav 2 (+ (aget nav 2) unstick-turn)))
+                (aset nav 0 (.-x tr))
+                (aset nav 1 (.-z tr))))
+            (let [person? (zero? (:kind p))
+                  chase? (and outbreak? person?)
+                  bias (aget nav 2)
+                  [h sp] (if (< d notice)
+                           ;; Toward or away, and quicker either way. The bias
+                           ;; applies here too: running face-first into a wall
+                           ;; because the car is on the other side of it is the
+                           ;; worst version of being stuck, not an exception.
+                           [(+ bias (js/Math.atan2 (if chase? (- dz) dz)
+                                                   (if chase? (- dx) dx)))
+                            (* (:speed p) (if chase? shamble panic))]
+                           [(+ (:heading p) bias (* (:turn p) t)) (:speed p)])
+                  v (.linvel body)]
+              (.setLinvel body #js {:x (* sp (js/Math.cos h))
+                                    :y (.-y v)
+                                    :z (* sp (js/Math.sin h))} true)))))))))
 
 (defn kill-index!
   "Kill pedestrian `idx` of chunk `key`, recording the delta.

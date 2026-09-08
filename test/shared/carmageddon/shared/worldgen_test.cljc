@@ -901,7 +901,7 @@
   (let [built (for [dx (range -4 4), dz (range -4 4)
                     :let [{:keys [kind x z]} (w/landmark seed dx dz)
                           [cx cz] (w/chunk-of x z)]]
-                [kind (w/chunk-landmarks seed cx cz)])
+                [kind (:parts (w/chunk-landmarks seed cx cz))])
         at (fn [a i o] (double (aget* a (+ o (* i w/part-stride)))))]
     (is (seq built))
     (testing "the owning chunk builds it and nobody else does"
@@ -951,7 +951,7 @@
               :when dx
               :let [{:keys [x z]} (w/landmark seed dx dz)
                     [cx cz] (w/chunk-of x z)
-                    a (w/chunk-landmarks seed cx cz)
+                    a (:parts (w/chunk-landmarks seed cx cz))
                     n (/ (alen* a) w/part-stride)]]
         (is (pos? n) (str kind " generated nothing"))
         (is (every? (fn [i]
@@ -973,6 +973,54 @@
                            (+ (w/height-at seed x z) 140.0))))
                     (range n))
             (str kind " built something into orbit"))))))
+
+(deftest the-machines-that-turn-say-so
+  ;; A rotor is a *range* into the parts array, which is the cheap encoding and
+  ;; also the fragile one: reorder the parts a landmark emits and the range
+  ;; silently starts spinning the wrong volumes -- a windmill whose tower
+  ;; rotates and whose sails do not.
+  (let [machines {:windmill 1 :windfarm 3 :funfair 2}
+        found (for [dx (range -14 14), dz (range -14 14)
+                    :let [lm (w/landmark seed dx dz)]
+                    :when (and lm (contains? machines (:kind lm)))
+                    :let [[cx cz] (w/chunk-of (:x lm) (:z lm))]]
+                [(:kind lm) (w/chunk-landmarks seed cx cz)])]
+    (is (= (set (keys machines)) (set (map first found)))
+        "a machine that turns was never built")
+    (doseq [[kind {:keys [parts rotors]}] found
+            :let [np (/ (alen* parts) w/part-stride)
+                  nr (/ (alen* rotors) w/rotor-stride)]]
+      (is (= (machines kind) nr) (str kind " has " nr " rotors"))
+      (doseq [i (range nr)
+              :let [o (* i w/rotor-stride)
+                    at (fn [k] (double (aget* rotors (+ o k))))
+                    i0 (long (at 6))
+                    n  (long (at 7))]]
+        (is (pos? n) (str kind " rotor " i " turns nothing"))
+        (is (<= 0 i0) (str kind " rotor " i " starts before the array"))
+        (is (<= (+ i0 n) np) (str kind " rotor " i " runs off the end"))
+        (is (pos? (at 4)) (str kind " rotor " i " turns at zero"))
+        (is (contains? #{0.0 1.0} (at 3)) "axis out of range")
+        (is (contains? #{0.0 1.0} (at 5)) "mode out of range")
+        ;; Nothing that turns may carry a collider. Rapier fixed bodies are
+        ;; placed once, at chunk load, and never told about the matrices the
+        ;; renderer is rewriting -- so a spinning solid part is a blade you can
+        ;; see move and an invisible wall you crash into where it used to be.
+        (doseq [k (range i0 (+ i0 n))]
+          (is (zero? (double (aget* parts (+ (* k w/part-stride) 10))))
+              (str kind " turns a part that has a collider"))))
+      ;; And the pivot is inside the landmark rather than out in the next
+      ;; district, which is what a local-frame pivot that never got translated
+      ;; into the world would look like.
+      (doseq [i (range nr)
+              :let [o (* i w/rotor-stride)
+                    px (double (aget* rotors o))
+                    pz (double (aget* rotors (+ o 2)))
+                    i0 (long (double (aget* rotors (+ o 6))))
+                    qx (double (aget* parts (* i0 w/part-stride)))
+                    qz (double (aget* parts (+ (* i0 w/part-stride) 2)))]]
+        (is (< (abs (- px qx)) 60.0) (str kind " pivot is nowhere near its parts"))
+        (is (< (abs (- pz qz)) 60.0) (str kind " pivot is nowhere near its parts"))))))
 
 (deftest bridge-parts-are-well-formed
   (let [[cx cz] (bridge-chunk)

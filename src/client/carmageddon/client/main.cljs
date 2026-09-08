@@ -168,8 +168,8 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges rvs cock fire-state powerups-state
-                                  weather-state remotes events]}]
+                                  bridges landmarks rvs cock fire-state
+                                  powerups-state weather-state remotes events]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -356,6 +356,9 @@
         ;; Deliberately not `sim/telemetry` -- that allocates a map and six
         ;; vectors, which is fine at HUD rate but not 60+ times a second.
         (chunks/update! chunk-mgr (sim/player-x sim) (sim/player-z sim))
+        ;; Sails, rotors and the big wheel. Frame-rate work by definition: it
+        ;; is what the world looks like, not what it does.
+        (parts/spin! landmarks (* 0.001 (js/Date.now)))
         ;; Where the car is and how bent it is belong in the overlay too, so a
         ;; reload puts the player back rather than at the spawn. Debounced
         ;; inside `save!`; this only reads a transform.
@@ -493,7 +496,8 @@
                                      (furniture/add-chunk! fu key (:furniture data))
                                      (parts/add-chunk! br key (:bridges data))
                                      (parts/add-chunk! fl key (:flora data))
-                                     (parts/add-chunk! lm key (:landmarks data))
+                                     (parts/add-chunk! lm key (:landmarks data)
+                                                       (:rotors data))
                                      (powerups/add-chunk! pu key (:pickups data))
                                      (traffic/add-chunk! tf key (:traffic data))
                                      (peds/add-chunk! pd key (:peds data)))
@@ -674,6 +678,7 @@
                                                  :furniture-state fu
                                                  :traffic-state tf
                                                  :bridges br
+                                                 :landmarks lm
                                                  :cock ck
                                                  :fire-state fr
                                                  :powerups-state pu

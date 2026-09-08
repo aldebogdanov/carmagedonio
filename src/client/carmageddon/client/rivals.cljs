@@ -47,6 +47,14 @@
 ;; a car in the way -- so it reverses.
 (def ^:private jam-dist 9.0)
 (def ^:private jam-speed 3.0)
+;; And going nowhere on its own, which the jam test above cannot see because it
+;; only looks at rivals within nine metres of the player. A rival wedged on a
+;; kerb forty metres away is inside the leash, is not touching anybody, and
+;; will sit there for the rest of the run. Slower and for longer than the jam
+;; case: a rival at walking pace is fighting a wall, but one that pauses to
+;; turn around is not stuck and must not be picked up for it.
+(def ^:private stuck-speed 1.0)     ; m/s
+(def ^:private stuck-ticks 300)     ; ... for five seconds
 (def ^:private charge-secs 6.0)    ; a run that has not landed by now has missed
 (def ^:private lead-speed 22.0)    ; m/s assumed closing speed when aiming ahead
 (def ^:private leash 300.0)         ; m -- beyond this a rival is out of the game
@@ -61,6 +69,7 @@
   {:seed        seed
    :controllers (vec (repeatedly n ai/controller))
    :lost        (js/Int32Array. n)     ; ticks each rival has been out of contact
+   :stuck       (js/Int32Array. n)     ; ... and ticks it has been going nowhere
    ;; Tactical state per rival, and how long it has been in it. Two typed
    ;; arrays rather than a map: this is read and written for every rival on
    ;; every tick, and the alternative allocates.
@@ -230,7 +239,7 @@
   Deliberately not instant: a rival briefly beyond the leash because the player
   is doing 200 km/h down an expressway will catch up on its own, and teleporting
   it every time the gap opened would be visible from the mirror."
-  [{:keys [seed controllers ^js lost wrecked]} sim heading]
+  [{:keys [seed controllers ^js lost ^js stuck wrecked]} sim heading]
   (let [px (sim/player-x sim)
         pz (sim/player-z sim)
         vs (sim/vehicles sim)]
@@ -251,8 +260,13 @@
           (if (or (> d leash) jammed?)
             (aset lost i (inc (aget lost i)))
             (aset lost i 0))
-          (when (> (aget lost i) leash-ticks)
+          (if (< (js/Math.abs (vehicle/forward-speed v)) stuck-speed)
+            (aset stuck i (inc (aget stuck i)))
+            (aset stuck i 0))
+          (when (or (> (aget lost i) leash-ticks)
+                    (> (aget stuck i) stuck-ticks))
             (aset lost i 0)
+            (aset stuck i 0)
             (let [{:keys [pos yaw]} (respawn-spot seed px pz heading)]
               (sim/place-vehicle! sim (inc i) pos yaw))))))))
 
