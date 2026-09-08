@@ -174,6 +174,8 @@
        :canvas canvas
        :ctx (.getContext canvas "2d")
        :label (js/document.getElementById "where")
+       :legend (js/document.getElementById "legend")
+       :legend-shown (volatile! false)
        ;; [cx cz] -> kind. Never invalidated: a seed's world does not change.
        :cache (js/Map.)
        ;; Landmarks are cached the same way and for the same reason: one per
@@ -192,16 +194,136 @@
        :show-rivals (volatile! true)
        :zoom (volatile! default-zoom)})))
 
+(def ^:private blip 15.0)   ; px across, which is what a 10 px glyph needs
+
+(def ^:private legend-order
+  "Families down the panel, in the order they are worth scanning: the ones a
+  driver is looking for first."
+  [:sport :market :industry :transport :civic :green])
+
+(defn- legend-blip!
+  "One badge, drawn the same way the map draws it, at `s` times the size."
+  [^js ctx kind s]
+  (.save ctx)
+  (.scale ctx s s)
+  (set! (.-fillStyle ctx)
+        (get-in landmark-families [(family-of kind) :colour] "#e8e8e8"))
+  (set! (.-strokeStyle ctx) "rgba(0,0,0,0.85)")
+  (set! (.-lineWidth ctx) 1.2)
+  (.beginPath ctx)
+  (.roundRect ctx -7.5 -7.5 blip blip 3.5)
+  (.fill ctx)
+  (.stroke ctx)
+  (when-let [g (glyphs kind)]
+    (.save ctx)
+    (.scale ctx 0.62 0.62)
+    (set! (.-lineWidth ctx) 1.9)
+    (set! (.-lineJoin ctx) "round")
+    (set! (.-lineCap ctx) "round")
+    (set! (.-strokeStyle ctx) "rgba(12,12,14,0.92)")
+    (.beginPath ctx)
+    (g ctx)
+    (.stroke ctx)
+    (.restore ctx))
+  (.restore ctx))
+
+(def ^:private legend-cols 4)
+(def ^:private legend-w 780)
+(def ^:private legend-pad 26)
+
+(defn- short-label
+  "The map line says \"the shopping centre\", which is right in a sentence and
+  a third of a column wide in a table."
+  [kind]
+  (let [l (or (worldgen/landmark-labels kind) (name kind))]
+    (if (= "the " (subs l 0 (min 4 (count l)))) (subs l 4) l)))
+
+(defn- legend-rows [n] (js/Math.ceil (/ n legend-cols)))
+
+(defn- legend-height []
+  (+ 58 16
+     (reduce + (for [fam legend-order]
+                 (+ 20 (* 26 (legend-rows (count (:kinds (landmark-families fam)))))
+                    14)))))
+
+(defn draw-legend!
+  "The whole catalogue, grouped by family, on its own canvas.
+
+  Drawn once when the key is pressed rather than per frame: it is a reference
+  card, it does not change, and the map behind it is still live underneath.
+
+  The canvas is sized here rather than in the page, and the height is computed
+  from the families rather than written down -- the first version had a fixed
+  height and seven columns, and the names ran through each other the moment
+  anything was called \"the shopping centre\"."
+  [{:keys [^js legend]}]
+  (when legend
+    (let [h (legend-height)
+          w legend-w
+          ^js c (.getContext legend "2d")
+          mono "ui-monospace, SFMono-Regular, Menlo, monospace"
+          col-w (/ (- w (* 2 legend-pad)) legend-cols)]
+      ;; Twice the CSS size, and everything below is drawn in CSS pixels after
+      ;; one scale: the cheapest way to keep 11 px type crisp.
+      (set! (.-width legend) (* 2 w))
+      (set! (.-height legend) (* 2 h))
+      (set! (.. legend -style -width) (str w "px"))
+      (set! (.. legend -style -height) (str h "px"))
+      (.setTransform c 2 0 0 2 0 0)
+      (.clearRect c 0 0 w h)
+      (set! (.-fillStyle c) "rgba(14,16,20,0.94)")
+      (set! (.-strokeStyle c) "rgba(232,228,216,0.16)")
+      (set! (.-lineWidth c) 1)
+      (.beginPath c)
+      (.roundRect c 0.5 0.5 (dec w) (dec h) 10)
+      (.fill c)
+      (.stroke c)
+      (set! (.-textAlign c) "left")
+      (set! (.-fillStyle c) "#e8e4d8")
+      (set! (.-font c) (str "700 15px " mono))
+      (.fillText c "MAP KEY" legend-pad 34)
+      (set! (.-fillStyle c) "rgba(232,228,216,0.45)")
+      (set! (.-font c) (str "11px " mono))
+      (.fillText c "colour is the family \u00b7 K to close" (+ legend-pad 88) 34)
+      (loop [[fam & more] legend-order
+             y 58]
+        (when fam
+          (let [{:keys [colour label kinds]} (landmark-families fam)]
+            (set! (.-fillStyle c) colour)
+            (set! (.-font c) (str "700 11px " mono))
+            (.fillText c (.toUpperCase label) legend-pad y)
+            (doseq [[i kind] (map-indexed vector kinds)
+                    :let [x (+ legend-pad 9 (* (mod i legend-cols) col-w))
+                          ky (+ y 20 (* 26 (quot i legend-cols)))]]
+              (.save c)
+              (.translate c x ky)
+              (legend-blip! c kind 1.25)
+              (.restore c)
+              (set! (.-fillStyle c) "#cfcbc0")
+              (set! (.-font c) (str "11px " mono))
+              (.fillText c (short-label kind) (+ x 16) (+ ky 4)))
+            (recur more (+ y 20 (* 26 (legend-rows (count kinds))) 14))))))))
+
 (defn attach!
   "The map's own controls. Returns a detach fn.
 
   Separate from `input/attach!` on purpose, for the same reason the camera's
   controls are: what a local player has chosen to draw on their map is not part
   of the `Command` the simulation consumes and must never reach the wire."
-  [{:keys [show-rivals zoom]}]
+  [{:keys [show-rivals zoom legend legend-shown] :as ms}]
   (let [on-key (fn [^js e]
                  (case (.-code e)
                    "KeyM" (do (.preventDefault e) (vswap! show-rivals not))
+                   ;; The key to the map, which the map badly needed: thirty
+                   ;; pictograms are only self-explanatory to whoever drew
+                   ;; them.
+                   "KeyK" (do (.preventDefault e)
+                              (vswap! legend-shown not)
+                              (when legend
+                                (if @legend-shown
+                                  (do (draw-legend! ms)
+                                      (set! (.-hidden legend) false))
+                                  (set! (.-hidden legend) true))))
                    ;; The brackets, because every other key on the left of the
                    ;; board is already driving the car.
                    "BracketRight"
@@ -446,8 +568,6 @@
   the colour table it replaced."
   [kind]
   (glyphs kind))
-
-(def ^:private blip 15.0)   ; px across, which is what a 10 px glyph needs
 
 (defn- draw-landmarks!
   "One pictogram per landmark, on a plate of its family's colour.
