@@ -1060,6 +1060,50 @@
         (is (< (abs (- px qx)) 60.0) (str kind " pivot is nowhere near its parts"))
         (is (< (abs (- pz qz)) 60.0) (str kind " pivot is nowhere near its parts"))))))
 
+(deftest smoke-sits-on-a-chimney
+  ;; The emitter positions are computed from the buildings array using offsets
+  ;; that have to match what `mass-parts` actually built. Nothing enforces
+  ;; that but this: change the chimney in the mass and the plume stays where
+  ;; the old one was, hanging in the air beside the factory, and every other
+  ;; test in this file still passes.
+  ;;
+  ;; So the check is geometric rather than numeric: every emitter must land on
+  ;; top of a *cylinder* belonging to the building it came from.
+  (let [[cx cz] (first (for [cx (range -60 60), cz (range -60 60)
+                             :when (= :industry (w/area-kind seed cx cz))]
+                         [cx cz]))
+        {:keys [building-parts smoke]} (w/chunk-data seed cx cz)
+        parts building-parts
+        n (/ (alen* smoke) w/smoke-stride)
+        cyl (double (part-index-of w/building-prims :cylinder))
+        np (/ (alen* parts) w/building-part-stride)]
+    (is (pos? n) "an industrial chunk with no chimneys in it")
+    (doseq [i (range n)
+            :let [o (* i w/smoke-stride)
+                  ex (double (aget* smoke o))
+                  ey (double (aget* smoke (+ o 1)))
+                  ez (double (aget* smoke (+ o 2)))]]
+      (is (pos? (double (aget* smoke (+ o 3)))) "a plume with no width")
+      (is (pos? (double (aget* smoke (+ o 4)))) "a plume that does not rise")
+      (is (pos? (double (aget* smoke (+ o 5)))) "a plume that never puffs")
+      ;; Somewhere in the chunk's parts there is a cylinder whose top is at
+      ;; this height and whose axis passes through this point.
+      (let [hit (some (fn [k]
+                        (let [q (* k w/building-part-stride)
+                              px (double (aget* parts q))
+                              py (double (aget* parts (+ q 1)))
+                              pz (double (aget* parts (+ q 2)))
+                              sy (double (aget* parts (+ q 5)))]
+                          (and (= cyl (double (aget* parts (+ q 7))))
+                               (< (abs (- px ex)) 1.5)
+                               (< (abs (- pz ez)) 1.5)
+                               ;; The mouth is the top of the cylinder, give or
+                               ;; take the metre the puffs start inside it.
+                               (< (abs (- (+ py (* 0.5 sy)) ey)) 1.5))))
+                      (range np))]
+        (is hit (str "emitter " i " at " [(long ex) (long ey) (long ez)]
+                     " is not on top of any chimney"))))))
+
 (deftest bridge-parts-are-well-formed
   (let [[cx cz] (bridge-chunk)
         a (w/chunk-bridges seed cx cz)

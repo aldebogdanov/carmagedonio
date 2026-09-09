@@ -50,6 +50,7 @@
 (defn- iget  [a i]   #?(:clj (aget ^ints a i)               :cljs (aget a i)))
 (defn- fget  [a i]   #?(:clj (aget ^floats a i)             :cljs (aget a i)))
 (defn- dlen  [a]     #?(:clj (alength ^doubles a)           :cljs (.-length a)))
+(defn- flen  [a]     #?(:clj (alength ^floats a)            :cljs (.-length a)))
 
 (defn- grid-floor
   "Lattice index containing `v`, rounding toward negative infinity so the
@@ -3714,6 +3715,62 @@
 (def ^:private track-colour-g 0.80)
 (def ^:private track-colour-b 0.58)
 
+(def smoke-stride 6)   ; x y z radius rise rate
+
+;; Where a chimney's mouth sits in its building's own frame, and what comes out
+;; of it, per zone. Only the two industrial masses that have a stack: the house
+;; and the townhouse have chimneys too, and a world where every roof in the
+;; suburbs is smoking is a world on fire rather than a working one.
+;;
+;; The offsets have to match `mass-parts`, which is the fragile part of this and
+;; the reason `smoke-sits-on-a-chimney` exists: a plume hanging in the air
+;; beside a factory is worse than no plume.
+(def ^:private chimneys
+  {;; (part (* hx 0.72) (+ h 6.0) (* hz 0.55) 1.5 14.0 1.5 ...)
+   :factory {:fx 0.72 :fz 0.55 :top 13.0 :r 1.6 :rise 16.0 :rate 0.30}
+   ;; (part (* hx -0.68) (+ h 13.0) (* hz 0.55) 1.7 28.0 1.7 ...)
+   :plant   {:fx -0.68 :fz 0.55 :top 27.0 :r 2.1 :rise 26.0 :rate 0.24}})
+
+(defn chunk-smoke
+  "The chimneys in a chunk, as [x y z radius rise rate] per emitter.
+
+  Its own array rather than more parts, because smoke is the one thing in the
+  world that is neither a volume nor a collider: it has no shape to instance
+  and nothing can hit it. The client turns each of these into a handful of
+  puffs; all the generator owes it is where the top of the chimney is.
+
+  Read back out of the buildings array rather than produced alongside it. That
+  array is the one record of where a building actually ended up -- position,
+  size, height and yaw, after the plot, the cover and the density have had
+  their say -- and computing the same thing twice is how a chimney ends up
+  three metres from its smoke."
+  [buildings]
+  (let [n (long (/ (flen buildings) building-stride))
+        out (transient [])]
+    (dotimes [i n]
+      (let [o (* i building-stride)
+            zone (nth building-zones (long (fget buildings (+ o 6))))
+            zname (:name zone)]
+        (when-let [{:keys [fx fz top r rise rate]} (chimneys zname)]
+          (let [bx (fget buildings (+ o 0))
+                by (fget buildings (+ o 1))
+                bz (fget buildings (+ o 2))
+                hx (fget buildings (+ o 3))
+                hz (fget buildings (+ o 4))
+                h  (fget buildings (+ o 5))
+                yaw (fget buildings (+ o 7))
+                lx (* hx fx) lz (* hz fz)
+                sy (js-sin yaw) cy (js-cos yaw)]
+            (doseq [v [(+ bx (* lx cy) (* lz sy))
+                       (+ by h top)
+                       (+ bz (- (* lx sy)) (* lz cy))
+                       r rise rate]]
+              (conj! out v))))))
+    (let [v (persistent! out)
+          a (farray (count v))]
+      (dotimes [i (count v)] (fput! a i (nth v i)))
+      a)))
+
 (defn chunk-data
   "Everything needed to build one chunk's mesh and collider.
 
@@ -3900,6 +3957,7 @@
      :flora flora
      :landmarks lm-parts
      :landmark-rotors lm-rotors
+     :smoke (chunk-smoke buildings)
      :pickups pickups
      :traffic traffic
      :biome (biome seed cx cz)})))

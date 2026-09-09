@@ -23,7 +23,7 @@
         cx   (unchecked-get d "cx")
         cz   (unchecked-get d "cz")
         {:keys [heights colors props buildings building-parts peds furniture
-                bridges flora landmarks landmark-rotors pickups traffic
+                bridges flora landmarks landmark-rotors smoke pickups traffic
                 verts size origin]}
         (worldgen/chunk-data seed cx cz)
         [x0 z0] origin]
@@ -33,14 +33,14 @@
                        :props props :buildings buildings :peds peds
                        :furniture furniture :parts building-parts
                        :bridges bridges :flora flora :landmarks landmarks
-                       :rotors landmark-rotors
+                       :rotors landmark-rotors :smoke smoke
                        :pickups pickups :traffic traffic}
                   #js [(.-buffer heights) (.-buffer colors)
                        (.-buffer props) (.-buffer buildings) (.-buffer peds)
                        (.-buffer furniture) (.-buffer building-parts)
                        (.-buffer bridges) (.-buffer flora)
                        (.-buffer landmarks) (.-buffer landmark-rotors)
-                       (.-buffer pickups)
+                       (.-buffer smoke) (.-buffer pickups)
                        (.-buffer traffic)])))
 
 (defn init! []

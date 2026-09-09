@@ -22,6 +22,7 @@
             [carmageddon.client.peds :as peds]
             [carmageddon.client.powerups :as powerups]
             [carmageddon.client.props :as props]
+            [carmageddon.client.smoke :as smoke]
             [carmageddon.client.traffic :as traffic]
             [carmageddon.client.remote :as remote]
             [carmageddon.client.render :as render]
@@ -192,8 +193,9 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges landmarks rvs cock fire-state
-                                  powerups-state weather-state remotes events]}]
+                                  bridges landmarks smoke-state rvs cock
+                                  fire-state powerups-state weather-state
+                                  remotes events]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -383,6 +385,7 @@
         ;; Sails, rotors and the big wheel. Frame-rate work by definition: it
         ;; is what the world looks like, not what it does.
         (parts/spin! landmarks (* 0.001 (js/Date.now)))
+        (smoke/update! smoke-state (* 0.001 (js/Date.now)))
         ;; Where the car is and how bent it is belong in the overlay too, so a
         ;; reload puts the player back rather than at the spawn. Debounced
         ;; inside `save!`; this only reads a transform.
@@ -494,6 +497,7 @@
         ;; colliders, same shadows. They get their own state only so the
         ;; overlay-backed barrier bookkeeping on bridges stays theirs.
         lm        (parts/create (:world @s) (:scene rs))
+        sk        (smoke/create (:scene rs))
         tf        (traffic/create (:world @s) (:scene rs) seed ov)
         bd        (birds/create (:scene rs))
         fr        (fire/create (:scene rs))
@@ -522,6 +526,7 @@
                                      (parts/add-chunk! fl key (:flora data))
                                      (parts/add-chunk! lm key (:landmarks data)
                                                        (:rotors data))
+                                     (smoke/add-chunk! sk key (:smoke data))
                                      (powerups/add-chunk! pu key (:pickups data))
                                      (traffic/add-chunk! tf key (:traffic data))
                                      (peds/add-chunk! pd key (:peds data)))
@@ -532,6 +537,7 @@
                                      (parts/remove-chunk! br key)
                                      (parts/remove-chunk! fl key)
                                      (parts/remove-chunk! lm key)
+                                     (smoke/remove-chunk! sk key)
                                      (powerups/remove-chunk! pu key)
                                      (traffic/remove-chunk! tf key)
                                      (peds/remove-chunk! pd key))})
@@ -699,6 +705,7 @@
                                                  :traffic-state tf
                                                  :bridges br
                                                  :landmarks lm
+                                                 :smoke-state sk
                                                  :cock ck
                                                  :fire-state fr
                                                  :powerups-state pu
@@ -711,7 +718,7 @@
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
-                                 :landmarks lm :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
+                                 :landmarks lm :smoke sk :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
                                  :overlay ov :minimap mm :cockpit ck :game gm
                                  :rivals rvs :remotes remotes :events ev
                                  :stop stop :detach detach}))
