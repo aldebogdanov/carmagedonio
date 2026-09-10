@@ -59,7 +59,10 @@
       }
       #map {
         position: fixed; right: 12px; bottom: 12px;
-        width: 186px; height: 186px;
+        /* Was 186. The map has a job on it now -- two markers, a route and
+           a bearing arrow -- and at 186 the whole itinerary was inside the
+           car's own blip. */
+        width: 268px; height: 268px;
         border-radius: 4px;
         box-shadow: 0 2px 10px rgba(0,0,0,.45);
         pointer-events: none; user-select: none;
@@ -82,9 +85,9 @@
       }
       body.touch #map {
         top: 8px; bottom: auto; right: 8px;
-        width: 108px; height: 108px;
+        width: 148px; height: 148px;
       }
-      body.touch #events { top: 8px; right: 124px; width: 150px; font-size: 11px; }
+      body.touch #events { top: 8px; right: 164px; width: 150px; font-size: 11px; }
 
       #touch-steer {
         position: absolute; left: 0; bottom: 0;
@@ -207,9 +210,9 @@
     <div id="rotate">turn the phone sideways</div>
     <div id="hud">loading physics&hellip;</div>
     <canvas id="cockpit"></canvas>
-    <div id="help">WASD drive &middot; S reverses from a stop &middot; space handbrake &middot; R right the car &middot; C camera &middot; B look back &middot; M rivals on map &middot; [ ] map zoom &middot; - = icon size &middot; K map key &middot; L lights </div>
+    <div id="help">WASD drive &middot; S reverses from a stop &middot; space handbrake &middot; R right the car &middot; C camera &middot; B look back &middot; M rivals on map &middot; [ ] map zoom &middot; - = icon size &middot; K map key &middot; J drop the job &middot; L lights </div>
     <div id="where"></div>
-    <canvas id="map" width="372" height="372"></canvas>
+    <canvas id="map" width="536" height="536"></canvas>
     <canvas id="legend" hidden></canvas>
     <!-- shared holds the code the page and the chunk worker both use -->
     <script src="/js/shared.js"></script>

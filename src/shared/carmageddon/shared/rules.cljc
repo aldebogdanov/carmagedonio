@@ -39,7 +39,36 @@
    :wreck  {:points 900 :seconds 18.0}
    :dent   {:points 25  :seconds 0.4}
    :coin   {:points 45  :seconds 0.25}
-   :nugget {:points 400 :seconds 3.0}})
+   :nugget {:points 400 :seconds 3.0}
+
+   ;; --- work -----------------------------------------------------------
+   ;;
+   ;; A job pays about what a rival is worth, which is the point of it: there
+   ;; are now two ways to make a living in this world and they pull in
+   ;; opposite directions. Hunting is close-quarters and ruinous to the
+   ;; bodywork; running a parcel across four kilometres is the opposite, and
+   ;; the fragile ones actively punish the driving the rest of the game
+   ;; rewards.
+   ;;
+   ;; The values are FIXED PER KIND and not scaled by distance, and that is a
+   ;; rule rather than a simplification. `verify` recomputes a submitted score
+   ;; from the tally, so anything whose payout only the client knows is
+   ;; anything the server has to take on trust. Effort is priced by *where the
+   ;; job generator puts the stops* -- each kind has its own distance band --
+   ;; not by arithmetic at the drop-off.
+   :delivery {:points 700  :seconds 20.0}
+   ;; Against the clock, and further. Worth the most per metre of any of them
+   ;; because it is the only one you can lose by being slow.
+   :express  {:points 1300 :seconds 32.0}
+   ;; Pays like an express and forbids the thing that makes the rest of the
+   ;; game fun. Half of what it is worth is the discipline.
+   :fragile  {:points 1100 :seconds 28.0}
+   ;; Three stops. Not three times a delivery -- the second and third legs are
+   ;; already loaded with the knowledge of where you are going.
+   :tour     {:points 1800 :seconds 46.0}
+   ;; Every third job in a row without a failure. A bonus for consistency, and
+   ;; fixed like everything else so it can be checked.
+   :streak   {:points 1500 :seconds 40.0}})
 
 ;; Doubled. Ninety seconds is about how long it takes to work out where you
 ;; are and pick a direction, which left nothing for the part of the game that
@@ -56,7 +85,9 @@
   that adding a category cannot be half-done: score, clock and verification all
   walk this."
   {:peds :ped :props :prop :cars :car :wrecks :wreck
-   :dents :dent :coins :coin :nuggets :nugget})
+   :dents :dent :coins :coin :nuggets :nugget
+   :deliveries :delivery :expresses :express :fragiles :fragile
+   :tours :tour :streaks :streak})
 
 (defn- earned [tally attr]
   (reduce + (for [[field entry] tally-fields]

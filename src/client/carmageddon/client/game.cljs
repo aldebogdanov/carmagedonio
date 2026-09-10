@@ -30,6 +30,11 @@
          :dents     0
          :coins     0
          :nuggets   0
+         :deliveries 0
+         :expresses  0
+         :fragiles   0
+         :tours      0
+         :streaks    0
          :state     :running
          ;; Why it ended, for the cluster to say. Not part of the submitted
          ;; run: the rules only know :won and :lost, and a wreck is a loss.
@@ -58,6 +63,25 @@
 (defn rival-dented! [game] (award! game :dent)   (swap! game update :dents inc))
 (defn coin-taken!   [game] (award! game :coin)   (swap! game update :coins inc))
 (defn nugget-taken! [game] (award! game :nugget) (swap! game update :nuggets inc))
+
+(def ^:private job-fields
+  "Which counter each job kind fills. Derived from the rules rather than
+  written out again, so a new kind of work cannot be added to the scoring table
+  and silently fail to be counted."
+  (into {} (for [[field entry] rules/tally-fields
+                 :when (contains? #{:delivery :express :fragile :tour :streak}
+                                  entry)]
+             [entry field])))
+
+(defn job-done!
+  "One completed job, by `rules/scoring` kind. The only way work reaches the
+  score, and it goes through `award!` like everything else -- so the clock, the
+  event log and the submitted tally cannot disagree about what a delivery was
+  worth."
+  [game kind]
+  (when-let [field (job-fields kind)]
+    (award! game kind)
+    (swap! game update field inc)))
 
 (defn room-clock!
   "What the room says is left, in seconds, and whether it has run out.
@@ -103,7 +127,7 @@
 
 (defn summary [game]
   (let [{:keys [remaining score peds props cars wrecks dents coins nuggets state
-                ending elapsed]} @game]
+                ending elapsed deliveries expresses fragiles tours streaks]} @game]
     {:state state
      :ending ending
      :remaining remaining
@@ -116,7 +140,9 @@
      :wrecks wrecks
      :dents dents
      :coins coins
-     :nuggets nuggets}))
+     :nuggets nuggets
+     :jobs (+ deliveries expresses fragiles tours)
+     :streaks streaks}))
 
 (defn result
   "The run as it will be submitted. Score is recomputed from the tally rather

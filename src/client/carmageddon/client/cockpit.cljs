@@ -158,7 +158,7 @@
   [{:keys [^js ctx flash]}
    {:keys [kmh top-kmh gear panels damage remaining score peds target
            rivals wheels drift? handbrake? lights? online car state ending
-           powerups weather grip recovery]}]
+           powerups weather grip recovery job]}]
   (when ctx
     (.clearRect ctx 0 0 w h)
     ;; The bezel.
@@ -250,6 +250,27 @@
       (when (> until (js/Date.now))
         (text! ctx text 74 148 (str "700 13px " mono) amber "center")))
 
+    ;; The job, along the bottom of the cluster. It is the only thing on the
+    ;; dashboard that is about somewhere else, so it gets the full width and
+    ;; the reading order of a docket: what it is, what is in it, where it goes.
+    (when job
+      (let [{:keys [label cargo to away deadline pickup?]} job
+            y (- h 8)]
+        (set! (.-fillStyle ctx) "rgba(14,16,20,0.86)")
+        (.beginPath ctx)
+        (.roundRect ctx 0 (- h 26) w 26 10)
+        (.fill ctx)
+        (text! ctx label 12 (- y 1) (str "700 12px " mono)
+               (if pickup? "#7fe0a0" "#f0c23a") "left")
+        (text! ctx (str "\u00b7 " cargo) (+ 12 (* 8.2 (count label)) 8) (- y 1)
+               (str "11px " mono) dim "left")
+        (text! ctx (str (if pickup? "pick up at " "drop at ") to
+                        "  " (js/Math.round away) " m"
+                        (when deadline
+                          (str "  \u00b7  " (js/Math.max 0 (js/Math.ceil deadline)) "s")))
+               (- w 12) (- y 1) (str "600 11px " mono)
+               (if (and deadline (< deadline 12.0)) bad ink) "right")))
+
     ;; The righting countdown, across the top of the cluster. It takes a strip
     ;; rather than a corner because it is the only thing on the dashboard that
     ;; is asking the player to do something -- namely, brace -- and a number
@@ -296,7 +317,7 @@
   to draw a dashboard and deliberately nothing about where a simulation keeps
   its wheels."
   [{:keys [speed top-speed panels damage game rivals wheels slip handbrake?
-           lights? online car powerups weather grip recovery]}]
+           lights? online car powerups weather grip recovery job]}]
   (let [{:keys [remaining score peds state ending]} game]
     {:kmh       (js/Math.abs (* 3.6 speed))
      :top-kmh   (* 3.6 top-speed)
@@ -320,5 +341,6 @@
      :grip      grip
      :car       car
      :recovery  recovery
+     :job       job
      :state     state
      :ending    ending}))

@@ -701,6 +701,96 @@
       (.arc ctx sx sz 6.6 0 6.2832)
       (.stroke ctx))))
 
+(def ^:private job-colour  "#f0c23a")   ; where you are going
+(def ^:private pick-colour "#7fe0a0")   ; where you are going first
+
+(defn- draw-job!
+  "The itinerary: the stops, the leg you are on, and -- when the stop is off
+  the edge of the map -- an arrow at the rim pointing at it with the distance
+  written under it.
+
+  The arrow is the part that matters. A marker only helps once the place is
+  already on the map, and a job is usually a kilometre away when it is given to
+  you, so for most of the drive the only thing telling you which way to go is
+  the edge of the map."
+  [{:keys [^js ctx]} px pz per-m size job]
+  (when job
+    (let [{:keys [stops at]} job
+          half (* 0.5 (/ size per-m))
+          x0 (- px half) z0 (- pz half)
+          sx (fn [x] (* (- x x0) per-m))
+          sz (fn [z] (* (- z z0) per-m))
+          c  (* 0.5 size)
+          tgt (nth stops at)
+          on? (fn [x z] (and (<= 8 (sx x) (- size 8)) (<= 8 (sz z) (- size 8))))]
+      ;; The legs still to drive, as a dashed line from the car.
+      (.save ctx)
+      (set! (.-strokeStyle ctx) "rgba(240,194,58,0.55)")
+      (set! (.-lineWidth ctx) 2)
+      (.setLineDash ctx #js [5 5])
+      (.beginPath ctx)
+      (.moveTo ctx c c)
+      (doseq [s (drop at stops)] (.lineTo ctx (sx (:x s)) (sz (:z s))))
+      (.stroke ctx)
+      (.restore ctx)
+
+      ;; Every stop still to come, the next one filled and the rest hollow.
+      (doseq [[i s] (map-indexed vector stops)
+              :when (>= i at)
+              :let [next? (= i at)
+                    col (if (and next? (zero? at)) pick-colour job-colour)
+                    r (if next? 8.0 5.5)]]
+        (when (on? (:x s) (:z s))
+          (.save ctx)
+          (.translate ctx (sx (:x s)) (sz (:z s)))
+          (set! (.-lineWidth ctx) 2)
+          (set! (.-strokeStyle ctx) "rgba(0,0,0,0.85)")
+          (set! (.-fillStyle ctx) col)
+          (.beginPath ctx)
+          (.arc ctx 0 0 r 0 (* 2 js/Math.PI))
+          (if next? (.fill ctx) (.stroke ctx))
+          (when next?
+            (.stroke ctx)
+            ;; A ring outside it, so the stop you want reads differently from
+            ;; a landmark badge of about the same size.
+            (set! (.-strokeStyle ctx) col)
+            (set! (.-lineWidth ctx) 1.5)
+            (.beginPath ctx)
+            (.arc ctx 0 0 (+ r 4.5) 0 (* 2 js/Math.PI))
+            (.stroke ctx))
+          (.restore ctx)))
+
+      ;; And the rim arrow, for while the stop is still off the map.
+      (when-not (on? (:x tgt) (:z tgt))
+        (let [dx (- (:x tgt) px) dz (- (:z tgt) pz)
+              a (heading-of dx dz)
+              rim (- (* 0.5 size) 26)
+              ax (+ c (* rim (js/Math.sin a)))
+              ay (- c (* rim (js/Math.cos a)))
+              away (js/Math.hypot dx dz)]
+          (.save ctx)
+          (.translate ctx ax ay)
+          (.rotate ctx a)
+          (set! (.-fillStyle ctx) (if (zero? at) pick-colour job-colour))
+          (set! (.-strokeStyle ctx) "rgba(0,0,0,0.85)")
+          (set! (.-lineWidth ctx) 1.5)
+          (.beginPath ctx)
+          (.moveTo ctx 0 -11)
+          (.lineTo ctx 8 7)
+          (.lineTo ctx 0 3)
+          (.lineTo ctx -8 7)
+          (.closePath ctx)
+          (.fill ctx)
+          (.stroke ctx)
+          (.restore ctx)
+          (set! (.-textAlign ctx) "center")
+          (set! (.-font ctx) "700 11px ui-monospace, Menlo, monospace")
+          (set! (.-fillStyle ctx) "rgba(0,0,0,0.8)")
+          (.fillText ctx (str (js/Math.round (/ away 100.0)) "00 m") ax (+ ay 21))
+          (set! (.-fillStyle ctx) (if (zero? at) pick-colour job-colour))
+          (.fillText ctx (str (js/Math.round (/ away 100.0)) "00 m") ax (+ ay 20))
+          (set! (.-textAlign ctx) "left"))))))
+
 (defn draw!
   "Redraw the map. `heading` is the car's yaw, in the same convention
   `camera/heading` uses. `blips` is where the rivals are, `players` where the
@@ -708,9 +798,11 @@
 
   Called at HUD rate, not per frame -- a map that updates twice a second is
   indistinguishable from one that updates sixty times."
-  ([ms x z heading] (draw! ms x z heading nil nil))
-  ([ms x z heading blips] (draw! ms x z heading blips nil))
-  ([{:keys [^js canvas ^js ctx ^js label at show-rivals] :as ms} x z heading blips players]
+  ([ms x z heading] (draw! ms x z heading nil nil nil))
+  ([ms x z heading blips] (draw! ms x z heading blips nil nil))
+  ([ms x z heading blips players] (draw! ms x z heading blips players nil))
+  ([{:keys [^js canvas ^js ctx ^js label at show-rivals] :as ms}
+    x z heading blips players job]
   (when canvas
     (let [size (.-width canvas)
           span (span-of ms)
@@ -720,6 +812,9 @@
         (draw-plan! ms x z per-m size)
         (draw-roads! ms x z per-m size))
       (draw-landmarks! ms x z per-m size)
+      ;; After the landmarks and before the cars: the route belongs on top of
+      ;; the world and under the things moving through it.
+      (draw-job! ms x z per-m size job)
       (when (and @show-rivals (seq blips))
         (draw-rivals! ms x z per-m size blips))
       (when (seq players)
@@ -738,11 +833,24 @@
                          (str (js/Math.round across) " m"))
                    6 (- size 6)))
       (let [near (first (landmarks-near ms x z (* 0.75 (/ size per-m))))
+            tgt  (when job (nth (:stops job) (:at job)))
             nm   (str (area-here ms x z)
-                      (when near
-                        (str "  \u00b7  " (worldgen/landmark-labels (:kind near))
-                             " " (js/Math.round (:away near)) " m "
-                             (bearing-to (- (:x near) x) (- (:z near) z)))))]
+                      ;; The job displaces the nearest landmark in the label.
+                      ;; Both are "somewhere near you worth naming", and the
+                      ;; one you have been told to drive to wins.
+                      (cond
+                        tgt (str "  \u00b7  "
+                                 (if (zero? (:at job)) "pick up at " "drop at ")
+                                 (:label tgt) " "
+                                 (js/Math.round (js/Math.hypot (- (:x tgt) x)
+                                                               (- (:z tgt) z)))
+                                 " m "
+                                 (bearing-to (- (:x tgt) x) (- (:z tgt) z)))
+                        near (str "  \u00b7  "
+                                  (worldgen/landmark-labels (:kind near))
+                                  " " (js/Math.round (:away near)) " m "
+                                  (bearing-to (- (:x near) x) (- (:z near) z)))
+                        :else ""))]
         (when (and label (not= nm @at))
           (vreset! at nm)
           (set! (.-textContent label) nm)))))))

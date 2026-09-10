@@ -30,7 +30,12 @@
    :wreck  "RIVAL WRECKED"
    :dent   "rival damaged"
    :coin   "coin"
-   :nugget "gold"})
+   :nugget "gold"
+   :delivery "DELIVERED"
+   :express  "EXPRESS DELIVERED"
+   :fragile  "DELIVERED INTACT"
+   :tour     "ROUND FINISHED"
+   :streak   "THREE IN A ROW"})
 
 (defn create!
   "Make the log element and attach it. Returns the state."
@@ -63,22 +68,61 @@
                                    (conj ls {:kind kind :n 1 :points points
                                              :seconds seconds :at now}))))))))))
 
+(def ^:private job-words
+  {:offered   "job: "
+   :picked-up "picked up "
+   :dropped   "dropped one, "
+   :failed    "job lost: "})
+
+(def ^:private why-words
+  {:late "ran out of time" :broken "cargo broken"
+   :abandoned "walked away from it"})
+
+(defn job!
+  "A notice about work that is not itself worth points -- being given a job,
+  collecting the cargo, losing it. The payout goes through `note!` like
+  everything else; this is the running commentary around it, and it carries its
+  own words because there is no scoring entry to look them up from."
+  [es what job]
+  (when (and es (job-words what))
+    (let [text (case what
+                 ;; Both ends, in the order they happen. The first version
+                 ;; named the *pickup* after the word "to", which reads as the
+                 ;; destination and is the one thing the line has to get right.
+                 :offered (str (job-words what) (:cargo job) ", "
+                               (:label (first (:stops job)))
+                               " \u2192 " (:label (last (:stops job))))
+                 :picked-up (str (job-words what) (:cargo job))
+                 :dropped (str (job-words what)
+                               (- (count (:stops job)) (:at job)) " to go")
+                 :failed (str (job-words what) (get why-words (:why job) "gone")))]
+      (swap! es update :lines
+             (fn [lines]
+               (vec (take-last max-lines
+                               (conj (fresh lines (js/Date.now))
+                                     {:kind what :n 1 :text text
+                                      :points 0 :seconds 0
+                                      :at (js/Date.now)}))))))))
+
 (defn- line-el
   "One entry, built out of nodes rather than a string of markup. Everything in
   here is ours and none of it is user text, but building HTML by hand is a
   habit worth not having."
-  [{:keys [kind n points seconds]} faded?]
+  [{:keys [kind n points seconds text]} faded?]
   (let [row (js/document.createElement "div")
         what (js/document.createElement "span")
         pts (js/document.createElement "span")]
     (set! (.-className row) (str "ev" (when faded? " fade")))
     (set! (.-className what) "what")
     (set! (.-textContent what)
-          (str (get labels kind (name kind)) (when (> n 1) (str " ×" n))))
+          (or text
+              (str (get labels kind (name kind)) (when (> n 1) (str " ×" n)))))
     (set! (.-className pts) "pts")
     (set! (.-textContent pts)
-          (str "+" points (when (pos? seconds)
-                            (str "  +" (.toFixed seconds 1) "s"))))
+          (if (pos? points)
+            (str "+" points (when (pos? seconds)
+                              (str "  +" (.toFixed seconds 1) "s")))
+            ""))
     (.appendChild row what)
     (.appendChild row pts)
     row))

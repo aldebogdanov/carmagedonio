@@ -22,6 +22,7 @@
             [carmageddon.client.peds :as peds]
             [carmageddon.client.powerups :as powerups]
             [carmageddon.client.props :as props]
+            [carmageddon.client.jobs :as jobs]
             [carmageddon.client.smoke :as smoke]
             [carmageddon.client.traffic :as traffic]
             [carmageddon.client.remote :as remote]
@@ -193,8 +194,8 @@
 (defn- start-frame-loop! [{:keys [sim rs transport canvas chunk-mgr props-state
                                   buildings-state furniture-state traffic-state
                                   birds-state peds-state overlay minimap game
-                                  bridges landmarks smoke-state rvs cock
-                                  fire-state powerups-state weather-state
+                                  bridges landmarks smoke-state jobs-state rvs
+                                  cock fire-state powerups-state weather-state
                                   remotes events]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
@@ -223,6 +224,14 @@
               (sim/blast! sim [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
                           blast push))
             (game/wrecked! game))
+          ;; Work. Ticked on the fixed step like the clock it pays into, and
+          ;; scored through `game/job-done!` so a delivery reaches the score by
+          ;; the same funnel a pedestrian does.
+          (when (game/running? game)
+            (doseq [kind (jobs/tick! jobs-state k/dt
+                                     (sim/player-x sim) (sim/player-z sim)
+                                     (vehicle/damage (sim/player-vehicle sim)))]
+              (game/job-done! game kind)))
           ;; Upside down in a ditch used to be the end of a run in every sense
           ;; that mattered: the car could not move and the only key that freed
           ;; it put you back at the spawn. It rights itself now, where it lies,
@@ -432,6 +441,16 @@
              :weather    (weather/label weather-state)
              :grip       (weather/grip-scale weather-state)
              :recovery   (when (pos? @stranded) (- stranded-secs @stranded))
+             :job        (when-let [j (jobs/current jobs-state)]
+                           (let [t (jobs/target jobs-state)]
+                             {:label (:label (jobs/kinds (:kind j)))
+                              :cargo (:cargo j)
+                              :to (:label t)
+                              :pickup? (:pickup? t)
+                              :deadline (:deadline j)
+                              :away (js/Math.hypot
+                                     (- (:x t) (sim/player-x sim))
+                                     (- (:z t) (sim/player-z sim)))}))
              :car        (cars/display-name kind)})))
         (render/draw! rs sim alpha dt (gloom-now weather-state)
                       (set (keys (powerups/active powerups-state)))))
@@ -450,7 +469,8 @@
                          (minimap/heading-of fx fz)
                          (when (minimap/rivals-shown? minimap)
                            (rivals/blips rvs sim))
-                         (remote/blips remotes)))
+                         (remote/blips remotes)
+                         (jobs/current jobs-state)))
         ;; Everything the cluster does not show. This is diagnostics -- counts,
         ;; frame rate, how much of the world is loaded -- and it is deliberately
         ;; small, dim and out of the way, because it used to sit in the same
@@ -512,6 +532,9 @@
         ev        (events/create!)
         gm        (game/create (fn [kind points seconds]
                                 (events/note! ev kind points seconds)))
+        jb        (jobs/create seed
+                              (fn [what job]
+                                (events/job! ev what job)))
         rvs       (rivals/create seed opponent-count)
         mgr       (chunks/create
                    {:seed      seed
@@ -557,9 +580,11 @@
         detach    (let [d-input (input/attach!)
                         d-cam   (camera/attach! (:camera-state rs) canvas)
                         d-map   (minimap/attach! mm)
+                        d-jobs  (jobs/attach! jb)
                         ;; nil on a device that does not want them.
                         d-touch (touch/attach!)]
-                    (fn [] (d-input) (d-cam) (d-map) (when d-touch (d-touch))))
+                    (fn [] (d-input) (d-cam) (d-map) (d-jobs)
+                      (when d-touch (d-touch))))
         [sx _ sz] (:spawn @s)]
            ;; The one place physics impacts become gameplay.
            ;;
@@ -706,6 +731,7 @@
                                                  :bridges br
                                                  :landmarks lm
                                                  :smoke-state sk
+                                                 :jobs-state jb
                                                  :cock ck
                                                  :fire-state fr
                                                  :powerups-state pu
@@ -718,7 +744,7 @@
                                                  :remotes remotes})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
-                                 :landmarks lm :smoke sk :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
+                                 :landmarks lm :smoke sk :jobs jb :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
                                  :overlay ov :minimap mm :cockpit ck :game gm
                                  :rivals rvs :remotes remotes :events ev
                                  :stop stop :detach detach}))
