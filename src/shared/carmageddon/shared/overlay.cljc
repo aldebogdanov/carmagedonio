@@ -37,6 +37,9 @@
     :seed seed
     :mode mode
     :chunks {}
+    ;; When each chunk last lost something of each kind -- {key {kind ms}} --
+    ;; which is what lets the world heal. See `heal`.
+    :stamps {}
     :vehicle nil
     :tally {}
     :visited #{}}))
@@ -53,14 +56,69 @@
   (contains? (destroyed ov key kind) idx))
 
 (defn record
-  "Note that index `idx` of `kind` in chunk `key` is gone.
+  "Note that index `idx` of `kind` in chunk `key` is gone, at wall-clock time
+  `now` in ms if it is given.
 
   Recorded whether or not that chunk is loaded. A delta that arrived from
   another player refers to a chunk this client may not have reached yet, and it
   has to still be true when it does."
-  [ov key kind idx]
-  {:pre [(kinds kind)]}
-  (update-in ov [:chunks key kind] (fnil conj #{}) idx))
+  ([ov key kind idx]
+   {:pre [(kinds kind)]}
+   (update-in ov [:chunks key kind] (fnil conj #{}) idx))
+  ([ov key kind idx now]
+   (-> (record ov key kind idx)
+       (assoc-in [:stamps key kind] now))))
+
+;; --- healing ----------------------------------------------------------------
+;;
+;; Destruction used to be forever, and that was a mistake that took a while to
+;; show. The overlay is saved per world, and a world is played run after run
+;; from the same spawn -- so every person ever run over near the start stayed
+;; dead in every run after it. A few dozen runs in, the streets round the
+;; spawn were empty, and the crowd looked thinner every week for a reason no
+;; amount of reading the generator would find: the generator was producing the
+;; same five hundred people it always had, and the save was killing them on
+;; arrival.
+;;
+;; So a chunk forgets, but only some time after it last lost something, and
+;; only when it is loaded again -- never in front of you. Within a run a
+;; street you emptied stays empty, which is what made the record worth
+;; keeping; come back after a while and somebody else has moved in.
+
+(def memory-ms
+  "How long a chunk remembers losing each kind of thing, counted from the last
+  loss of that kind in it. People and traffic move on quickest; a smashed
+  fence takes longer to be put back."
+  {:peds    (* 6 60 1000)
+   :cars    (* 6 60 1000)
+   :pickups (* 15 60 1000)
+   :props   (* 20 60 1000)
+   :parts   (* 20 60 1000)})
+
+(defn heal
+  "Forget whatever chunk `key` lost long enough before `now` (ms).
+
+  A kind with no stamp at all is forgotten at once: that is a save from before
+  stamps existed, and it is exactly the save that has been emptying the
+  streets."
+  [ov key now]
+  (if-let [c (get-in ov [:chunks key])]
+    (let [stamps (get-in ov [:stamps key] {})
+          stale  (for [kind (keys c)
+                       :let [at (get stamps kind)]
+                       :when (or (nil? at)
+                                 (> (- now at) (get memory-ms kind 0)))]
+                   kind)]
+      (if (empty? stale)
+        ov
+        (let [c'      (apply dissoc c stale)
+              stamps' (apply dissoc stamps stale)]
+          (cond-> ov
+            true (assoc-in [:chunks key] c')
+            (empty? c') (update :chunks dissoc key)
+            true (assoc-in [:stamps key] stamps')
+            (empty? stamps') (update :stamps dissoc key)))))
+    ov))
 
 (defn count-destroyed [ov kind]
   (reduce + (map (fn [[_ c]] (count (get c kind))) (:chunks ov))))
@@ -85,17 +143,25 @@
   Worth doing before saving: a chunk is added to the map the moment anything
   asks about it, and most chunks a player drives through never lose anything."
   [ov]
-  (update ov :chunks
-          (fn [cs]
-            (into {} (for [[k c] cs
-                           :let [c' (into {} (remove (fn [[_ v]] (empty? v)) c))]
-                           :when (seq c')]
-                       [k c'])))))
+  (let [ov (update ov :chunks
+                   (fn [cs]
+                     (into {} (for [[k c] cs
+                                    :let [c' (into {} (remove (fn [[_ v]] (empty? v)) c))]
+                                    :when (seq c')]
+                                [k c']))))]
+    ;; A stamp for something no longer recorded is a stamp for nothing.
+    (update ov :stamps
+            (fn [ss]
+              (into {} (for [[k s] ss
+                             :let [s' (select-keys s (keys (get-in ov [:chunks k])))]
+                             :when (seq s')]
+                         [k s']))))))
 
 (defn merge-overlays
-  "Combine two overlays for the same world. Destruction is a union -- it only
-  ever accumulates, and nothing can be un-smashed -- while the vehicle and the
-  tally are single-valued and the later one wins.
+  "Combine two overlays for the same world. Destruction is a union -- merging
+  never un-smashes anything, which is `heal`'s job and only `heal`'s -- and of
+  two stamps the later wins, while the vehicle and the tally are single-valued
+  and the later one wins.
 
   This is what a server does when a client reconnects with local progress, and
   what a client does when a session's history arrives."
@@ -106,6 +172,8 @@
   (-> a
       (assoc :chunks (merge-with (fn [ca cb] (merge-with into ca cb))
                                  (:chunks a) (:chunks b)))
+      (assoc :stamps (merge-with (fn [sa sb] (merge-with max sa sb))
+                                 (:stamps a {}) (:stamps b {})))
       (assoc :visited (into (:visited a #{}) (:visited b #{})))
       (assoc :vehicle (or (:vehicle b) (:vehicle a)))
       (assoc :tally (or (:tally b) (:tally a)))
@@ -137,10 +205,16 @@
       (when (valid? ov)
         ;; Sets survive EDN, but a hand-edited or hand-built file may carry
         ;; vectors; normalise so `contains?` means what callers expect.
-        (update ov :chunks
-                (fn [cs]
-                  (into {} (for [[k c] cs]
-                             [(vec k) (into {} (for [[kind v] c] [kind (set v)]))]))))))
+        (-> ov
+            (update :chunks
+                    (fn [cs]
+                      (into {} (for [[k c] cs]
+                                 [(vec k) (into {} (for [[kind v] c] [kind (set v)]))]))))
+            ;; Absent from every save written before the world could heal, and
+            ;; an absent stamp is what tells `heal` to forget at once.
+            (update :stamps
+                    (fn [ss]
+                      (into {} (for [[k s] ss :when (map? s)] [(vec k) s])))))))
     (catch #?(:clj Exception :cljs :default) _ nil)))
 
 (defn stats [ov]

@@ -542,6 +542,9 @@
                     :on-add    (fn [data] (render/add-chunk! rs data))
                     :on-remove (fn [mesh] (render/remove-chunk! rs mesh))
                     :on-physics-add    (fn [key data]
+                                     ;; First: everything below reads the
+                                     ;; overlay to decide what is still there.
+                                     (overlay/heal! ov key)
                                      (props/add-chunk! ps key (:props data))
                                      (buildings/add-chunk! bs key (:buildings data) (:building-parts data))
                                      (furniture/add-chunk! fu key (:furniture data))

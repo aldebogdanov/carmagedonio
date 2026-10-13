@@ -62,7 +62,17 @@
   (reset! state (assoc (ov/empty-overlay seed (:mode @state)) ::last-save 0.0)))
 
 (defn destroyed [state key kind] (ov/destroyed @state key kind))
-(defn record! [state key kind idx] (swap! state ov/record key kind idx))
+
+(defn record! [state key kind idx]
+  (swap! state ov/record key kind idx (js/Date.now)))
+
+(defn heal!
+  "Let chunk `key` forget what it lost a long time ago. Called as the chunk
+  comes into reach and before anything in it spawns, so whatever has healed is
+  standing there when you arrive rather than appearing in front of you."
+  [state key]
+  (swap! state ov/heal key (js/Date.now)))
+
 (defn visit! [state key] (swap! state ov/visit key))
 (defn set-vehicle! [state v] (swap! state ov/set-vehicle v))
 (defn set-tally! [state tally] (swap! state ov/set-tally tally))

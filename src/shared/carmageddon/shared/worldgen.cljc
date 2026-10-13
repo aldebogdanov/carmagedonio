@@ -3122,18 +3122,20 @@
   busier than an industrial estate, and the whole point of the crowd is that it
   is thicker where the streets are.
 
-  The three city tiers came down when groups arrived. The total on a downtown
-  pavement is about what it was; what changed is how it is arranged, and a
-  crowd that stands in groups reads as busier than the same number of people
-  spaced evenly along a kerb."
+  The three city tiers came down when groups arrived, on the theory that the
+  total on a pavement was what counted and groups made up the difference. They
+  are back where they were, because it is not what counts. A group stands back
+  from the kerb and barely moves; the people who are *in the way* -- walking
+  along the gutter, stepping off it -- are these, and taking a third of them
+  away is what a driver noticed, whatever the headcount said."
   [seed cx cz]
   (let [x (* (+ cx 0.5) k/chunk-size)
         z (* (+ cz 0.5) k/chunk-size)
         u (urbanness seed x z)]
     (cond
-      (> u 0.82) 24
-      (> u 0.58) 19
-      (> u 0.34) 13
+      (> u 0.82) 34
+      (> u 0.58) 26
+      (> u 0.34) 16
       (> u 0.16) 9
       (> u 0.05) 4
       :else 2)))
@@ -3176,6 +3178,18 @@
       (> u 0.58) (cond (< p 0.24) :suit (< p 0.58) :shopper :else :drinker)
       (> u 0.30) (if (< p 0.55) :shopper :drinker)
       :else nil)))
+
+(def ^:private landmark-groups 3)
+
+(def ^:private landmark-crowds
+  "Who stands about outside a landmark, for the landmarks anybody stands about
+  outside. Mourners are in dark suits because that is what the suits are."
+  {:stadium :fan :speedway :fan
+   :mall :shopper :bazaar :shopper :museum :shopper
+   :plaza :suit :airport :suit :station :suit :cemetery :suit :church :suit
+   :cantina :drinker :funfair :drinker :drive-in :drinker
+   :school :person :park :person :statue :person :pagoda :person
+   :izbas :person})
 
 (defn- grazer-for
   "What, if anything, is grazing at a point. Livestock follow the crop, deer the
@@ -3428,6 +3442,33 @@
                 speed (prng/next-range! r 0.15 0.55)]
             (when (and kind (< (second (surface seed field ox oz)) 0.4))
               (emit ox oz head speed kind))))))
+    ;; And whoever a landmark draws, standing round it. Last, so nothing above
+    ;; moves: every earlier draw from this stream is exactly where it was.
+    ;;
+    ;; The groups along the streets already pick their kind off the landmark
+    ;; when they happen to fall near one -- but only when they happen to, and
+    ;; with three to a chunk that was a coin toss. A stadium on match day with
+    ;; nobody outside it is not a landmark, it is a building.
+    (let [[dx dz] (district-of cx cz)]
+      (doseq [ddx [-1 0 1], ddz [-1 0 1]
+              :let [lm (landmark seed (+ dx ddx) (+ dz ddz))]
+              :when lm
+              :let [kind (landmark-crowds (:kind lm))
+                    [ox oz] (chunk-of (:x lm) (:z lm))]
+              :when (and kind (= ox cx) (= oz cz))]
+        (let [{:keys [x z half-x half-z]} lm]
+          (dotimes [_ landmark-groups]
+            (let [a    (prng/next-range! r 0.0 tau)
+                  ;; Outside the plinth, on whatever apron the landmark has.
+                  gx   (+ x (* (+ (* 1.2 half-x) 4.0) (js-sin a)))
+                  gz   (+ z (* (+ (* 1.2 half-z) 4.0) (js-cos a)))
+                  size (+ group-min 1 (prng/next-int! r (inc (- group-max group-min))))]
+              (dotimes [_ size]
+                (let [px (+ gx (prng/next-range! r -2.4 2.4))
+                      pz (+ gz (prng/next-range! r -2.4 2.4))
+                      speed (prng/next-range! r 0.20 0.55)]
+                  (when (< (second (surface seed field px pz)) 0.4)
+                    (emit px pz (js-atan2 (- gz pz) (- gx px)) speed kind)))))))))
     (let [v (persistent! out)
           a (farray (count v))]
       (dotimes [i (count v)] (fput! a i (nth v i)))

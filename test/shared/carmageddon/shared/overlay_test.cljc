@@ -1,8 +1,9 @@
 (ns carmageddon.shared.overlay-test
   "The overlay is the only thing about a world that is not recomputable, so it
-  is the only thing whose loss cannot be undone. These check the three
-  properties that matter: it accumulates, it survives a round trip, and merging
-  two of them never loses anything."
+  is the only thing whose loss cannot be undone. These check the properties
+  that matter: it accumulates, it survives a round trip, merging two of them
+  never loses anything -- and, since the world learned to heal, that it
+  forgets on schedule and not before."
   (:require [clojure.test :refer [deftest is testing]]
             [carmageddon.shared.overlay :as ov]))
 
@@ -103,3 +104,74 @@
                     (ov/count-destroyed o :peds)
                     (ov/count-destroyed o :cars))))
       (is (< bytes 12000) (str "overlay was " bytes " bytes")))))
+
+;; --- healing ----------------------------------------------------------------
+
+(def ^:private minute (* 60 1000))
+
+(deftest a-chunk-forgets-once-its-memory-runs-out
+  (let [mem (ov/memory-ms :peds)
+        o   (-> (ov/empty-overlay seed)
+                (ov/record [0 0] :peds 4 1000)
+                (ov/record [0 0] :props 2 1000))]
+    (testing "not a moment before"
+      (is (= #{4} (ov/destroyed (ov/heal o [0 0] (+ 1000 mem)) [0 0] :peds))))
+    (let [h (ov/heal o [0 0] (+ 1001 mem))]
+      (is (= #{} (ov/destroyed h [0 0] :peds)) "the crowd is back")
+      (is (= #{2} (ov/destroyed h [0 0] :props))
+          "a fence takes longer to mend than a street takes to refill")
+      (is (nil? (get-in h [:stamps [0 0] :peds])) "and the stamp goes with it"))
+    (testing "healing one chunk leaves the rest alone"
+      (let [o2 (ov/record o [3 3] :peds 1 1000)
+            h  (ov/heal o2 [0 0] (+ 1001 mem))]
+        (is (= #{1} (ov/destroyed h [3 3] :peds)))))))
+
+(deftest every-loss-restarts-the-clock
+  (let [mem (ov/memory-ms :peds)
+        o   (-> (ov/empty-overlay seed)
+                (ov/record [0 0] :peds 4 0)
+                (ov/record [0 0] :peds 5 (* 4 minute)))]
+    (is (= #{4 5} (ov/destroyed (ov/heal o [0 0] (+ mem 1)) [0 0] :peds))
+        "a street still being emptied is not one to refill")))
+
+(deftest a-save-from-before-the-world-healed-heals-at-once
+  (testing "this is the save that was emptying the streets: kills with no
+            stamp, from before there were stamps"
+    (let [old (-> (ov/empty-overlay seed)
+                  (ov/record [0 0] :peds 4)
+                  (dissoc :stamps))
+          back (ov/read-edn (ov/->edn old))]
+      (is (= #{4} (ov/destroyed back [0 0] :peds)))
+      (is (= #{} (ov/destroyed (ov/heal back [0 0] 0) [0 0] :peds)))
+      (is (empty? (:chunks (ov/heal back [0 0] 0)))))))
+
+(deftest stamps-survive-a-save-and-a-merge
+  (let [a (ov/record (ov/empty-overlay seed) [-2 7] :peds 1 5000)
+        b (ov/record (ov/empty-overlay seed) [-2 7] :peds 2 9000)
+        back (ov/read-edn (ov/->edn a))]
+    (is (= 5000 (get-in back [:stamps [-2 7] :peds])))
+    (is (= 9000 (get-in (ov/merge-overlays a b) [:stamps [-2 7] :peds]))
+        "the later loss is the one the clock counts from")
+    (is (= 9000 (get-in (ov/merge-overlays b a) [:stamps [-2 7] :peds])))
+    (is (= 9000 (get-in (ov/merge-overlays back b) [:stamps [-2 7] :peds])))))
+
+(deftest a-stamp-for-nothing-is-not-saved
+  (let [o (-> (ov/empty-overlay seed)
+              (ov/record [1 1] :peds 1 100)
+              (assoc-in [:chunks [1 1] :peds] #{}))]
+    (is (empty? (:stamps (ov/prune o))))))
+
+(deftest a-stamped-run-still-stays-small
+  ;; A stamp is one per chunk per kind, not one per thing, so it costs about
+  ;; what the chunk key does. These five hundred land in 350 chunk-kinds, far
+  ;; more spread out than a real run, and still come to a couple of dozen
+  ;; kilobytes against the five megabytes a browser will store.
+  (let [o (reduce (fn [acc i]
+                    (ov/record acc [(mod i 50) (- (mod i 7) 3)]
+                               (nth [:props :peds :cars] (mod i 3))
+                               (quot i 3)
+                               (+ 1791935082557 i)))
+                  (ov/empty-overlay seed)
+                  (range 500))
+        bytes (:bytes (ov/stats o))]
+    (is (< bytes 32000) (str "overlay was " bytes " bytes"))))

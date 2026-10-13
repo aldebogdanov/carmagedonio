@@ -1498,6 +1498,19 @@
           (is (pos? (+ (* dx (- ox nx)) (* dz (- oz nz))))
               "the unit direction faces the far node"))))))
 
+(deftest downtown-has-people-in-the-way
+  (testing "groups stand back from the kerb; the people a driver actually
+            meets are the lone ones along it, and when groups arrived those
+            were cut by a third. The headcount barely moved. What anybody
+            driving through saw was a city that had emptied."
+    (let [[cx cz] (densest-chunk (fn [u _] (> u 0.82)))
+          a (w/chunk-peds seed cx cz (w/road-field seed cx cz))
+          n (/ (alen* a) w/ped-stride)
+          kerbside (count (for [i (range n)
+                                :when (zero? (int (aget* a (+ (* i w/ped-stride) 5))))]
+                            i))]
+      (is (>= kerbside 30) (str kerbside " people along downtown kerbs")))))
+
 (deftest people-walk-along-the-street-they-stand-on
   (testing "a crowd on arbitrary bearings reads as a scattering; walking the
             pavement is most of what makes it a crowd"
