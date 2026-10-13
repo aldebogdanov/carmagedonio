@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
     <title>carmagedonio</title>
     <style>
+      /* The map's edge, named once: the place label sits on top of it and has
+         to know where that is. */
+      :root { --map: 268px; }
+      body.touch { --map: 148px; }
       html, body { margin: 0; height: 100%; overflow: hidden; background: #8fb7d9; }
       #game { display: block; width: 100vw; height: 100vh; }
       #hud, #help {
@@ -62,7 +66,7 @@
         /* Was 186. The map has a job on it now -- two markers, a route and
            a bearing arrow -- and at 186 the whole itinerary was inside the
            car's own blip. */
-        width: 268px; height: 268px;
+        width: var(--map); height: var(--map);
         border-radius: 4px;
         box-shadow: 0 2px 10px rgba(0,0,0,.45);
         pointer-events: none; user-select: none;
@@ -83,9 +87,10 @@
         top: 8px; bottom: auto; left: 8px;
         transform: scale(.62); transform-origin: top left;
       }
-      body.touch #map {
-        top: 8px; bottom: auto; right: 8px;
-        width: 148px; height: 148px;
+      body.touch #map { top: 8px; bottom: auto; right: 8px; }
+      body.touch #where {
+        top: calc(8px + var(--map) + 4px); bottom: auto; right: 8px;
+        max-width: 46vw; font-size: 11px;
       }
       body.touch #events { top: 8px; right: 164px; width: 150px; font-size: 11px; }
 
@@ -115,6 +120,10 @@
       .touch-btn.brake { right: 136px; bottom: 16px; width: 84px; height: 84px; }
       .touch-btn.hand  { right: 26px; bottom: 136px; width: 76px; height: 76px;
                          font-size: 11px; }
+      /* Up out of the way of the pedals, under the map: it is pressed now and
+         then, not held. */
+      .touch-btn.cam   { right: 14px; bottom: 228px; width: 58px; height: 58px;
+                         font-size: 10px; }
 
       /* Landscape is the only sensible way to drive this. */
       #rotate { display: none; }
@@ -196,8 +205,12 @@
         border: 0; border-radius: 8px;
       }
       #menu .drive:hover { background: #ffbe4d; }
+      /* Over the map, wherever the map is. This was a literal 204px from when
+         the map was 186 tall, and when the map grew to 268 the label stayed
+         put and spent the next release half underneath it. */
       #where {
-        position: fixed; right: 12px; bottom: 204px;
+        position: fixed; right: 12px; bottom: calc(12px + var(--map) + 8px);
+        max-width: calc(100vw - 24px);
         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
         color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.7);
         text-align: right; pointer-events: none; user-select: none;
@@ -210,7 +223,7 @@
     <div id="rotate">turn the phone sideways</div>
     <div id="hud">loading physics&hellip;</div>
     <canvas id="cockpit"></canvas>
-    <div id="help">WASD drive &middot; S reverses from a stop &middot; space handbrake &middot; R right the car &middot; C camera &middot; B look back &middot; M rivals on map &middot; [ ] map zoom &middot; - = icon size &middot; K map key &middot; J drop the job &middot; L lights </div>
+    <div id="help">WASD drive &middot; S reverses from a stop &middot; space handbrake &middot; R right the car &middot; C camera &middot; drag or two fingers to look &middot; scroll or pinch zoom &middot; B look back &middot; M rivals on map &middot; [ ] map zoom &middot; - = icon size &middot; K map key &middot; J drop the job &middot; L lights </div>
     <div id="where"></div>
     <canvas id="map" width="536" height="536"></canvas>
     <canvas id="legend" hidden></canvas>

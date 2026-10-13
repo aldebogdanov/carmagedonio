@@ -15,10 +15,10 @@
 
 (def ring
   "Cycle order for the mode key."
-  [:chase :chase-far :hood :top :orbit])
+  [:chase :chase-far :hood :top :free])
 
 (def labels
-  {:chase "chase" :chase-far "far" :hood "hood" :top "top" :orbit "orbit"})
+  {:chase "chase" :chase-far "far" :hood "hood" :top "top" :free "free"})
 
 ;; Precomputed rather than found by index: `ring` is a vector of keywords and
 ;; identity comparison on keywords is not something to rely on.
@@ -34,7 +34,7 @@
    :chase-far {:dist 18.0 :rise 7.5 :aim 1.8 :ahead 6.5 :fov 62.0}
    :hood      {:fov 80.0}
    :top       {:rise 46.0 :fov 45.0}
-   :orbit     {:fov 65.0}})
+   :free      {:fov 65.0}})
 
 ;; Speed response. Pulling back and widening the lens with speed is the oldest
 ;; trick in the driving-game book and it is worth the four lines: it conveys
@@ -46,9 +46,31 @@
 (def ^:private yaw-rate 6.0)        ; heading smoothing, 1/s
 (def ^:private pos-rate 9.0)        ; position smoothing, 1/s
 
-(def ^:private orbit-min-dist 5.0)
-(def ^:private orbit-max-dist 90.0)
+(def ^:private orbit-min-dist 4.0)
+;; Was 90. Far enough to see a whole landmark from above, which is most of what
+;; anybody pulls a free camera back for.
+(def ^:private orbit-max-dist 240.0)
 (def ^:private orbit-max-pitch 1.45)   ; just under vertical, where yaw degenerates
+
+;; --- looking round ------------------------------------------------------------
+;;
+;; Every view can be looked round, not only the free one. The free camera was
+;; the only place a drag did anything, and it was fifth in the cycle behind
+;; four views that ignored the mouse completely -- so as far as anybody could
+;; tell, the game had no free look at all.
+;;
+;; In a chase view the drag swings the camera round the car and the wheel pulls
+;; it in or out. Let go and keep driving, and it drifts back behind the car: a
+;; chase camera left looking sideways is a car being driven blind. Parked, it
+;; stays where it was put, because parked is when you are looking at something.
+(def ^:private look-rate 0.006)      ; rad per pixel dragged
+(def ^:private look-pitch-min -0.32) ; below the rig's own elevation
+(def ^:private look-pitch-max 1.10)
+(def ^:private look-return-after 1.6) ; s without input before it drifts back
+(def ^:private look-return-rate 2.4)  ; 1/s
+(def ^:private look-return-speed 3.0) ; m/s: slower than this is parked
+(def ^:private zoom-min 0.45)
+(def ^:private zoom-max 2.8)
 
 (def ^:private collide-margin 0.45) ; keep the near plane clear of the wall
 (def ^:private collide-min 2.2)     ; never end up inside the car
@@ -91,11 +113,18 @@
    :look-back (volatile! false)
    :primed    (volatile! false)
    :orbit     (volatile! {:yaw 0.0 :pitch 0.42 :dist 16.0})
+   ;; Free look, as offsets from wherever the view would otherwise point.
+   :look      (volatile! {:yaw 0.0 :pitch 0.0})
+   ;; Seconds since anybody last moved the view. Counted by `update!` off the
+   ;; frame time rather than read off a clock, so it is one number to reset.
+   :idle      (volatile! 1.0e9)
+   ;; Per view, so pulling the chase camera back does not also move the far one.
+   :zoom      (volatile! {})
    :dragging  (volatile! false)
    ;; Scratch, reused every frame rather than allocated. The draw path runs at
    ;; display rate and three.js vectors are ordinary objects.
    :pos   (three/Vector3.)
-   :look  (three/Vector3.)
+   :look-point (three/Vector3.)
    :tmp   (three/Vector3.)
    :tmpq  (three/Quaternion.)
    :up-y  (three/Vector3. 0 1 0)
@@ -108,10 +137,72 @@
 (defn cycle-mode!
   "Advance to the next view. Un-primes the smoothing so the new view snaps into
   place rather than sliding in from wherever the last one was looking."
-  [{:keys [mode primed]}]
+  [{:keys [mode primed orbit yaw look]}]
   (vreset! mode (next-mode @mode))
   (vreset! primed false)
+  ;; A new view starts square on. And the free camera starts from behind the
+  ;; car rather than from due south, which is where a yaw of zero puts it and
+  ;; is a jump nobody asked for.
+  (vreset! look {:yaw 0.0 :pitch 0.0})
+  (when (= :free @mode)
+    (vswap! orbit assoc :yaw (+ @yaw js/Math.PI)))
   @mode)
+
+(defn- wrap-angle [a] (js/Math.atan2 (js/Math.sin a) (js/Math.cos a)))
+
+(defn look!
+  "Swing the view by a drag of (dx, dy) pixels. What that means depends on the
+  view: the free camera orbits the car, the chase views swing round it, the
+  bonnet camera turns its head, and the top view -- a map -- ignores it."
+  [{:keys [mode orbit look idle]} dx dy]
+  (vreset! idle 0.0)
+  (case @mode
+    :free (vswap! orbit
+                  (fn [o]
+                    (-> o
+                        (update :yaw + (* look-rate dx))
+                        (update :pitch
+                                #(-> (+ % (* look-rate dy))
+                                     (max 0.0)
+                                     (min orbit-max-pitch))))))
+    :top nil
+    (vswap! look
+            (fn [l]
+              (-> l
+                  (update :yaw #(wrap-angle (+ % (* look-rate dx))))
+                  (update :pitch #(-> (+ % (* look-rate dy))
+                                      (max look-pitch-min)
+                                      (min look-pitch-max))))))))
+
+(defn zoom!
+  "Pull the view in (`factor` < 1) or out (> 1)."
+  [{:keys [mode orbit zoom idle]} factor]
+  (vreset! idle 0.0)
+  (let [m @mode]
+    (case m
+      :free (vswap! orbit update :dist
+                    #(-> (* % factor) (max orbit-min-dist) (min orbit-max-dist)))
+      :hood nil
+      (vswap! zoom update m
+              #(-> (* (or % 1.0) factor) (max zoom-min) (min zoom-max))))))
+
+(defn- trackpad?
+  "Is this wheel event two fingers on a touchpad rather than a mouse wheel?
+
+  There is no field that says, so this is the usual inference and no better
+  than it: a touchpad scrolls sideways as readily as up and down, and in the
+  engines that still report `wheelDeltaY` it reports exactly three times the
+  pixel delta, where a wheel reports notches. A notch is also big -- a hundred
+  pixels or so -- and a finger mostly is not. Getting it wrong costs little
+  either way: a wheel taken for a touchpad tilts the view instead of zooming
+  it."
+  [^js e]
+  (let [dy  (.-deltaY e)
+        wdy (.-wheelDeltaY e)]
+    (or (not (zero? (.-deltaX e)))
+        (and (number? wdy) (not (zero? wdy))
+             (== wdy (* -3 dy))
+             (< (js/Math.abs dy) 50.0)))))
 
 (defn attach!
   "Wire up the camera's own controls. Returns a detach fn.
@@ -121,7 +212,7 @@
   the AI or the network. Where the local player happens to be pointing a camera
   is presentation, and putting it in the command would send it over the wire."
   [cs ^js canvas]
-  (let [{:keys [look-back orbit dragging]} cs
+  (let [{:keys [look-back dragging]} cs
         on-key-down (fn [^js e]
                       (case (.-code e)
                         "KeyC" (do (.preventDefault e) (cycle-mode! cs))
@@ -130,30 +221,31 @@
         on-key-up   (fn [^js e]
                       (when (= "KeyB" (.-code e)) (vreset! look-back false)))
         on-down     (fn [^js e]
-                      (when (= :orbit @(:mode cs))
-                        (vreset! dragging true)
-                        (.setPointerCapture canvas (.-pointerId e))))
+                      (vreset! dragging true)
+                      (.setPointerCapture canvas (.-pointerId e)))
         on-up       (fn [^js e]
                       (vreset! dragging false)
                       (when (.hasPointerCapture canvas (.-pointerId e))
                         (.releasePointerCapture canvas (.-pointerId e))))
         on-move     (fn [^js e]
                       (when @dragging
-                        (vswap! orbit
-                                (fn [o]
-                                  (-> o
-                                      (update :yaw + (* 0.006 (.-movementX e)))
-                                      (update :pitch
-                                              #(-> (+ % (* 0.006 (.-movementY e)))
-                                                   (max (- orbit-max-pitch))
-                                                   (min orbit-max-pitch))))))))
+                        (look! cs (.-movementX e) (.-movementY e))))
+        ;; A touchpad does three things through this one event: two fingers
+        ;; moving look round, a pinch (which arrives as a wheel event with
+        ;; ctrl held, in every engine that supports it) zooms, and so does a
+        ;; real wheel. Always swallowed, so a pinch zooms the view and not the
+        ;; page.
         on-wheel    (fn [^js e]
-                      (when (= :orbit @(:mode cs))
-                        (.preventDefault e)
-                        (vswap! orbit update :dist
-                                #(-> (* % (js/Math.exp (* 0.0012 (.-deltaY e))))
-                                     (max orbit-min-dist)
-                                     (min orbit-max-dist)))))
+                      (.preventDefault e)
+                      (let [unit (case (.-deltaMode e) 1 16.0 2 400.0 1.0)
+                            dx (* unit (.-deltaX e))
+                            dy (* unit (.-deltaY e))]
+                        (cond
+                          (.-ctrlKey e) (zoom! cs (js/Math.exp (* 0.01 dy)))
+                          ;; Fingers, not a wheel: the world follows them, the
+                          ;; way it does under a drag.
+                          (trackpad? e) (look! cs (- dx) (- dy))
+                          :else (zoom! cs (js/Math.exp (* 0.0012 dy))))))
         ;; Focus can be lost mid-hold; without this the world stays reversed.
         on-blur     (fn [_] (vreset! look-back false) (vreset! dragging false))]
     (.addEventListener js/window "keydown" on-key-down)
@@ -203,12 +295,24 @@
   physics world, passed in rather than required so this namespace does not
   depend on the simulation. `dt` is the real frame time, not the fixed step:
   the camera is presentation and is allowed to be frame-rate driven."
-  [{:keys [^js camera ^js pos ^js look ^js tmp ^js tmpq ^js up-y ^js up-n
-           mode yaw primed orbit look-back]
+  [{:keys [^js camera ^js pos ^js tmp ^js tmpq ^js up-y ^js up-n
+           mode yaw primed orbit look-back idle zoom dragging]
     :as cs}
    px py pz qx qy qz qw speed dt cast]
-  (let [m     @mode
+  (let [^js look (:look-point cs)
+        m     @mode
         rig   (rigs m)
+        ;; Drift back behind the car once nobody is steering the view and the
+        ;; car is going somewhere.
+        _     (vswap! idle + dt)
+        _     (when (and (not @dragging)
+                         (> @idle look-return-after)
+                         (> (js/Math.abs speed) look-return-speed))
+                (let [k (- 1.0 (approach look-return-rate dt))]
+                  (vswap! (:look cs) (fn [{:keys [yaw pitch]}]
+                                       {:yaw (* yaw k) :pitch (* pitch k)}))))
+        {lyaw :yaw lpitch :pitch} @(:look cs)
+        zm    (get @zoom m 1.0)
         boost (min 1.0 (/ (js/Math.abs speed) speed-ref))
         ;; The first frame after a mode change has nothing sensible to smooth
         ;; from, so it snaps.
@@ -226,7 +330,15 @@
         (.set tmp 0.0 0.62 (if @look-back 1.1 -0.55))
         (.applyQuaternion tmp tmpq)
         (.set pos (+ px (.-x tmp)) (+ py (.-y tmp)) (+ pz (.-z tmp)))
-        (.set tmp 0.0 0.35 (if @look-back 60.0 -60.0))
+        (if @look-back
+          (.set tmp 0.0 0.35 60.0)
+          ;; A head turning, not a camera orbiting: the eye stays put and the
+          ;; point it looks at swings round it. Dragging down looks down.
+          (let [cp (js/Math.cos lpitch)]
+            (.set tmp
+                  (* -60.0 (js/Math.sin lyaw) cp)
+                  (- 0.35 (* 60.0 (js/Math.sin lpitch)))
+                  (* -60.0 (js/Math.cos lyaw) cp))))
         (.applyQuaternion tmp tmpq)
         (.set look (+ px (.-x tmp)) (+ py (.-y tmp)) (+ pz (.-z tmp)))
         (.copy (.-up camera) up-y))
@@ -235,11 +347,11 @@
       (do
         ;; The tiny z nudge keeps `lookAt` out of the degenerate straight-down
         ;; case; the -Z up vector is what puts north at the top of the screen.
-        (.set pos px (+ py (:rise rig)) (+ pz 0.001))
+        (.set pos px (+ py (* zm (:rise rig))) (+ pz 0.001))
         (.set look px py pz)
         (.copy (.-up camera) up-n))
 
-      :orbit
+      :free
       (let [{oy :yaw op :pitch od :dist} @orbit
             h (* od (js/Math.cos op))]
         (.set pos
@@ -256,22 +368,38 @@
             ;; Look-back snaps rather than swinging round: a smoothed 180 takes
             ;; long enough that by the time you can see behind you it no longer
             ;; matters.
-            y    (if @look-back (+ y js/Math.PI) y)
+            heading-y (if @look-back (+ y js/Math.PI) y)
+            ;; The free look is an offset on top, so the camera keeps tracking
+            ;; the car's heading while it is turned -- a look out of the side
+            ;; window stays out of the side window through a corner.
+            y    (+ heading-y lyaw)
             fx   (js/Math.sin y)
             fz   (js/Math.cos y)
-            dist (* (:dist rig) (+ 1.0 (* dist-stretch boost)))
+            ;; Distance and rise become a range and an elevation, so the drag
+            ;; can tilt the camera up and down the same sphere it swings round.
+            reach (* zm (js/Math.hypot (:dist rig) (:rise rig))
+                     (+ 1.0 (* dist-stretch boost)))
+            elev (-> (+ (js/Math.atan2 (:rise rig) (:dist rig)) lpitch)
+                     (max 0.03) (min orbit-max-pitch))
+            dist (* reach (js/Math.cos elev))
             tx   (- px (* fx dist))
-            ty*  (+ py (:rise rig))
-            tz   (- pz (* fz dist))]
+            ty*  (+ py (* reach (js/Math.sin elev)))
+            tz   (- pz (* fz dist))
+            ;; Looking ahead of the car only makes sense from behind it. Swung
+            ;; round to the side, the point ahead is off the edge of the frame
+            ;; and the car with it, so the lead fades as the camera turns.
+            ahead (* (:ahead rig) (max 0.0 (js/Math.cos lyaw)))
+            hx   (js/Math.sin heading-y)
+            hz   (js/Math.cos heading-y)]
         (.set pos
               (+ (.-x pos) (* (- tx (.-x pos)) tp))
               (+ (.-y pos) (* (- ty* (.-y pos)) tp))
               (+ (.-z pos) (* (- tz (.-z pos)) tp)))
         (unobstruct! pos px (+ py 0.6) pz cast)
         (.set look
-              (+ px (* fx (:ahead rig)))
+              (+ px (* hx ahead))
               (+ py (:aim rig))
-              (+ pz (* fz (:ahead rig))))
+              (+ pz (* hz ahead)))
         (.copy (.-up camera) up-y)))
     (set-fov! cs (+ (:fov rig) (if (#{:chase :chase-far} m)
                                  (* fov-stretch boost)

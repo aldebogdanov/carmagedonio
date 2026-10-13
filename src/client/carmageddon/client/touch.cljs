@@ -97,26 +97,86 @@
       (.addEventListener node "pointerup" release)
       (.addEventListener node "pointercancel" release))))
 
+(defn- looking!
+  "Everything on the screen that is not a control is a window to look through.
+
+  One finger dragged there swings the view, exactly as a mouse drag does; two
+  pinch it in and out. It listens on the overlay itself and only to pointers
+  that landed on the overlay rather than on a control in it, so a thumb that
+  slides off the steering pad keeps steering and does not start looking."
+  [^js root {:keys [look zoom]}]
+  (let [pts (js/Map.)
+        spread (fn []
+                 (let [[a b] (vec (.values pts))]
+                   (js/Math.hypot (- (aget a 0) (aget b 0))
+                                  (- (aget a 1) (aget b 1)))))
+        last-spread (volatile! nil)
+        release (fn [^js e]
+                  (when (.has pts (.-pointerId e))
+                    (.delete pts (.-pointerId e))
+                    (vreset! last-spread nil)))]
+    (.addEventListener
+     root "pointerdown"
+     (fn [^js e]
+       (when (identical? (.-target e) root)
+         (.preventDefault e)
+         (capture! root e)
+         (.set pts (.-pointerId e) #js [(.-clientX e) (.-clientY e)])
+         (vreset! last-spread nil))))
+    (.addEventListener
+     root "pointermove"
+     (fn [^js e]
+       (when-let [^js p (.get pts (.-pointerId e))]
+         (.preventDefault e)
+         (let [dx (- (.-clientX e) (aget p 0))
+               dy (- (.-clientY e) (aget p 1))]
+           (aset p 0 (.-clientX e))
+           (aset p 1 (.-clientY e))
+           (if (= 2 (.-size pts))
+             (let [d (spread)]
+               (when-let [d0 @last-spread]
+                 (when (and zoom (pos? d)) (zoom (/ d0 d))))
+               (vreset! last-spread d))
+             ;; A finger covers less ground than a mouse for the same
+             ;; intent, so it turns the view a little further per pixel.
+             (when look (look (* 1.4 dx) (* 1.4 dy))))))))
+    (.addEventListener root "pointerup" release)
+    (.addEventListener root "pointercancel" release)))
+
 (defn attach!
   "Build the controls and wire them. Returns a detach fn, or nil on a device
-  that does not want them."
-  []
+  that does not want them.
+
+  `camera` is {:look (fn [dx dy]) :zoom (fn [factor]) :cycle (fn [])} -- what
+  the camera does with a drag, a pinch and its button. Passed in rather than
+  required, for the reason everything here goes through `input`: this is a way
+  of holding the controls, and should not know what a camera is."
+  ([] (attach! {}))
+  ([camera]
   (when (available?)
     (let [state (atom {:steer 0.0 :gas false :brake false :handbrake false})
           root (el :div {:id "touch"})
           pad  (el :div {:id "touch-steer" :text "STEER"})
           gas  (el :div {:class "touch-btn gas" :text "GO"})
           brk  (el :div {:class "touch-btn brake" :text "BRAKE"})
-          hand (el :div {:class "touch-btn hand" :text "HAND"})]
-      (doseq [n [pad brk hand gas]] (.appendChild root n))
+          hand (el :div {:class "touch-btn hand" :text "HAND"})
+          ;; There was no way to change the view at all on a phone: it is the
+          ;; C key, and a phone has no C key.
+          cam  (el :div {:class "touch-btn cam" :text "CAM"})]
+      (doseq [n [pad brk hand gas cam]] (.appendChild root n))
       (.appendChild js/document.body root)
       (.add (.-classList js/document.body) "touch")
       (steering! pad state)
       (press! gas state :gas)
       (press! brk state :brake)
       (press! hand state :handbrake)
+      (.addEventListener cam "pointerdown"
+                         (fn [^js e]
+                           (.preventDefault e)
+                           (when-let [f (:cycle camera)] (f))))
+      (looking! root camera)
       (input/use-touch! state)
       (fn detach! []
         (input/use-touch! nil)
         (.remove root)
-        (.remove (.-classList js/document.body) "touch")))))
+        (.remove (.-classList js/document.body) "touch"))))))

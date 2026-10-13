@@ -582,7 +582,11 @@
                         d-map   (minimap/attach! mm)
                         d-jobs  (jobs/attach! jb)
                         ;; nil on a device that does not want them.
-                        d-touch (touch/attach!)]
+                        d-touch (let [cs (:camera-state rs)]
+                                  (touch/attach!
+                                   {:look  (fn [dx dy] (camera/look! cs dx dy))
+                                    :zoom  (fn [f] (camera/zoom! cs f))
+                                    :cycle (fn [] (camera/cycle-mode! cs))}))]
                     (fn [] (d-input) (d-cam) (d-map) (d-jobs)
                       (when d-touch (d-touch))))
         [sx _ sz] (:spawn @s)]
