@@ -10,9 +10,10 @@
   client; the HUD is a canvas and the world is three.js, and introducing a view
   library for one screen would be the largest dependency in the project.
 
-  `show!` returns a promise of `{:world w :car kind}`. Everything above it --
-  `main/init!` -- waits on that promise and then boots exactly as it did when
-  the answers came from the URL."
+  `show!` returns a promise of `{:world w :car kind :seed n}`. `:world` is nil
+  for a solo run, and then `:seed` says which world to drive in. Everything
+  above it -- `main/init!` -- waits on that promise and then boots exactly as
+  it did when the answers came from the URL."
   (:require [carmageddon.client.api :as api]
             [carmageddon.client.cars :as cars]))
 
@@ -73,6 +74,17 @@
 (defn- share-link [id]
   (str (.-origin js/location) "/?world=" id))
 
+;; A world nobody asked for. Six digits rather than thirty-two bits: a seed
+;; worth replaying is a seed somebody will read off the screen and type in.
+(defn- fresh-seed [] (inc (js/Math.floor (* 999999 (js/Math.random)))))
+
+(defn- typed-seed
+  "The solo seed field as a number, or nil when it is blank or not one."
+  []
+  (let [v (some-> (js/document.getElementById "solo-seed") .-value .trim)
+        n (js/parseInt (or v ""))]
+    (when (and (seq v) (not (js/isNaN n))) n)))
+
 ;; --- the screen -------------------------------------------------------------
 
 (defn show!
@@ -80,7 +92,7 @@
 
   `preselect` is the `?world=` from the link they arrived on, if any -- a shared
   link should land you looking at the room it names, already highlighted."
-  [{:keys [preselect car]}]
+  [{:keys [preselect car seed]}]
   (js/Promise.
    (fn [resolve _reject]
      (let [^js root (js/document.getElementById "menu")
@@ -95,7 +107,13 @@
        ;; screen appeared. Rebuilding these would delete whatever was being
        ;; typed at the moment somebody else's request happened to land.
        (let [^js form (el :div {:class "newroom"})
-             ^js busy-btn (el :button {:class "ghost" :text "create room"})]
+             ^js busy-btn (el :button {:class "ghost" :text "create room"})
+             ;; Persistent for the same reason as the room form: a player
+             ;; count arriving mid-keystroke re-renders the sheet.
+             ^js solo-seed (el :input {:id "solo-seed" :inputmode "numeric"
+                                       :placeholder "seed (blank for a new world)"
+                                       :maxlength 10})]
+       (when seed (set! (.-value solo-seed) (str seed)))
        (letfn
         [(pick-room! [id] (swap! state assoc :room id) (render!))
          (pick-car! [k] (swap! state assoc :car k) (render!))
@@ -145,6 +163,16 @@
              (when root (set! (.-hidden root) true))
              (resolve {:world w :car car})))
 
+         ;; A solo run: no room, and a world of your own choosing. The same
+         ;; seed is the same world -- streets, crowds, rivals, weather -- every
+         ;; time, from a clean start; a blank one is somewhere new.
+         (solo! []
+           (let [typed (typed-seed)]
+             (when root (set! (.-hidden root) true))
+             (resolve {:world nil :car (:car @state)
+                       :seed (or typed (fresh-seed))
+                       :fixed? (some? typed)})))
+
          (render! []
            (when root
              (let [{:keys [worlds room car online busy?]} @state
@@ -178,6 +206,18 @@
                             (el :p {:class "share"
                                     :text (str "share: " (share-link room))}))))
 
+                    ;; --- solo ---
+                    (el :h2 {:text "solo"})
+                    (el :div {:class "newroom"}
+                        solo-seed
+                        (when-not offline?
+                          (el :button {:class "ghost" :text "drive solo"
+                                       :on-click (fn [_] (solo!))})))
+                    (el :p {:class "note"
+                            :text (str "Your own world, nobody else in it. The same "
+                                       "seed is the same world every time, from a "
+                                       "clean start.")})
+
                     ;; --- car ---
                     (el :h2 {:text "car"})
                     (apply el :div {:class "cars"}
@@ -191,7 +231,9 @@
                     ;; --- go ---
                     (el :button {:class "drive"
                                  :text (if (and (not offline?) room) "drive" "drive solo")
-                                 :on-click (fn [_] (start!))})))))) ]
+                                 :on-click (fn [_] (if (and (not offline?) room)
+                                                     (start!)
+                                                     (solo!)))})))))) ]
 
          ;; Fill the persistent form in, once.
          (.appendChild form (el :input {:id "new-room-name" :placeholder "new room name"

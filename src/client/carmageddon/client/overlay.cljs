@@ -37,13 +37,20 @@
         (swap! state (fn [cur] (assoc (ov/merge-overlays cur saved) ::last-save 0.0)))
         (ov/stats saved)))))
 
+(defn ephemeral!
+  "Never write this one out. A solo run starts clean and leaves nothing behind;
+  see `main/boot!`."
+  [state]
+  (swap! state assoc ::ephemeral true))
+
 (defn save!
   "Write the overlay out. `force?` bypasses the debounce, for the end of a run
   or the page closing."
   ([state now-ms] (save! state now-ms false))
   ([state now-ms force?]
    (let [cur @state]
-     (when (and (or force? (>= (- now-ms (::last-save cur 0.0)) save-every-ms))
+     (when (and (not (::ephemeral cur))
+                (or force? (>= (- now-ms (::last-save cur 0.0)) save-every-ms))
                 (storage))
        (let [^js s (storage)]
          (try

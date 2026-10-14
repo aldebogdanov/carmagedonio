@@ -33,6 +33,7 @@
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.client.weather :as weather]
             [carmageddon.shared.constants :as k]
+            [carmageddon.shared.prng :as prng]
             [carmageddon.shared.wire :as wire]))
 
 (defonce app (atom nil))
@@ -196,7 +197,7 @@
                                   birds-state peds-state overlay minimap game
                                   bridges landmarks smoke-state jobs-state rvs
                                   cock fire-state powerups-state weather-state
-                                  remotes events]}]
+                                  remotes events world-now solo-seed]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
@@ -210,7 +211,7 @@
         (let [cmd (input/sample tick)]
           (sim/step! sim cmd (rivals/commands rvs sim peds-state tick))
           ;; Traffic drives on the fixed step, like everything else that moves.
-          (traffic/drive! traffic-state k/dt (js/Date.now))
+          (traffic/drive! traffic-state k/dt (world-now))
           (peds/walk! peds-state tick (sim/player-x sim) (sim/player-z sim))
           (game/tick! game)
           ;; A car at 100% damage used to keep driving, which made the damage
@@ -415,7 +416,7 @@
         (parts/sync! bridges)
         (fire/sync! fire-state (* 0.001 (js/Date.now)))
         (powerups/sync! powerups-state (* 0.001 (js/Date.now)))
-        (let [t (* 0.001 (js/Date.now))]
+        (let [t (* 0.001 (world-now))]
           (weather/update! weather-state t dt)
           (weather/sync! weather-state (sim/player-x sim) (sim/player-y sim)
                          (sim/player-z sim) t))
@@ -425,7 +426,7 @@
                        (sim/player-x sim) (sim/player-z sim))
         ;; Lights are a pure function of the clock, so this only has to repaint
         ;; instance colours -- there is no signal state to advance.
-        (furniture/sync-signals! furniture-state (js/Date.now))
+        (furniture/sync-signals! furniture-state (world-now))
         (peds/sync! peds-state dt)
         (remote/sync! remotes (js/Date.now))
         ;; The cluster repaints every frame. A needle that moves twice a second
@@ -488,7 +489,8 @@
         ;; line and at the same weight as the player's remaining seconds.
         (let [cs (chunks/stats chunk-mgr)
               pd (peds/stats peds-state)]
-          (hud! (str (.toFixed (:fps s) 0) " fps"
+          (hud! (str (when solo-seed (str "solo seed " solo-seed "   "))
+                     (.toFixed (:fps s) 0) " fps"
                      "   cam " (camera/labels (camera/mode (:camera-state rs)))
                      "   chunks " (:loaded cs) "/" (:colliders cs)
                      (when (pos? (:pending cs)) (str " (+" (:pending cs) ")"))
@@ -504,11 +506,41 @@
                        (str "   wet " (.toFixed (:wet w) 2)))
                      "   saved " (:bytes (overlay/stats overlay)) "B"))))})))
 
+(defn- world-clock
+  "What time it is in the world, in ms, for the things that run off a clock
+  rather than off the simulation: the weather, the traffic lights, and the
+  traffic that stops at them.
+
+  In a room it is the wall clock, which is how everybody in the room is under
+  the same cloud without a byte crossing the wire. A solo run has nobody to
+  agree with, and wants the opposite: the same world every time, so its clock
+  starts at the same moment -- one drawn from the seed -- and advances with the
+  simulation's own ticks. The same seed is the same weather at the same second
+  of the run, however fast the machine is."
+  [solo? seed sim]
+  (if solo?
+    (let [epoch (* 1000.0 (mod (js/Math.abs (prng/hash-coords seed 91 92)) 1000000))]
+      (fn [] (+ epoch (* 1000.0 k/dt (:tick @sim 0)))))
+    (fn [] (js/Date.now))))
+
+(defn- remember-seed!
+  "Put a chosen solo seed in the address bar, so a reload or a bookmark comes
+  back to the same world -- and take a stale one out when the world was not
+  chosen, so a reload of a random run is a new random run."
+  [seed fixed?]
+  (let [u (js/URL. (.-href js/location))]
+    (if fixed?
+      (.set (.-searchParams u) "seed" (str seed))
+      (.delete (.-searchParams u) "seed"))
+    (.replaceState js/history nil "" (str u))))
+
 (defn- boot!
   "Build the world and start playing. `world` is the server's record of it, or
-  nil when running without a backend."
-  [world profile car]
-  (let [seed      (:seed world fallback-seed)
+  nil for a solo run, in which case `solo` is `{:seed n :fixed? bool}`."
+  ([world profile car] (boot! world profile car nil))
+  ([world profile car solo]
+  (let [solo?     (nil? world)
+        seed      (or (:seed world) (:seed solo) fallback-seed)
         canvas    (js/document.getElementById "game")
         params    (js/URLSearchParams. (.-search js/location))
         mode      (or (:mode world)
@@ -516,7 +548,14 @@
         ;; One record of everything the seed does not already say. Restored
         ;; before anything spawns, so a chunk that was cleared out stays cleared.
         ov        (overlay/create seed mode)
-        restored  (overlay/load! ov seed)
+        ;; A room's record of what has been smashed is restored; a solo run
+        ;; starts clean, every time -- that is what makes the same seed the
+        ;; same run -- and keeps nothing afterwards, so a hundred random worlds
+        ;; do not leave a hundred saves behind.
+        _         (if solo?
+                    (do (overlay/ephemeral! ov)
+                        (remember-seed! seed (:fixed? solo)))
+                    (overlay/load! ov seed))
         s         (sim/create! {:seed seed :opponents opponent-count :kind car})
         rs        (render/create! canvas s seed)
         ps        (props/create (:world @s) (:scene rs) ov)
@@ -759,7 +798,9 @@
                                                  :minimap mm
                                                  :peds-state pd :game gm :events ev
                                                  :rvs rvs
-                                                 :remotes remotes})]
+                                                 :remotes remotes
+                                                 :world-now (world-clock solo? seed s)
+                                                 :solo-seed (when solo? seed)})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
                                  :landmarks lm :smoke sk :jobs jb :traffic tf :birds bd :peds pd :fire fr :powerups pu :weather wx
@@ -770,7 +811,9 @@
                                   (:live (props/stats ps)) "props,"
                                   (:standing (buildings/stats bs)) "buildings,"
                                   (:pieces (furniture/stats fu)) "street furniture"
-                                  (if world (str "world " (:id world)) "(offline)")))))))
+                                  (if world
+                                    (str "world " (:id world))
+                                    (str "(solo, seed " seed ")")))))))))
 
 (defn- watch-for-end!
   "Submit the run once, when it finishes.
@@ -810,11 +853,15 @@
                ;; shared link is -- it arrives preselected rather than skipping
                ;; the screen, so an invited player still picks a car.
                (let [params (js/URLSearchParams. (.-search js/location))
-                     car0   (keyword (.get params "car"))]
+                     car0   (keyword (.get params "car"))
+                     seed0  (js/parseInt (or (.get params "seed") ""))]
                  (-> (menu/show! {:preselect (.get params "world")
-                                  :car (when (contains? cars/catalogue car0) car0)})
-                     (.then (fn [{:keys [world car]}]
-                              (-> (boot! world profile car)
+                                  :car (when (contains? cars/catalogue car0) car0)
+                                  ;; A solo world somebody chose, coming back.
+                                  :seed (when-not (js/isNaN seed0) seed0)})
+                     (.then (fn [{:keys [world car seed fixed?]}]
+                              (-> (boot! world profile car
+                                         (when-not world {:seed seed :fixed? fixed?}))
                                   (.then (fn [_]
                                            (watch-for-end! (:game @app) world profile
                                                            (:overlay @app)))))))))))

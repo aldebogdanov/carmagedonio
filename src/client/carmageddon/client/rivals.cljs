@@ -20,6 +20,7 @@
             [carmageddon.client.peds :as peds]
             [carmageddon.client.sim :as sim]
             [carmageddon.client.vehicle :as vehicle]
+            [carmageddon.shared.prng :as prng]
             [carmageddon.shared.worldgen :as worldgen]))
 
 (def ^:private hunt-radius 130.0)   ; m -- inside this, forget the crowd
@@ -90,7 +91,11 @@
    ;; continuous and a tally has to be countable -- the server recomputes the
    ;; score from it, and a float there would make the arithmetic a matter of
    ;; opinion -- so it is paid in tenths and the remainder stays on the books.
-   :credited    (js/Float32Array. n)})
+   :credited    (js/Float32Array. n)
+   ;; Where a leashed rival comes back is drawn from the seed, not from
+   ;; `Math.random`, so the same world played the same way puts it back in
+   ;; the same place.
+   :rng         (prng/make (+ seed 7717))})
 
 ;; How long a hit stays yours. Long enough that a rival you have worked over
 ;; and then lost sight of is still your wreck when it finally goes; short
@@ -213,11 +218,11 @@
   country the nearest street can be most of a kilometre away, and dropping a car
   there would only put it straight back outside the leash -- and quite possibly
   outside the loaded colliders, where it would fall through the world."
-  [seed px pz heading]
+  [seed rng px pz heading]
   (let [;; Behind, give or take a quadrant, so a leashed rival does not
         ;; materialise in front of the windscreen.
-        bearing (+ heading js/Math.PI (* 1.6 (- (js/Math.random) 0.5)))
-        d  (+ respawn-min (* (- respawn-max respawn-min) (js/Math.random)))
+        bearing (+ heading js/Math.PI (* 1.6 (- (prng/next-double! rng) 0.5)))
+        d  (+ respawn-min (* (- respawn-max respawn-min) (prng/next-double! rng)))
         tx (+ px (* d (js/Math.sin bearing)))
         tz (+ pz (* d (js/Math.cos bearing)))
         on-road (worldgen/road-point-near seed tx tz 2)]
@@ -240,7 +245,7 @@
   Deliberately not instant: a rival briefly beyond the leash because the player
   is doing 200 km/h down an expressway will catch up on its own, and teleporting
   it every time the gap opened would be visible from the mirror."
-  [{:keys [seed controllers ^js lost ^js stuck wrecked]} sim heading]
+  [{:keys [seed rng controllers ^js lost ^js stuck wrecked]} sim heading]
   (let [px (sim/player-x sim)
         pz (sim/player-z sim)
         vs (sim/vehicles sim)]
@@ -268,7 +273,7 @@
                     (> (aget stuck i) stuck-ticks))
             (aset lost i 0)
             (aset stuck i 0)
-            (let [{:keys [pos yaw]} (respawn-spot seed px pz heading)]
+            (let [{:keys [pos yaw]} (respawn-spot seed rng px pz heading)]
               (sim/place-vehicle! sim (inc i) pos yaw))))))))
 
 ;; A rival's health, in the units it is paid for.
