@@ -569,6 +569,46 @@
 
 ;; --- building masses --------------------------------------------------------
 
+(deftest a-region-builds-its-own-houses
+  (testing "a village in the taiga was an English village with birches round
+            it: the region changed the trees and the grass and nothing anybody
+            lived in"
+    (let [own {:taiga #{:izba} :sierra #{:adobe :casa} :paddies #{:minka :shophouse}
+               :heartland #{}}
+          regional (into #{} cat (vals own))
+          ;; Housing country in each region, nearest the origin.
+          found (reduce
+                 (fn [acc [cx cz]]
+                   (let [x (* (+ cx 0.5) k/chunk-size) z (* (+ cz 0.5) k/chunk-size)
+                         reg (w/region seed x z)
+                         u (w/urbanness seed x z)
+                         ;; Well inside one region: a house takes its style
+                         ;; from its block, and a block near the edge of a
+                         ;; chunk can be in the next region over.
+                         reach (+ (* 0.5 k/chunk-size) 64.0)
+                         inside? (every? (fn [[ox oz]]
+                                           (= reg (w/region seed (+ x ox) (+ z oz))))
+                                         [[reach reach] [reach (- reach)]
+                                          [(- reach) reach] [(- reach) (- reach)]])]
+                     (if (or (contains? acc reg) (not (< 0.16 u 0.55)) (not inside?))
+                       acc
+                       (let [b (w/chunk-buildings seed cx cz (w/road-field seed cx cz))
+                             zs (set (for [i (range (/ (alen* b) w/building-stride))]
+                                       (:name (nth w/building-zones
+                                                   (long (aget* b (+ (* i w/building-stride) 6)))))))]
+                         (if (seq zs) (assoc acc reg zs) acc)))))
+                 {}
+                 (for [r (range 0 30) cx (range (- r) (inc r)) cz (range (- r) (inc r))
+                       :when (= r (max (abs cx) (abs cz)))]
+                   [cx cz]))]
+      (is (= (set (keys own)) (set (keys found))) (str "regions found: " (keys found)))
+      (doseq [[reg zs] found]
+        (if (seq (own reg))
+          (is (some (own reg) zs) (str reg " built only " zs))
+          (is (not-any? regional zs) (str "the heartland built " zs)))
+        (is (empty? (remove (own reg) (filter regional zs)))
+            (str reg " built another region's houses: " zs))))))
+
 (deftest building-parts-are-well-formed
   (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
         {:keys [buildings parts]} (w/chunk-structures seed cx cz (w/road-field seed cx cz))
@@ -585,7 +625,10 @@
                           mat  (aget* parts (+ o 8))]
                       (and (<= 0 prim) (< prim (count w/building-prims))
                            (or (= mat w/plain-mat)
-                               (and (<= 0 mat) (< mat (count w/building-zones)))))))
+                               (and (<= 0 mat) (< mat (count w/building-zones)))
+                               ;; A wall standing above the street.
+                               (and (<= w/upper-mat mat)
+                                    (< mat (+ w/upper-mat (count w/building-zones))))))))
                   (range np))))
     (testing "the last slot means two things, and the slot before it says which"
       ;; A flat part carries a packed colour; a wall carries a shade
@@ -603,7 +646,10 @@
                              (= tint (Math/floor tint)))
                         ;; Near white, either side of it: a wall that is
                         ;; modulated to nothing is a black hole in a terrace.
-                        (< 0.5 tint 1.5))))
+                        ;; Or a paint, packed like a flat part's colour.
+                        (or (< 0.5 tint 1.5)
+                            (and (> tint 8.0) (<= tint 0xffffff)
+                                 (= tint (Math/floor tint)))))))
                   (range np))))
     (testing "no part is inside out or of zero size"
       (is (every? (fn [i]

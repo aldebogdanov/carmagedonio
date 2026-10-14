@@ -112,64 +112,270 @@
     (.strokeRect ctx 2 2 (- size 4) (- size 4))
     c))
 
-(defn- facade-canvas
-  "A wall with a grid of windows. Reading building scale at a glance is what
-  makes a city feel like a city rather than a field of boxes -- and lit windows
-  give the eye something to track speed against.
+;; --- facades ----------------------------------------------------------------
+;;
+;; A facade used to be one picture per zone stretched over the whole wall, so a
+;; window was a fixed fraction of a building rather than a fixed size: an
+;; office sixty metres wide had windows ten metres across, a tower had thirteen
+;; storeys whatever its height, and a house had three. `buildings` now tiles
+;; these at a real bay width and storey height instead -- see the shader there
+;; -- so what is painted here is a *tile*: a few bays by a few storeys that
+;; repeats seamlessly, plus a separate ground storey, because the ground floor
+;; of a building is the one floor that is different from the others.
 
-  `cols`/`rows` are per face, not per storey: the texture is stretched over a
-  box scaled to the building, so a tall office needs many rows and a bungalow
-  needs three. That works out because the window grid is chosen per zone, and
-  zone already correlates with size."
-  [seed size tint {:keys [cols rows lit shopfront?]
-                   :or {cols 8 rows 10 lit 0.18 shopfront? false}}]
-  (let [c   (canvas size)
-        ctx (.getContext c "2d")
-        rng (prng/make seed)
-        [r g b] tint]
-    (fill! ctx (rgb r g b) 0 0 size size)
-    (jitter ctx rng size 3000 tint 18 3.0)
-    (let [cw (/ size cols), ch (/ size rows)]
-      (dotimes [row rows]
-        (dotimes [col cols]
-          (let [roll (prng/next-double! rng)
-                wx (+ (* col cw) (* cw 0.22))
-                wy (+ (* row ch) (* ch 0.18))
-                ww (* cw 0.56), wh (* ch 0.5)]
-            (fill! ctx
-                   (cond (< roll lit)        "rgba(255,232,170,0.92)"
-                         (< roll (+ lit 0.4)) "rgba(120,140,160,0.75)"
-                         :else               "rgba(30,36,44,0.85)")
-                   wx wy ww wh)))))
-    ;; Shops are glass at street level and brick above, which is most of what
-    ;; tells you a building is a shop when you are driving past it at speed.
-    (when shopfront?
-      (let [gh (/ size rows)]
-        (fill! ctx "rgba(150,180,196,0.90)" (* size 0.04) (- size (* gh 1.25))
-               (* size 0.92) (* gh 1.05))
-        (fill! ctx "rgba(214,178,86,0.85)" 0 (- size (* gh 1.45))
-               size (* gh 0.22))))
+(def ^:private cell 64)   ; px per window cell, either way
+
+(defn- canvas-wh ^js [w h]
+  (let [c (js/document.createElement "canvas")]
+    (set! (.-width c) w)
+    (set! (.-height c) h)
     c))
 
-(def ^:private zone-facades
-  "One facade per `worldgen/building-zones` entry, in that order."
-  [{:tint [122 108 92]  :cols 4 :rows 3  :lit 0.30}                     ; house
-   {:tint [134 106 96]  :cols 4 :rows 4  :lit 0.28}                     ; townhouse
-   {:tint [104 104 110] :cols 7 :rows 9  :lit 0.22}                     ; apartment
-   {:tint [126 116 104] :cols 5 :rows 4  :lit 0.34 :shopfront? true}    ; shop
-   {:tint [86 98 112]   :cols 9 :rows 13 :lit 0.16}                     ; office
-   {:tint [96 94 88]    :cols 6 :rows 3  :lit 0.10}                     ; factory
-   {:tint [104 100 94]  :cols 3 :rows 2  :lit 0.05}                     ; warehouse
-   {:tint [140 136 124] :cols 6 :rows 4  :lit 0.20}                     ; civic
-   {:tint [118 74 58]   :cols 2 :rows 2  :lit 0.06}                     ; barn
-   ;; Heavy plant: almost no windows, and the few there are burn all night.
-   {:tint [92 92 90]    :cols 3 :rows 2  :lit 0.32}                     ; plant
-   {:tint [86 84 80]    :cols 2 :rows 1  :lit 0.02}])                   ; yard
+(defn- speckle!
+  "`jitter`, for a canvas that is not square."
+  [^js ctx rng w h n [r g b] spread max-px]
+  (dotimes [_ n]
+    (let [x (* w (prng/next-double! rng))
+          y (* h (prng/next-double! rng))
+          d (* spread (- (prng/next-double! rng) 0.5))
+          s (+ 1.0 (* max-px (prng/next-double! rng)))]
+      (fill! ctx (rgb (+ r d) (+ g d) (+ b d)) x y s s))))
 
-;; `buildings/build-group!` looks a facade up as `(mod mat (count facades))`, so
-;; a zone without one here does not fail -- it silently wraps round and draws a
-;; barn's windows on a factory. One assert is cheaper than finding that.
-(assert (= (count zone-facades) (count worldgen/building-zones))
+(defn- shade-of [[r g b] f] (rgb (* r f) (* g f) (* b f)))
+
+(defn- glass
+  "One pane: lit, reflecting the sky, or dark -- in that order of rarity."
+  [rng lit]
+  (let [roll (prng/next-double! rng)]
+    (cond (< roll lit)          "rgb(255,222,150)"
+          (< roll (+ lit 0.30)) "rgb(118,140,162)"
+          (< roll (+ lit 0.62)) "rgb(70,86,104)"
+          :else                 "rgb(34,40,50)")))
+
+(def ^:private shutter-paints
+  ["rgb(46,96,74)" "rgb(52,86,140)" "rgb(120,52,44)" "rgb(64,116,128)"])
+
+(defn- window-cell!
+  "Paint the window in one cell of an upper storey, in the zone's style."
+  [^js ctx rng style tint lit x y c]
+  (let [r (fn [fx fy fw fh colour] (fill! ctx colour (+ x (* fx c)) (+ y (* fy c))
+                                          (* fw c) (* fh c)))]
+    (case style
+      :curtain
+      ;; Glass nearly edge to edge, a spandrel under it and a mullion down it.
+      (do (r 0.0 0.74 1.0 0.26 (shade-of tint 0.72))
+          (r 0.04 0.04 0.92 0.68 (glass rng lit))
+          (r 0.485 0.04 0.03 0.68 (shade-of tint 0.55)))
+
+      :industrial
+      ;; A band of small panes high up, where the light falls on the floor.
+      (do (r 0.08 0.12 0.84 0.38 (if (< (prng/next-double! rng) lit)
+                                   "rgb(240,214,150)" "rgb(96,110,118)"))
+          (doseq [f [0.29 0.50 0.71]] (r f 0.12 0.02 0.38 (shade-of tint 0.6)))
+          (r 0.08 0.30 0.84 0.02 (shade-of tint 0.6)))
+
+      :planks
+      (do (doseq [i (range 5)]
+            (r (* i 0.2) 0.0 0.012 1.0 (shade-of tint 0.66)))
+          (when (< (prng/next-double! rng) 0.15)
+            (r 0.36 0.30 0.28 0.26 (glass rng lit))))
+
+      :logs
+      ;; Eight logs to a storey with a dark seam between each, and a small
+      ;; window in a white carved frame with painted shutters either side --
+      ;; the frame is the thing a Russian village is recognised by.
+      (do (dotimes [i 8]
+            (r 0.0 (* i 0.125) 1.0 0.125 (shade-of tint (if (even? i) 1.0 0.88)))
+            (r 0.0 (+ (* i 0.125) 0.112) 1.0 0.016 (shade-of tint 0.52)))
+          (let [sh (nth shutter-paints (prng/next-int! rng (count shutter-paints)))]
+            (r 0.22 0.34 0.12 0.40 sh)
+            (r 0.66 0.34 0.12 0.40 sh))
+          (r 0.32 0.30 0.36 0.50 "rgb(232,228,216)")
+          (r 0.29 0.22 0.42 0.08 "rgb(232,228,216)")
+          (r 0.36 0.35 0.28 0.40 (glass rng lit))
+          (r 0.495 0.35 0.02 0.40 "rgb(232,228,216)"))
+
+      :plaster
+      ;; Deep-set and small, with a timber lintel over it.
+      (do (r 0.31 0.27 0.38 0.48 (shade-of tint 0.80))
+          (r 0.34 0.30 0.32 0.42 (glass rng (* 0.5 lit)))
+          (r 0.27 0.21 0.46 0.06 "rgb(108,76,50)")
+          (when (< (prng/next-double! rng) 0.35)
+            (let [sh (nth shutter-paints (prng/next-int! rng (count shutter-paints)))]
+              (r 0.20 0.27 0.10 0.48 sh)
+              (r 0.70 0.27 0.10 0.48 sh))))
+
+      :balcony
+      ;; Tall doors on to a balcony, shutters folded back, a railing.
+      (let [sh (nth shutter-paints (prng/next-int! rng (count shutter-paints)))]
+        (r 0.22 0.16 0.12 0.70 sh)
+        (r 0.66 0.16 0.12 0.70 sh)
+        (r 0.34 0.16 0.32 0.70 (glass rng lit))
+        (r 0.26 0.62 0.48 0.03 "rgb(40,40,44)")
+        (doseq [i (range 7)] (r (+ 0.27 (* i 0.07)) 0.62 0.012 0.24 "rgb(40,40,44)")))
+
+      :timber
+      ;; Dark posts and beams over white plaster, paper screens between.
+      (do (r 0.0 0.0 0.07 1.0 "rgb(62,46,36)")
+          (r 0.0 0.0 1.0 0.08 "rgb(62,46,36)")
+          (r 0.0 0.64 1.0 0.05 "rgb(62,46,36)")
+          (r 0.14 0.18 0.74 0.44 (if (< (prng/next-double! rng) lit)
+                                   "rgb(250,226,170)" "rgb(222,214,190)"))
+          (doseq [f [0.32 0.51 0.69]] (r f 0.18 0.015 0.44 "rgb(80,64,50)"))
+          (doseq [f [0.32 0.47]] (r 0.14 f 0.74 0.012 "rgb(80,64,50)")))
+
+      :shuttered
+      (do (r 0.28 0.22 0.44 0.52 (shade-of tint 0.82))
+          (if (< (prng/next-double! rng) 0.4)
+            ;; Shutters shut: louvres.
+            (let [sh (nth shutter-paints (prng/next-int! rng (count shutter-paints)))]
+              (r 0.30 0.24 0.40 0.48 sh)
+              (doseq [i (range 8)]
+                (r 0.30 (+ 0.26 (* i 0.058)) 0.40 0.012 "rgba(0,0,0,0.35)")))
+            (r 0.31 0.25 0.38 0.46 (glass rng lit))))
+
+      :tall
+      ;; Civic: tall windows with a pediment-ish hood.
+      (do (r 0.30 0.10 0.40 0.72 (shade-of tint 0.84))
+          (r 0.33 0.14 0.34 0.64 (glass rng lit))
+          (r 0.27 0.06 0.46 0.05 (shade-of tint 1.12)))
+
+      ;; :punched -- an ordinary window with a sill under it.
+      (do (r 0.22 0.18 0.56 0.56 (shade-of tint 0.80))
+          (r 0.25 0.21 0.50 0.50 (glass rng lit))
+          (r 0.495 0.21 0.012 0.50 (shade-of tint 0.70))
+          (r 0.20 0.74 0.60 0.05 (shade-of tint 1.14))))))
+
+(defn- upper-canvas
+  "`cols` bays by `rows` storeys of upper floors, seamless both ways."
+  [seed {:keys [tint cols rows lit style]}]
+  (let [w (* cols cell) h (* rows cell)
+        c (canvas-wh w h)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)]
+    (fill! ctx (apply rgb tint) 0 0 w h)
+    (speckle! ctx rng w h (* 0.04 w h) tint 18 3.0)
+    (dotimes [row rows]
+      (dotimes [col cols]
+        (window-cell! ctx rng style tint lit (* col cell) (* row cell) cell)))
+    c))
+
+(def ^:private sign-paints
+  ["rgb(200,52,44)" "rgb(222,176,46)" "rgb(46,138,76)" "rgb(44,90,176)"
+   "rgb(216,90,44)" "rgb(150,60,150)"])
+
+(defn- ground-canvas*
+  "The ground storey: `cols` bays wide, one storey tall, street at the bottom."
+  [seed {:keys [tint cols lit style ground-style ground bay]}]
+  (let [w  (* cols cell)
+        ;; Same pixels per metre as across, so a shopfront is not squashed.
+        h  (max cell (js/Math.round (* cell (/ ground bay))))
+        c  (canvas-wh w h)
+        ctx (.getContext c "2d")
+        rng (prng/make seed)
+        r  (fn [x fx fy fw fh colour]
+             (fill! ctx colour (+ x (* fx cell)) (* fy h) (* fw cell) (* fh h)))]
+    (fill! ctx (apply rgb tint) 0 0 w h)
+    (speckle! ctx rng w h (* 0.04 w h) tint 18 3.0)
+    (dotimes [col cols]
+      (let [x (* col cell)
+            roll (prng/next-double! rng)]
+        (case ground-style
+          :shopfront
+          (do (r x 0.0 0.0 1.0 0.22 (nth sign-paints (prng/next-int! rng (count sign-paints))))
+              (r x 0.04 0.28 0.92 0.72 (shade-of tint 0.6))
+              (r x 0.07 0.31 0.86 0.69 (if (< roll (+ 0.3 lit)) "rgb(236,214,160)"
+                                           "rgb(120,146,160)"))
+              (when (< roll 0.25) (r x 0.36 0.40 0.28 0.60 "rgb(52,52,58)")))
+
+          :lobby
+          (do (r x 0.0 0.0 1.0 1.0 "rgb(40,44,52)")
+              (r x 0.05 0.06 0.40 0.94 (glass rng (+ 0.3 lit)))
+              (r x 0.55 0.06 0.40 0.94 (glass rng (+ 0.3 lit))))
+
+          :arcade
+          ;; Arches. The one curve in the city, and it is enough.
+          (let [cx (+ x (* 0.5 cell)) rad (* 0.30 cell)
+                top (* 0.36 h)]
+            (set! (.-fillStyle ctx) "rgb(46,38,32)")
+            (.beginPath ctx)
+            (.moveTo ctx (- cx rad) h)
+            (.lineTo ctx (- cx rad) (+ top rad))
+            (.arc ctx cx (+ top rad) rad js/Math.PI 0.0)
+            (.lineTo ctx (+ cx rad) h)
+            (.closePath ctx)
+            (.fill ctx)
+            (when (< roll 0.5)
+              (r x 0.30 0.62 0.40 0.38 (if (< roll 0.25) "rgb(236,206,150)"
+                                           "rgb(96,72,54)"))))
+
+          :shutter
+          ;; Roll-down shutters, half of them up and the shop open.
+          (do (r x 0.0 0.0 1.0 0.20 (nth sign-paints (prng/next-int! rng (count sign-paints))))
+              (if (< roll 0.55)
+                (do (r x 0.05 0.26 0.90 0.74 "rgb(226,196,140)")
+                    (doseq [i (range 3)]
+                      (r x (+ 0.10 (* i 0.28)) 0.62 0.22 0.38
+                         (nth sign-paints (prng/next-int! rng (count sign-paints))))))
+                (do (r x 0.05 0.26 0.90 0.74 "rgb(150,152,156)")
+                    (dotimes [i 10]
+                      (r x 0.05 (+ 0.28 (* i 0.072)) 0.90 0.01 "rgb(110,112,116)")))))
+
+          ;; :door -- a front door in some bays, a window in the rest.
+          (if (< roll 0.32)
+            (do (r x 0.34 0.30 0.32 0.70 (shade-of tint 0.7))
+                (r x 0.37 0.33 0.26 0.67 "rgb(70,48,36)"))
+            (do (r x 0.22 0.26 0.56 0.44 (shade-of tint 0.80))
+                (r x 0.25 0.29 0.50 0.38 (glass rng lit))
+                (r x 0.20 0.70 0.60 0.04 (shade-of tint 1.14)))))))
+    c))
+
+(def zone-facades
+  "One facade per `worldgen/building-zones` entry, in that order.
+
+  `bay` and `storey` are metres per window cell across and up; `ground` is the
+  height of a ground storey that is drawn differently, or zero for a building
+  that is the same all the way down. The painted zones are near white, because
+  their colour is a paint carried per building -- see `worldgen/painted`."
+  [{:name :house     :tint [122 108 92]  :bay 3.2 :storey 2.8 :ground 3.0
+    :cols 4 :rows 2 :lit 0.30 :style :punched :ground-style :door}
+   {:name :townhouse :tint [134 106 96]  :bay 3.0 :storey 3.1 :ground 3.3
+    :cols 4 :rows 4 :lit 0.28 :style :punched :ground-style :door}
+   {:name :apartment :tint [104 104 110] :bay 3.0 :storey 2.9 :ground 3.6
+    :cols 8 :rows 8 :lit 0.22 :style :punched :ground-style :door}
+   {:name :shop      :tint [126 116 104] :bay 3.4 :storey 3.2 :ground 4.4
+    :cols 4 :rows 4 :lit 0.34 :style :punched :ground-style :shopfront}
+   {:name :office    :tint [86 98 112]   :bay 2.6 :storey 3.6 :ground 5.0
+    :cols 8 :rows 8 :lit 0.16 :style :curtain :ground-style :lobby}
+   {:name :factory   :tint [96 94 88]    :bay 6.0 :storey 5.0 :ground 0.0
+    :cols 4 :rows 2 :lit 0.10 :style :industrial}
+   {:name :warehouse :tint [104 100 94]  :bay 7.0 :storey 6.0 :ground 0.0
+    :cols 2 :rows 1 :lit 0.05 :style :industrial}
+   {:name :civic     :tint [140 136 124] :bay 3.6 :storey 4.2 :ground 4.6
+    :cols 6 :rows 3 :lit 0.20 :style :tall :ground-style :door}
+   {:name :barn      :tint [118 74 58]   :bay 4.0 :storey 4.0 :ground 0.0
+    :cols 2 :rows 1 :lit 0.06 :style :planks}
+   ;; Heavy plant: almost no windows, and the few there are burn all night.
+   {:name :plant     :tint [92 92 90]    :bay 6.0 :storey 5.0 :ground 0.0
+    :cols 3 :rows 2 :lit 0.32 :style :industrial}
+   {:name :yard      :tint [86 84 80]    :bay 6.0 :storey 3.0 :ground 0.0
+    :cols 2 :rows 1 :lit 0.02 :style :planks}
+   {:name :izba      :tint [116 82 52]   :bay 2.8 :storey 3.4 :ground 0.0
+    :cols 3 :rows 1 :lit 0.25 :style :logs}
+   {:name :adobe     :tint [246 242 234] :bay 3.0 :storey 3.2 :ground 0.0
+    :cols 3 :rows 2 :lit 0.15 :style :plaster}
+   {:name :casa      :tint [246 242 234] :bay 3.2 :storey 3.0 :ground 3.4
+    :cols 4 :rows 2 :lit 0.20 :style :balcony :ground-style :arcade}
+   {:name :minka     :tint [228 222 206] :bay 1.9 :storey 3.2 :ground 0.0
+    :cols 4 :rows 1 :lit 0.30 :style :timber}
+   {:name :shophouse :tint [246 242 234] :bay 3.4 :storey 3.0 :ground 3.8
+    :cols 3 :rows 3 :lit 0.25 :style :shuttered :ground-style :shutter}])
+
+;; `buildings/build-group!` looks a facade up by zone index, so a zone without
+;; one here would not fail -- it would silently draw some other zone's
+;; windows. One assert is cheaper than finding that, and checking the names
+;; rather than only the count catches the same mistake made in the middle.
+(assert (= (mapv :name zone-facades) (mapv :name worldgen/building-zones))
         "every building zone needs a facade, in the same order")
 
 (defn- tyre-canvas [seed size]
@@ -212,12 +418,19 @@
    :body   (->texture (body-canvas (prng/hash-coords seed 3 0) 256 [238 238 238]) renderer nil)
    :crate  (->texture (crate-canvas (prng/hash-coords seed 4 0) 256) renderer nil)
    :tyre   (->texture (tyre-canvas (prng/hash-coords seed 5 0) 128) renderer nil)
-   ;; One facade per building zone, in `worldgen/building-zones` order. UVs come
-   ;; from a shared unit cube scaled to each building, so windows stretch with
-   ;; the box -- accepted deliberately: per-building geometry would mean
-   ;; per-building disposal, and this is scenery.
+   ;; One facade per building zone, in `worldgen/building-zones` order: the
+   ;; upper-floor tile, the ground storey, and the measurements `buildings`
+   ;; needs to lay them out at real size.
    :facades (vec (map-indexed
-                  (fn [i {:keys [tint] :as spec}]
-                    (->texture (facade-canvas (prng/hash-coords seed 6 i) 256 tint spec)
-                               renderer nil))
+                  (fn [i spec]
+                    (let [up (->texture (upper-canvas (prng/hash-coords seed 6 i) spec)
+                                        renderer nil)
+                          gr (when (pos? (:ground spec))
+                               (doto (->texture (ground-canvas* (prng/hash-coords seed 7 i)
+                                                                spec)
+                                                renderer nil)
+                                 ;; Repeats along the street, never up it: a
+                                 ;; ground storey has a top and a bottom.
+                                 (-> .-wrapT (set! three/ClampToEdgeWrapping))))]
+                      {:upper up :ground (or gr up) :spec spec}))
                   zone-facades))})

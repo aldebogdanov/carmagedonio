@@ -1146,6 +1146,15 @@
 (def ^:private tree-urban 0.45)     ; above this there is no room for a wood
 (def ^:private hedge-urban 0.35)
 
+(def ^:private boundaries
+  "What divides one field from the next, by region: [width height tint]. A
+  hedge in the desert was the giveaway that a region was only ever a change of
+  ground colour."
+  {:heartland [1.3 1.6 0x3d5f33]                 ; hedge
+   :taiga     [0.22 1.7 0x5e5246]                ; board fence, weathered grey
+   :sierra    [0.6 1.05 0xb38d66]                ; adobe wall
+   :paddies   [1.1 0.42 0x5f6a3c]})              ; earth bund round a paddy
+
 (def ^:private flora-tint
   {:trunk   0x5a4432
    :hedge   0x3d5f33
@@ -1306,13 +1315,16 @@
                       ;; Two runs with a gateway between them, rather than one
                       ;; unbroken wall across the field.
                       gap (+ 0.16 (* 0.12 (/ (bit-and hh 0xff) 255.0)))]
-                  (doseq [[t0 t1] [[0.03 (- 0.5 (* 0.5 gap))]
-                                   [(+ 0.5 (* 0.5 gap)) 0.97]]]
-                    (let [tm (* 0.5 (+ t0 t1))
-                          px (+ ex (* ddx tm)) pz (+ ez (* ddz tm))
-                          [y _] (surface seed field px pz)]
-                      (emit px (+ y 0.75) pz yaw 0.0
-                            1.3 1.6 (* len (- t1 t0)) :box (:hedge flora-tint) 0.0))))))))))
+                  (let [[bw bh tint] (boundaries (region seed mx mz))]
+                    (doseq [[t0 t1] [[0.03 (- 0.5 (* 0.5 gap))]
+                                     [(+ 0.5 (* 0.5 gap)) 0.97]]]
+                      (let [tm (* 0.5 (+ t0 t1))
+                            px (+ ex (* ddx tm)) pz (+ ez (* ddz tm))
+                            [y _] (surface seed field px pz)]
+                        ;; Sunk by the same 0.05 the hedge always was, so a
+                        ;; low bund still meets uneven ground.
+                        (emit px (+ y (- (* 0.5 bh) 0.05)) pz yaw 0.0
+                              bw bh (* len (- t1 t0)) :box tint 0.0)))))))))))
     (let [v (persistent! out)
           a (farray (count v))]
       (dotimes [i (count v)] (fput! a i (nth v i)))
@@ -1526,9 +1538,29 @@
    ;; plant rather than in the building.
    {:name :plant     :cover 0.86 :height [7.0 12.0]}
    ;; And the yards between them, which were empty ground.
-   {:name :yard      :cover 0.92 :height [2.4 4.0]}])
+   {:name :yard      :cover 0.92 :height [2.4 4.0]}
+   ;; What a region builds instead of a brick semi. A region used to change
+   ;; the trees and the colour of the grass and nothing anybody lived in, so a
+   ;; village in the taiga was an English village with birches round it.
+   ;; See `regional-zone` for which replaces which.
+   {:name :izba      :cover 0.44 :height [3.4 4.8]}   ; log house, steep roof
+   {:name :adobe     :cover 0.56 :height [3.0 5.2]}   ; flat roof, painted
+   {:name :casa      :cover 0.88 :height [6.2 9.0]}   ; two-storey terrace
+   {:name :minka     :cover 0.50 :height [3.0 4.4]}   ; timber frame, hip roof
+   {:name :shophouse :cover 0.90 :height [8.0 12.5]}]) ; shop below, rooms above
 
 (def zone-index (zipmap (map :name building-zones) (range)))
+
+(def ^:private regional-zones
+  "What each region builds in place of the generic house and terrace. Not the
+  shops and not anything downtown: a high street is a high street, and the
+  difference between places is in what people live in."
+  {:taiga   {:house :izba}
+   :sierra  {:house :adobe :townhouse :casa}
+   :paddies {:house :minka :townhouse :shophouse}})
+
+(defn- regional-zone [region zone]
+  (get-in regional-zones [region zone] zone))
 
 (defn- pick-zone
   "What gets built on a plot.
@@ -1596,6 +1628,9 @@
     (let [r    (prng/chunk-rng seed gx gz (:blocks k/salt))
           u    (urbanness seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
           ind  (industrialness seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
+          ;; Once per block, so a block is all one region's houses rather than
+          ;; changing style halfway down a terrace.
+          reg  (region seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
           fr   (frontage-for u ind)
           dz   (min lot-depth (* 0.42 (- z1 z0)))
           dx   (min lot-depth (* 0.42 (- x1 x0)))
@@ -1621,10 +1656,12 @@
             (comp cat
                   (filter (fn [{:keys [hx hz]}] (and (> hx 2.0) (> hz 2.0))))
                   (map (fn [{:keys [x z corner? front] :as lot}]
-                         (assoc lot :zone (pick-zone r
-                                                     (urbanness seed x z)
-                                                     (industrialness seed x z)
-                                                     front corner?)))))
+                         (assoc lot :zone (regional-zone
+                                           reg
+                                           (pick-zone r
+                                                      (urbanness seed x z)
+                                                      (industrialness seed x z)
+                                                      front corner?))))))
             [(strip :north x0 x1 z0 (+ z0 dz) true)
              (strip :south x0 x1 (- z1 dz) z1 true)
              (strip :west iz0 iz1 x0 (+ x0 dx) false)
@@ -2835,6 +2872,11 @@
   else is an index into the zone facades, i.e. a wall with windows in it."
   -1.0)
 
+(def upper-mat
+  "Added to a facade's `mat` for a wall that does not reach the street -- an
+  office tower standing on its podium -- and so has no ground storey to draw."
+  100.0)
+
 (def ^:private palette
   {:roof-dark  0x39383a
    :roof-tile  0x7d4636
@@ -2847,7 +2889,37 @@
    :awning     0xb2452f
    :sign       0xd8b23c
    :steel      0x7c8288
-   :door       0x44444a})
+   :door       0x44444a
+   :whitewash  0xe2ddd0
+   :log        0x6a4a30
+   :tin-green  0x4f6150
+   :tin-grey   0x6f767c
+   :shingle    0x5a4334
+   :tile-blue  0x3d4652
+   :thatch     0x7d6a4a
+   :ac         0xc9c9c2})
+
+(def ^:private plaster
+  "What a wall in the sun gets painted. Bright on purpose: a village of these
+  is a street of different colours, and that is the whole read of it."
+  [0xc8714a 0xd9a54c 0xd98d98 0x4fa39f 0x4a74b4 0xe6ddc9 0xe2c55c 0xe07c5c
+   0x9bbf6a 0xc77fb0])
+
+(def ^:private shop-signs [0xc8302c 0xe0b02a 0x2f8a4a 0x2c5ab0 0xd8562a])
+
+(defn- painted
+  "A wall whose colour is a paint rather than its zone's texture. The texture
+  under it is near white, so the paint is what you see."
+  [w paint]
+  (assoc w :paint paint))
+
+(defn- shade-hex
+  "A packed colour, lightened or darkened by `f`, so two painted houses in
+  the same colour are not quite the same colour."
+  [hex f]
+  (let [ch (fn [sh] (-> (bit-and (bit-shift-right (long hex) sh) 255)
+                        (* f) (min 255.0) (max 0.0) long))]
+    (bit-or (bit-shift-left (ch 16) 16) (bit-shift-left (ch 8) 8) (ch 0))))
 
 (defn- part
   "One extruded volume, in the building's local frame."
@@ -2860,6 +2932,21 @@
   "A part painted with the building's own facade rather than a flat colour."
   [lx ly lz sx sy sz]
   (assoc (part lx ly lz sx sy sz :box 0) :facade? true))
+
+(defn- roof-kit
+  "What stands on a flat roof: plant, a tank, a hut over the stairs. From the
+  street it is a broken skyline instead of a ruled line, and from the air --
+  which the free camera now gets to -- it is the difference between a roof and
+  the top of a box."
+  [r hx hz h]
+  (let [c palette
+        n (prng/next-int! r 4)]
+    (into (if (< (prng/next-double! r) 0.5)
+            [(part (* hx -0.45) (+ h 1.2) (* hz 0.4) 2.4 2.4 2.2 :box (:concrete c))]
+            [])
+          (for [i (range n)]
+            (part (* hx (- (* 0.5 i) 0.6)) (+ h 0.95) (* hz -0.35)
+                  1.3 0.9 0.9 :box (:ac c))))))
 
 (defn- ridged-roof
   "A gable whose ridge runs along the building's longer horizontal axis.
@@ -2903,31 +2990,46 @@
        (part 0.0 1.05 (- (+ hz 0.12)) 1.0 2.1 0.3 :box (:door c))]
 
       :apartment
-      (let [bands (+ 2 (prng/next-int! r 3))]
-        (into [base
-               (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.03) 0.6 (* 2 hz 1.03) :box (:concrete c))
-               ;; Lift plant on the roof.
-               (part (* hx 0.3) (+ h 1.6) (* hz 0.2) (* hx 0.7) 2.2 (* hz 0.6)
-                     :box (:concrete c))]
-              (for [i (range bands)]
-                (let [y (* h (/ (+ i 1.0) (+ bands 1.0)))]
-                  (part 0.0 y (- (+ hz 0.35)) (* 2 hx 0.9) 0.28 0.7
-                        :box (:concrete c))))))
+      (let [bands (+ 2 (prng/next-int! r 3))
+            tank? (< (prng/next-double! r) 0.45)]
+        (-> [base
+             (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.03) 0.6 (* 2 hz 1.03) :box (:concrete c))
+             ;; Lift plant on the roof.
+             (part (* hx 0.3) (+ h 1.6) (* hz 0.2) (* hx 0.7) 2.2 (* hz 0.6)
+                   :box (:concrete c))]
+            (into (for [i (range bands)]
+                    (let [y (* h (/ (+ i 1.0) (+ bands 1.0)))]
+                      (part 0.0 y (- (+ hz 0.35)) (* 2 hx 0.9) 0.28 0.7
+                            :box (:concrete c)))))
+            ;; A timber water tank on a steel stand, with its pointed hat --
+            ;; the one rooftop anybody recognises.
+            (into (when tank?
+                    [(part (* hx -0.45) (+ h 1.4) (* hz -0.3) 2.2 2.2 2.2 :box (:steel c))
+                     (part (* hx -0.45) (+ h 3.9) (* hz -0.3) 2.8 2.8 2.8
+                           :cylinder (:wood c))
+                     (part (* hx -0.45) (+ h 5.8) (* hz -0.3) 3.0 1.0 3.0
+                           :pyramid (:roof-dark c))]))
+            (into (roof-kit r hx hz (+ h 0.6)))))
 
       :shop
       [base
        ;; Awning, fascia sign and parapet -- the three things that say "shop".
        (part 0.0 3.4 (- (+ hz 0.85)) (* 2 hx 0.94) 0.22 1.7 :box (:awning c))
        (part 0.0 4.15 (- (+ hz 0.12)) (* 2 hx 0.9) 0.9 0.28 :box (:sign c))
-       (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.05) 0.7 (* 2 hz 1.05) :box (:stone c))]
+       (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.05) 0.7 (* 2 hz 1.05) :box (:stone c))
+       (part (* hx 0.4) (+ h 1.05) (* hz 0.3) 1.3 0.9 0.9 :box (:ac c))]
 
       :office
       (let [pod (min (* h 0.22) 7.0)
             tw  (* hx 0.82) td (* hz 0.82)]
         [(wall 0.0 (* 0.5 pod) 0.0 (* 2 hx 1.06) pod (* 2 hz 1.06))
-         (wall 0.0 (+ pod (* 0.5 (- h pod))) 0.0 (* 2 tw) (- h pod) (* 2 td))
+         (assoc (wall 0.0 (+ pod (* 0.5 (- h pod))) 0.0 (* 2 tw) (- h pod) (* 2 td))
+                :upper? true)
          (part 0.0 (+ h 0.9) 0.0 (* 2 tw 1.05) 1.8 (* 2 td 1.05) :box (:glass c))
-         (part 0.0 (+ h 5.0) 0.0 0.35 8.0 0.35 :cylinder (:steel c))])
+         (part 0.0 (+ h 5.0) 0.0 0.35 8.0 0.35 :cylinder (:steel c))
+         ;; Plant on the podium roof, where it is in view from the street.
+         (part (* hx 0.9) (+ pod 0.6) (* hz -0.9) 1.4 1.0 1.0 :box (:ac c))
+         (part (* hx -0.9) (+ pod 0.6) (* hz -0.9) 1.4 1.0 1.0 :box (:ac c))])
 
       :factory
       (let [teeth (+ 3 (prng/next-int! r 3))
@@ -3003,6 +3105,70 @@
               (part (* hx 0.7 (- (/ (* 2.0 i) 3.0) 1.0)) (* 0.5 (- h 1.0)) (- (+ hz 1.9))
                     0.55 (- h 1.0) 0.55 :cylinder (:stone c))))
 
+      :izba
+      ;; Logs, a steep roof against the snow, a porch up a few steps, and a
+      ;; whitewashed stove chimney in the middle of the ridge.
+      (let [rise (max 2.2 (* 1.30 (min hx hz)))
+            roof (pick (:tin-green c) (:tin-grey c) (:shingle c))]
+        [base
+         (ridged-roof hx hz rise h roof 1.16)
+         (part (* hx 0.45) 1.0 (- (+ hz 1.0)) 2.0 2.0 2.0 :box (:log c))
+         (part (* hx 0.45) 2.45 (- (+ hz 1.0)) 2.4 0.9 2.4 :gable roof)
+         (part 0.0 (+ h (* rise 0.72)) 0.0 0.8 (+ 1.6 rise) 0.8 :box (:whitewash c))
+         ;; The woodpile, because winter.
+         (part (+ hx 1.3) 0.55 (* hz 0.3) 1.0 1.1 (* 1.6 hz) :box 0x7a5a3c)])
+
+      :adobe
+      ;; Flat roof behind a parapet, beam ends through the wall under it, a
+      ;; dark door. The wall is the paint; see `painted`.
+      (let [paint (nth plaster (prng/next-int! r (count plaster)))
+            vigas (+ 3 (prng/next-int! r 3))]
+        (-> [(painted base paint)
+             (part 0.0 (+ h 0.3) 0.0 (* 2 hx 1.02) 0.6 (* 2 hz 1.02) :box paint)
+             (part (* hx -0.3) 1.1 (- (+ hz 0.04)) 1.1 2.2 0.2 :box 0x5a3a26)]
+            (into (for [i (range vigas)]
+                    (part (* hx (- (/ (* 2.0 (+ i 0.5)) vigas) 1.0)) (- h 0.45)
+                          (- (+ hz 0.32)) 0.24 0.24 0.7 :box (:wood c))))
+            (into (when (< (prng/next-double! r) 0.4)
+                    [(part (* hx 0.4) (+ h 1.2) (* hz 0.35) 1.5 1.6 1.5
+                           :cylinder (:whitewash c))]))))
+
+      :casa
+      ;; Two storeys, a balcony over the door with a railing along it.
+      (let [paint (nth plaster (prng/next-int! r (count plaster)))]
+        [(painted base paint)
+         (part 0.0 (+ h 0.32) 0.0 (* 2 hx 1.02) 0.64 (* 2 hz 1.02) :box (:whitewash c))
+         (part 0.0 (* 0.5 h) (- (+ hz 0.5)) (* 2 hx 0.55) 0.18 1.0 :box (:whitewash c))
+         (part 0.0 (+ (* 0.5 h) 0.5) (- (+ hz 0.96)) (* 2 hx 0.55) 0.8 0.07 :box 0x2b2b2e)
+         (part (* hx 0.3) 1.15 (- (+ hz 0.04)) 1.2 2.3 0.2 :box 0x5a3a26)])
+
+      :minka
+      ;; Timber frame and a big hip roof whose eaves stand well out from the
+      ;; walls, with a gable riding on top of it -- that second little roof is
+      ;; the shape that reads as the far east from a long way off.
+      (let [rise (max 1.8 (* 0.85 (min hx hz)))
+            roof (pick (:tile-blue c) (:tile-blue c) (:thatch c))]
+        [base
+         (part 0.0 (+ h 0.12) 0.0 (* 2 hx 1.40) 0.25 (* 2 hz 1.40) :box roof)
+         (part 0.0 (+ h 0.24 (* 0.5 rise)) 0.0 (* 2 hx 1.22) rise (* 2 hz 1.22)
+               :pyramid roof)
+         (ridged-roof (* hx 0.5) (* hz 0.5) (* 0.55 rise) (+ h 0.24 (* 0.5 rise))
+                      roof 1.0)
+         ;; The veranda along the front, at sitting height.
+         (part 0.0 0.45 (- (+ hz 0.85)) (* 2 hx 0.92) 0.3 1.5 :box 0x7a5a3c)])
+
+      :shophouse
+      ;; Shop at street level, two floors of rooms over it, an awning, and a
+      ;; sign out over the pavement where it can be read from up the street.
+      (let [paint (nth plaster (prng/next-int! r (count plaster)))
+            sign (nth shop-signs (prng/next-int! r (count shop-signs)))]
+        [(painted base paint)
+         (part 0.0 (+ h 0.4) 0.0 (* 2 hx 1.02) 0.8 (* 2 hz 1.02) :box (:whitewash c))
+         (part 0.0 3.7 (- (+ hz 1.0)) (* 2 hx 0.96) 0.16 2.0 :box (:awning c))
+         (part (* hx 0.62) (* h 0.62) (- (+ hz 0.75)) 0.2 (* h 0.48) 1.3 :box sign)
+         (part (* hx -0.5) (* h 0.55) (- (+ hz 0.36)) 0.9 0.6 0.62 :box (:ac c))
+         (part (* hx 0.1) (* h 0.80) (- (+ hz 0.36)) 0.9 0.6 0.62 :box (:ac c))])
+
       :barn
       (let [rise (max 2.2 (* 1.35 (min hx hz)))]
         [base
@@ -3077,11 +3243,21 @@
             (conj! parts (+ yaw (:lyaw pt)))
             (conj! parts (:sx pt)) (conj! parts (:sy pt)) (conj! parts (:sz pt))
             (conj! parts (double (prim-index (:prim pt))))
-            (conj! parts (if (:facade? pt) (double zi) plain-mat))
+            (conj! parts (cond (not (:facade? pt)) plain-mat
+                               (:upper? pt) (+ upper-mat zi)
+                               :else (double zi)))
             ;; The last slot means two things, and which one is decided by the
             ;; slot before it: a packed colour for a flat part, and a shade
             ;; multiplier for a wall, whose colour is its zone's texture.
-            (conj! parts (double (if (:facade? pt) shade (:tint pt))))))))
+            ;;
+            ;; Three things, now: a painted wall carries its paint, packed like
+            ;; a flat part's colour. The two never collide -- a shade is under
+            ;; two and any colour that is not black is over a thousand -- and
+            ;; `buildings` tells them apart on exactly that.
+            (conj! parts (double (cond
+                                   (:paint pt) (shade-hex (:paint pt) shade)
+                                   (:facade? pt) shade
+                                   :else (:tint pt))))))))
     (let [bv (persistent! boxes)
           pv (persistent! parts)
           ba (farray (count bv))

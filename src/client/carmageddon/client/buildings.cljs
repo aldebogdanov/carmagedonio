@@ -56,11 +56,110 @@
    ;; ever looked at.
    :blob     (three/IcosahedronGeometry. 0.5 0)})
 
+;; --- facades at real size --------------------------------------------------
+;;
+;; Every wall is the same unit cube scaled to the building, so its UVs run 0..1
+;; across each face whatever the face measures -- which made a window a fixed
+;; *fraction* of a wall. The shader below works out how big the face actually
+;; is from the instance's own matrix, and lays the zone's tile across it at a
+;; real bay width and storey height: as many storeys as fit, stretched a little
+;; so the last one is not cut off at the roofline, and likewise for bays at the
+;; corners. The bottom storey takes the ground-floor tile instead.
+;;
+;; Each wall also gets a whole number of bays and storeys of offset into the
+;; tile, hashed from where it stands, so a street of the same zone is not the
+;; same lit windows repeated down it.
+
+(def ^:private facade-vertex
+  "
+  #include <uv_vertex>
+  {
+    float fsx = length(instanceMatrix[0].xyz);
+    float fsy = length(instanceMatrix[1].xyz);
+    float fsz = length(instanceMatrix[2].xyz);
+    float along = abs(normal.x) > 0.5 ? fsz : fsx;
+    vFacade = vec3(uv.x * along, uv.y * fsy, abs(normal.y) > 0.5 ? 1.0 : 0.0);
+    vFacadeSize = vec2(along, fsy);
+    vFacadeSeed = fract(sin(dot(instanceMatrix[3].xz, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+  ")
+
+(def ^:private facade-fragment
+  "
+  #ifdef USE_MAP
+  {
+    float t = vFacade.y - facadeSink;
+    float upperH = vFacadeSize.y - facadeSink - facadeGround;
+    // Too little above the ground storey for a floor of its own: a bungalow,
+    // or an office podium. The ground storey takes the whole wall instead of
+    // leaving a squashed strip of window over the door.
+    float groundH = upperH < 0.5 * facadeCell.y ? max(facadeGround, vFacadeSize.y - facadeSink)
+                                                : facadeGround;
+    upperH = max(0.01, vFacadeSize.y - facadeSink - groundH);
+    float bays = max(1.0, floor(vFacadeSize.x / facadeCell.x + 0.5));
+    float bayW = vFacadeSize.x / bays;
+    float storeys = max(1.0, floor(upperH / facadeCell.y + 0.5));
+    float storeyH = upperH / storeys;
+    float u = vFacade.x / (bayW * facadeTile.x)
+              + floor(vFacadeSeed * facadeTile.x) / facadeTile.x;
+    float vu = (t - groundH) / (storeyH * facadeTile.y)
+               + floor(fract(vFacadeSeed * 7.31) * facadeTile.y) / facadeTile.y;
+    float vg = clamp(t / max(groundH, 0.01), 0.0, 1.0);
+    vec4 upper = texture2D(map, vec2(u, vu));
+    vec4 ground = texture2D(facadeGroundMap, vec2(u, vg));
+    // The top of a wall is a roof, or under one: bare wall, no windows.
+    vec4 roof = texture2D(map, vec2(0.004, 0.996));
+    vec4 c = t < groundH ? ground : upper;
+    diffuseColor *= mix(c, roof, vFacade.z);
+  }
+  #endif
+  ")
+
+(defn- facade-material
+  "A wall material for one zone. `street?` false is the variant for a wall
+  that starts above the street, which has no ground storey and is not sunk."
+  [{:keys [upper ground spec]} street?]
+  (let [{:keys [bay storey cols rows]} spec
+        ground-h (if street? (:ground spec) 0.0)
+        ^js m (three/MeshPhongMaterial. #js {:map upper :shininess 8})]
+    (set! (.-onBeforeCompile m)
+          (fn [^js shader]
+            (let [^js u (.-uniforms shader)]
+              (aset u "facadeGroundMap" #js {:value ground})
+              (aset u "facadeCell" #js {:value (three/Vector2. bay storey)})
+              (aset u "facadeTile" #js {:value (three/Vector2. cols rows)})
+              (aset u "facadeGround" #js {:value ground-h})
+              ;; Every building is sunk this far so it meets a slope on all
+              ;; sides; see `worldgen/chunk-structures`.
+              (aset u "facadeSink" #js {:value (if street? 0.6 0.0)}))
+            (set! (.-vertexShader shader)
+                  (-> (.-vertexShader shader)
+                      (.replace "#include <common>"
+                                "#include <common>
+                                 varying vec3 vFacade;
+                                 varying vec2 vFacadeSize;
+                                 varying float vFacadeSeed;")
+                      (.replace "#include <uv_vertex>" facade-vertex)))
+            (set! (.-fragmentShader shader)
+                  (-> (.-fragmentShader shader)
+                      (.replace "#include <common>"
+                                "#include <common>
+                                 varying vec3 vFacade;
+                                 varying vec2 vFacadeSize;
+                                 varying float vFacadeSeed;
+                                 uniform sampler2D facadeGroundMap;
+                                 uniform vec2 facadeCell;
+                                 uniform vec2 facadeTile;
+                                 uniform float facadeGround;
+                                 uniform float facadeSink;")
+                      (.replace "#include <map_fragment>" facade-fragment)))))
+    m))
+
 (defn create [world scene textures]
   (atom {:world world :scene scene
          :geometries (shapes)
-         :facades (mapv (fn [t] (three/MeshPhongMaterial. #js {:map t :shininess 8}))
-                        (:facades textures))
+         :facades (mapv #(facade-material % true) (:facades textures))
+         :uppers (mapv #(facade-material % false) (:facades textures))
          :plain (three/MeshPhongMaterial. #js {:color 0xffffff :shininess 6
                                                :flatShading true})
          :scratch (three/Object3D.)
@@ -95,10 +194,13 @@
 
 (defn- build-group!
   [bs [prim mat] instances]
-  (let [{:keys [^js scene geometries facades ^js plain ^js scratch ^js colour]} @bs
+  (let [{:keys [^js scene geometries facades uppers ^js plain ^js scratch ^js colour]} @bs
         plain? (= :plain mat)
+        upper? (and (not plain?) (>= mat worldgen/upper-mat))
         ^js m (three/InstancedMesh. (get geometries prim)
-                                    (if plain? plain (nth facades (mod mat (count facades))))
+                                    (cond plain? plain
+                                          upper? (nth uppers (- mat (int worldgen/upper-mat)))
+                                          :else (nth facades mat))
                                     (count instances))]
     (doseq [[i {:keys [x y z yaw sx sy sz tint]}] (map-indexed vector instances)]
       (.set (.-position scratch) x y z)
@@ -106,7 +208,8 @@
       (.set (.-scale scratch) sx sy sz)
       (.updateMatrix scratch)
       (.setMatrixAt m i (.-matrix scratch))
-      (if plain?
+      (if (or plain? (> tint 8.0))
+        ;; A flat part's colour, or a painted wall's paint: both packed.
         (.setHex colour (int tint))
         ;; A wall's tint modulates its zone's facade rather than replacing it,
         ;; so it is one number applied to all three channels -- and it may be
