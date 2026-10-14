@@ -293,6 +293,38 @@
   [{:keys [blame]} i by now-ms]
   (swap! blame assoc i [by now-ms]))
 
+;; What one bolt of a held shock does to a rival in reach. A bolt lands every
+;; 0.4 s, so a rival that stays alongside you for four seconds is finished --
+;; and one that keeps its distance is not touched, which is the whole of the
+;; counterplay.
+(def ^:private shock-damage 0.10)
+;; And the jolt that comes with it: off its springs and half a turn, so a bolt
+;; you land is a bolt you can see land.
+(def ^:private shock-lift 3.2)      ; m/s straight up
+(def ^:private shock-twist 1.6)
+
+(defn shocked!
+  "A shock bolt at (x, z) with reach `r`: every rival still in the race inside
+  it takes damage, is thrown, and is put down to the player. Returns where
+  each one was hit, for the caller to draw the bolts and score the dents.
+
+  The shock wrecked traffic and dropped pedestrians and went straight through
+  the one thing on the road that was trying to kill you."
+  [{:keys [controllers wrecked] :as rvs} sim x z r now-ms]
+  (let [vs (sim/vehicles sim)]
+    (vec (for [i (range (count controllers))
+               :when (not (contains? @wrecked i))
+               :let [v (nth vs (inc i))
+                     [vx vy vz :as at] (vehicle/chassis-position v)]
+               :when (< (dist x z vx vz) r)]
+           (let [^js b (sim/vehicle-body sim (inc i))
+                 m (.mass b)]
+             (vehicle/add-damage! v shock-damage)
+             (blame! rvs i :player now-ms)
+             (.applyImpulse b #js {:x 0.0 :y (* m shock-lift) :z 0.0} true)
+             (.applyTorqueImpulse b #js {:x 0.0 :y (* m shock-twist) :z 0.0} true)
+             {:index i :at at})))))
+
 (defn score-wrecks!
   "Rivals that have just gone past the damage threshold, as
   `[{:index i :by who :at [x y z]} ...]` -- once each.

@@ -320,7 +320,18 @@
                             ;; the line between here and there.
                             (when-let [p (:pos d)]
                               (powerups/arc! powerups-state [x (+ y 0.4) z] p now))
-                            (net/-send! transport (wire/encode-delta d))))
+                            (net/-send! transport (wire/encode-delta d)))
+                          ;; And the rivals, which it used to pass straight
+                          ;; through. Same reach as the traffic; dents are paid
+                          ;; as they land and a wreck is scored by
+                          ;; `score-wrecks!` like any other, because the bolt
+                          ;; put the blame on the player.
+                          (doseq [{:keys [index at]} (rivals/shocked! rvs sim x z r
+                                                                      (js/Date.now))]
+                            (let [v (nth (sim/vehicles sim) (inc index))]
+                              (dotimes [_ (rivals/credit! rvs index (vehicle/damage v))]
+                                (game/rival-dented! game)))
+                            (powerups/arc! powerups-state [x (+ y 0.4) z] at now)))
                  nil))))
           (let [px (sim/player-x sim) pz (sim/player-z sim)]
             (when-let [{:keys [heat]} (fire/heat-at fire-state px pz)]
