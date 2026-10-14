@@ -86,7 +86,10 @@
            ;; The clear-weather values, kept so they can be returned to.
            :sun0 (.-intensity sun)
            :exposure0 (.-toneMappingExposure renderer)
-           :fog0 (when-let [f (.-fog scene)] (.-far f))})))
+           :fog0 (when-let [f (.-fog scene)] (.-far f))
+           ;; The world's own horizon, which is not the same blue everywhere
+           ;; now that a world has a time of day.
+           :fog-clear (when-let [f (.-fog scene)] (.getHex (.-color f)))})))
 
 (defn- seed-drops! [ws]
   (let [{:keys [^js ox ^js oy ^js oz ^js ov]} @ws]
@@ -104,7 +107,7 @@
             (when-let [^js g (.getObjectByName ^js (:scene @ws) "ground")]
               (swap! ws assoc :ground g :shine0 (.-shininess (.-material g)))))
         {:keys [seed ^js sun ^js fill ^js ground ^js renderer scene wet sun0
-                fill0 fog0 shine0 exposure0]} @ws
+                fill0 fog0 fog-clear shine0 exposure0]} @ws
         rain (rain-at seed t)
         cloud (cloud-at seed t)
         ;; Up fast, down slow. Chasing the rain symmetrically would mean the
@@ -135,7 +138,7 @@
         (.setScalar (.-specular m) (+ 0.04 (* wet' 0.30)))))
     (when-let [^js fog (.-fog scene)]
       (set! (.-far fog) (* fog0 (- 1.0 (* 0.45 rain))))
-      (.setHex (.-color fog) (if (> cloud 0.35) 0x8d95a0 0xbdd6e8)))
+      (.setHex (.-color fog) (if (> cloud 0.35) 0x8d95a0 (or fog-clear 0xbdd6e8))))
     ;; The background is a sky *texture*, not a colour, so it cannot be tinted
     ;; the way the fog can. Exposure is dimmed instead: one number, and it
     ;; takes the sky, the buildings and the road down together -- which is what

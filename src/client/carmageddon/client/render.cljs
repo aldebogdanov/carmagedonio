@@ -20,12 +20,52 @@
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.shared.constants :as k]))
 
-;; Three stops rather than two: a real sky is deepest overhead and pales into
-;; the horizon, and one ramp between two colours misses the deep part entirely.
-(def ^:private sky-zenith 0x2f6ab4)
-(def ^:private sky-top 0x4d86c6)
-(def ^:private sky-horizon 0xbdd6e8)
-(def ^:private ground-bounce 0x54503f)
+;; --- what time it is -----------------------------------------------------
+;;
+;; Every world was the same mid-afternoon under the same blue, so two rooms
+;; with different seeds were different streets under one sky -- and the sky is
+;; behind every single frame. A world now has an hour of its own, picked from
+;; its seed like everything else about it: a pink morning with the sun low in
+;; the east, a high white noon with short shadows, the afternoon there always
+;; was, or a golden hour with the sun on the horizon and the whole city lit
+;; orange from the side. The weather still comes and goes over the top.
+;;
+;; Three sky stops rather than two: a real sky is deepest overhead and pales
+;; into the horizon, and one ramp between two colours misses the deep part.
+;; `sun` is where the light comes from, as an offset from the car; the glow
+;; and the disc in the sky are painted at that bearing, so the bright part of
+;; the sky is the part the shadows point away from.
+
+(def hours
+  {:afternoon {:zenith 0x2f6ab4 :top 0x4d86c6 :horizon 0xbdd6e8 :haze 0x8e9384
+               :sun [95.0 82.0 62.0] :sun-colour 0xfff0d4 :sun-power 2.8
+               :fill 1.55 :bounce 0x54503f :exposure 1.25
+               :cloud [255 255 255] :glow [255 246 214] :glow-a 0.5}
+   :morning   {:zenith 0x3c6aa8 :top 0x7a9fca :horizon 0xe8d6c8 :haze 0x9a9488
+               :sun [-110.0 46.0 -40.0] :sun-colour 0xffdcb8 :sun-power 2.6
+               :fill 1.48 :bounce 0x56503f :exposure 1.24
+               :cloud [255 232 224] :glow [255 212 178] :glow-a 0.62}
+   :golden    {:zenith 0x2a4a86 :top 0x5a73a2 :horizon 0xf0c08a :haze 0xa08060
+               :sun [105.0 30.0 -32.0] :sun-colour 0xffb877 :sun-power 3.1
+               :fill 1.28 :bounce 0x5a4632 :exposure 1.2
+               :cloud [255 204 158] :glow [255 168 88] :glow-a 0.78}
+   :noon      {:zenith 0x1f5cb0 :top 0x3d84d0 :horizon 0xc8e0f0 :haze 0x909888
+               :sun [60.0 110.0 40.0] :sun-colour 0xfffaf0 :sun-power 3.0
+               :fill 1.50 :bounce 0x58543f :exposure 1.2
+               :cloud [255 255 255] :glow [255 250 236] :glow-a 0.42}})
+
+(def ^:private hour-order [:afternoon :morning :golden :noon])
+
+(defn hour-of
+  "Which hour this world is stuck at. `?hour=golden` overrides it, so one can
+  be looked at without hunting for a seed that happens to have it."
+  [seed]
+  (let [forced (some-> (re-find #"[?&]hour=([a-z]+)" (or (.-search js/location) ""))
+                       second keyword)]
+    (if (contains? hours forced)
+      forced
+      (nth hour-order (mod (js/Math.abs (prng/hash-coords seed 64 65))
+                           (count hour-order))))))
 
 ;; How far the sun's shadow camera reaches, in metres either side of the car.
 ;; A shadow map covers a fixed box, so this trades resolution against range:
@@ -164,10 +204,19 @@
   again a full turn away so the seam at due north has no edge in it, and each
   is squashed horizontally, because a cloud seen from below is longer than it
   is tall."
-  [seed]
+  [seed {:keys [zenith top horizon haze sun cloud glow glow-a]}]
   (let [^js c (js/document.createElement "canvas")
         _ (set! (.-width c) sky-w)
         _ (set! (.-height c) sky-h)
+        [cr cg cb] cloud
+        [gr gg gb] glow
+        ;; Where the sun is on the canvas. This is three's equirectangular
+        ;; lookup run backwards -- u from the bearing, v from the elevation,
+        ;; and the canvas is upside down relative to v.
+        [sx0 sy0 sz0] sun
+        sl (js/Math.hypot sx0 sy0 sz0)
+        sun-u (+ 0.5 (/ (js/Math.atan2 (/ sz0 sl) (/ sx0 sl)) (* 2 js/Math.PI)))
+        sun-v (+ 0.5 (/ (js/Math.asin (/ sy0 sl)) js/Math.PI))
         ^js g (.getContext c "2d")
         grad (.createLinearGradient g 0 0 0 sky-h)
         hex (fn [n] (str "#" (.padStart (.toString n 16) 6 "0")))
@@ -177,29 +226,40 @@
                ;; that runs off one edge arrives on the other.
                (doseq [ox [0 (- sky-w) sky-w]]
                  (let [rg (.createRadialGradient g (+ x ox) y 0 (+ x ox) y r)]
-                   (.addColorStop rg 0.0 (str "rgba(255,255,255," a ")"))
-                   (.addColorStop rg 0.55 (str "rgba(246,249,253," (* 0.5 a) ")"))
-                   (.addColorStop rg 1.0 "rgba(255,255,255,0)")
+                   (.addColorStop rg 0.0 (str "rgba(" cr "," cg "," cb "," a ")"))
+                   (.addColorStop rg 0.55 (str "rgba(" (- cr 9) "," (- cg 6) "," (- cb 2)
+                                               "," (* 0.5 a) ")"))
+                   (.addColorStop rg 1.0 (str "rgba(" cr "," cg "," cb ",0)"))
                    (set! (.-fillStyle g) rg)
                    (.beginPath g)
                    (.ellipse g (+ x ox) y r (* 0.42 r) 0 0 6.283185307179586)
                    (.fill g))))]
-    (.addColorStop grad 0.0 (hex sky-zenith))
-    (.addColorStop grad 0.30 (hex sky-top))
-    (.addColorStop grad 0.52 (hex sky-horizon))
+    (.addColorStop grad 0.0 (hex zenith))
+    (.addColorStop grad 0.30 (hex top))
+    (.addColorStop grad 0.52 (hex horizon))
     ;; Below the horizon is haze, not ground: the terrain covers it, and the
     ;; only place this shows is in the cars' reflections.
-    (.addColorStop grad 1.0 (hex 0x8e9384))
+    (.addColorStop grad 1.0 (hex haze))
     (set! (.-fillStyle g) grad)
     (.fillRect g 0 0 sky-w sky-h)
     ;; A soft brightening where the sun is, which is most of what gives a sky
-    ;; a direction rather than merely a top and a bottom.
-    (let [sx (* 0.30 sky-w) sy (* 0.30 sky-h)
-          rg (.createRadialGradient g sx sy 0 sx sy (* 0.42 sky-w))]
-      (.addColorStop rg 0.0 "rgba(255,246,214,0.5)")
-      (.addColorStop rg 1.0 "rgba(255,246,214,0)")
-      (set! (.-fillStyle g) rg)
-      (.fillRect g 0 0 sky-w sky-h))
+    ;; a direction rather than merely a top and a bottom -- and, low down, a
+    ;; band of the same colour along the horizon under it. It used to be
+    ;; painted at a fixed spot that had nothing to do with where the sun was.
+    (doseq [ox [0 (- sky-w) sky-w]]
+      (let [sx (+ ox (* sun-u sky-w)) sy (* (- 1.0 sun-v) sky-h)
+            rg (.createRadialGradient g sx sy 0 sx sy (* 0.42 sky-w))]
+        (.addColorStop rg 0.0 (str "rgba(" gr "," gg "," gb "," glow-a ")"))
+        (.addColorStop rg 1.0 (str "rgba(" gr "," gg "," gb ",0)"))
+        (set! (.-fillStyle g) rg)
+        (.fillRect g 0 0 sky-w sky-h)
+        ;; And the sun itself: small, white-hot in the middle.
+        (let [d (.createRadialGradient g sx sy 0 sx sy 16)]
+          (.addColorStop d 0.0 "rgba(255,255,250,1)")
+          (.addColorStop d 0.45 "rgba(255,250,232,0.95)")
+          (.addColorStop d 1.0 (str "rgba(" gr "," gg "," gb ",0)"))
+          (set! (.-fillStyle g) d)
+          (.fillRect g (- sx 16) (- sy 16) 32 32))))
     ;; Cumulus. Three puffs per cloud rather than one, because a single ellipse
     ;; reads as a smudge.
     (dotimes [_ 46]
@@ -224,12 +284,13 @@
 
   The environment map is what turns flat-shaded boxes into cars: paint with
   nothing to reflect reads as coloured cardboard whatever the lighting does."
-  [^js renderer seed]
+  [^js renderer seed hour]
   (let [scene   (three/Scene.)
-        tex     (sky-texture seed)
+        tex     (sky-texture seed hour)
         ^js pmrem (three/PMREMGenerator. renderer)
         env     (.-texture (.fromEquirectangular pmrem tex))
-        ^js sun (three/DirectionalLight. 0xfff0d4 2.8)]
+        ^js sun (three/DirectionalLight. (:sun-colour hour) (:sun-power hour))
+        [sx sy sz] (:sun hour)]
     (.dispose pmrem)
     (set! (.-background scene) tex)
     (set! (.-environment scene) env)
@@ -237,13 +298,17 @@
     ;; pop into existence at the horizon. Matched to the horizon stop of the
     ;; gradient, so the world dissolves into the sky rather than into a band of
     ;; the wrong colour.
-    (set! (.-fog scene) (three/Fog. sky-horizon 160 (* 0.92 k/stream-radius k/chunk-size)))
+    (set! (.-fog scene) (three/Fog. (:horizon hour) 160
+                                    (* 0.92 k/stream-radius k/chunk-size)))
     ;; Mid-afternoon, about 35 degrees up. This is not a cosmetic choice: the
     ;; first version put the sun 63 degrees up, and at that angle a low block
     ;; casts a shadow shorter than its own pavement. Everything was working --
     ;; the map was full of geometry, the shaders sampled it, the depth
     ;; comparison came out "in shadow" -- and nothing was visible on the road.
-    (.set (.-position sun) 95 82 62)
+    ;; The afternoon's sun is about 35 degrees up, and that is not a cosmetic
+    ;; choice either: see `hours` for the others, none of which is higher
+    ;; than about 55.
+    (.set (.-position sun) sx sy sz)
     (set! (.-castShadow sun) true)
     (let [^js sh (.-shadow sun)
           ^js c  (.-camera sh)]
@@ -267,7 +332,7 @@
     ;; being a silhouette. It was 1.1, which was enough on a clear day and not
     ;; on any other -- and an overcast sky is *more* ambient light, not less,
     ;; which is why `weather` now raises this as it takes the sun away.
-    (.add scene (doto (three/HemisphereLight. sky-horizon ground-bounce 1.55)
+    (.add scene (doto (three/HemisphereLight. (:horizon hour) (:bounce hour) (:fill hour))
                   (aset "name" "fill")))
     [scene sun]))
 
@@ -277,8 +342,8 @@
   A directional light's shadow covers one fixed box in world space. Left at the
   origin it stops working the moment the player drives out of it, which in a
   world this size is about four seconds."
-  [^js sun px py pz]
-  (.set (.-position sun) (+ px 95.0) (+ py 82.0) (+ pz 62.0))
+  [^js sun [sx sy sz] px py pz]
+  (.set (.-position sun) (+ px sx) (+ py sy) (+ pz sz))
   (.set (.-position (.-target sun)) px py pz)
   (.updateMatrixWorld (.-target sun)))
 
@@ -625,15 +690,18 @@
         ;; sunlit side of every white building clips to paper and the shaded
         ;; side goes to mud, which is most of why the world read as flat.
         _            (set! (.-toneMapping renderer) (.-ACESFilmicToneMapping three))
-        _            (set! (.-toneMappingExposure renderer) 1.25)
+        hour         (hours (hour-of seed))
+        ;; Read back by `weather` as the clear-sky value it dims from.
+        _            (set! (.-toneMappingExposure renderer) (:exposure hour))
         _            (set! (.-enabled (.-shadowMap renderer)) true)
         _            (set! (.-type (.-shadowMap renderer)) (.-PCFSoftShadowMap three))
         tex          (textures/build! renderer seed)
-        [scene sun]  (build-scene! renderer seed)
+        [scene sun]  (build-scene! renderer seed hour)
         [meshes cars] (build-cars! scene sim tex)
         ^js cam      (three/PerspectiveCamera. 70 1 0.3 2000)]
     {:renderer       renderer
      :sun            sun
+     :sun-at         (:sun hour)
      :textures       tex
      :chunk-material (mat (:ground tex) true)
      :scene        scene
@@ -808,7 +876,7 @@
     (draw-lights! rs sim gloom)
     (draw-boosts! rs held)
     (let [o (* player sim/stride)]
-      (follow-sun! (:sun rs)
+      (follow-sun! (:sun rs) (:sun-at rs)
                    (lerp (aget prev (+ o 0)) (aget curr (+ o 0)) alpha)
                    (lerp (aget prev (+ o 1)) (aget curr (+ o 1)) alpha)
                    (lerp (aget prev (+ o 2)) (aget curr (+ o 2)) alpha))
