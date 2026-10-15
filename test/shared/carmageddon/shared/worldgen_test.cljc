@@ -638,22 +638,37 @@
     (is (not-any? #{:water}
                   (for [cx (range -20 21) cz (range -20 21)] (w/area-kind seed cx cz))))))
 
-(deftest the-ground-says-where-the-river-is
+(deftest the-ground-says-where-the-water-is
   (let [[cx cz] (first (for [cx (range -16 17) cz (range -16 17)
                              :let [x (* (+ cx 0.5) k/chunk-size) z (* (+ cz 0.5) k/chunk-size)]
                              :when (> (w/river seed x z) 0.9)]
                          [cx cz]))
-        {:keys [rivers verts origin size]} (w/chunk-data seed cx cz)
+        {:keys [waters heights verts origin size]} (w/chunk-data seed cx cz)
         [x0 z0] origin
         step (/ size (dec verts))]
-    (is (= (* verts verts) (alen* rivers)))
-    (testing "one value per vertex, the same one the channel was cut with"
-      (doseq [i [0 7 16 32] j [0 9 16 32]]
-        (is (< (abs (- (aget* rivers (+ (* i verts) j))
-                       (w/river seed (+ x0 (* i step)) (+ z0 (* j step)))))
-               1e-5))))
-    (is (some #(> % w/water-level) (map #(aget* rivers %) (range (alen* rivers))))
-        "a chunk with a river through its middle has water in it")))
+    (is (= (* verts verts) (alen* waters)))
+    (testing "the surface the client draws is the one `water-at` reports"
+      (doseq [i (range 0 verts 4) j (range 0 verts 4)
+              :let [wa (w/water-at seed (+ x0 (* i step)) (+ z0 (* j step)))]
+              :when wa]
+        (is (< (abs (- wa (aget* waters (+ (* i verts) j)))) 1e-3))))
+    (is (some (fn [k] (> (aget* waters k) (aget* heights k))) (range (alen* waters)))
+        "a chunk with a river through its middle has water standing in it")))
+
+(deftest no-road-runs-under-water
+  (testing "a junction that landed in a channel took its height off the
+            riverbed, and every street out of it ran down the bank and under
+            the water: three hundred of them, and a hundred and fifty decks"
+    (doseq [sd [seed 42 1337]
+            {:keys [points ya yb]} (w/streets-in-bounds sd -2000.0 -2000.0 2000.0 2000.0)
+            :let [[ax az] (first points) [bx bz] (peek points)]
+            i (range 1 20)
+            :let [t (/ i 20.0)
+                  x (+ ax (* t (- bx ax))) z (+ az (* t (- bz az)))
+                  wa (w/water-at sd x z)]
+            :when wa]
+      (is (> (+ ya (* t (- yb ya))) wa)
+          (str "seed " sd ": a road under water at " [x z])))))
 
 (deftest building-parts-are-well-formed
   (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))

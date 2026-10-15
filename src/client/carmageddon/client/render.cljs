@@ -163,22 +163,20 @@
 (defn- water-geometry
   "The surface of whatever river runs through a chunk, or nil if none does.
 
-  The same grid as the ground, lifted to the water line: at each vertex the
-  surface stands `river-depth * (rv - water-level)` above the ground, which is
-  exactly the height the land was before the channel was cut, less the part
-  of the cut that is under water. Away from the channel that is below the
-  ground, so the depth test hides it and the shoreline falls out of the
-  intersection of two surfaces rather than being worked out anywhere.
+  The same grid as the ground, at the heights `worldgen` worked out for the
+  water. Away from the channel that surface is below the ground, so the depth
+  test hides it and the shoreline falls out of the intersection of two
+  surfaces rather than being worked out anywhere.
 
-  Only the triangles that come near the water line are kept, so a chunk with a
-  river in one corner carries a strip, not a sheet."
-  [{:keys [verts size heights rivers]}]
-  (when rivers
+  Only the cells that reach the water are kept, so a chunk with a river in one
+  corner carries a strip, not a sheet."
+  [{:keys [verts size heights waters]}]
+  (when waters
     (let [n verts
           cells (dec n)
           step (/ size cells)
-          shore (- worldgen/water-level 0.12)
-          wet? (fn [k] (> (aget rivers k) shore))]
+          valid? (fn [k] (> (aget waters k) (* 0.5 worldgen/no-water)))
+          wet? (fn [k] (and (valid? k) (> (aget waters k) (aget heights k))))]
       (when (some wet? (range (* n n)))
         (let [pos (js/Float32Array. (* n n 3))
               tris (array)]
@@ -186,16 +184,15 @@
             (dotimes [j n]
               (let [k (+ (* i n) j) o (* 3 k)]
                 (aset pos o (* i step))
-                (aset pos (+ o 1) (+ (aget heights k)
-                                     (* worldgen/river-depth
-                                        (- (aget rivers k) worldgen/water-level))))
+                (aset pos (+ o 1) (if (valid? k) (aget waters k) (aget heights k)))
                 (aset pos (+ o 2) (* j step)))))
           (dotimes [i cells]
             (dotimes [j cells]
               (let [a (+ (* i n) j) b (+ (* (inc i) n) j)
                     c (+ (* (inc i) n) (inc j)) d (+ (* i n) (inc j))]
                 ;; Same winding as the ground, and for the same reason.
-                (when (or (wet? a) (wet? b) (wet? c) (wet? d))
+                (when (and (valid? a) (valid? b) (valid? c) (valid? d)
+                           (or (wet? a) (wet? b) (wet? c) (wet? d)))
                   (.push tris a c b a d c)))))
           (doto (three/BufferGeometry.)
             (.setAttribute "position" (three/BufferAttribute. pos 3))

@@ -22,20 +22,20 @@
         seed (unchecked-get d "seed")
         cx   (unchecked-get d "cx")
         cz   (unchecked-get d "cz")
-        {:keys [heights colors rivers props buildings building-parts peds furniture
+        {:keys [heights colors waters props buildings building-parts peds furniture
                 bridges flora landmarks landmark-rotors smoke pickups traffic
                 verts size origin]}
         (worldgen/chunk-data seed cx cz)
         [x0 z0] origin]
     (.postMessage js/self
                   #js {:cx cx :cz cz :verts verts :size size :x0 x0 :z0 z0
-                       :heights heights :colors colors :rivers rivers
+                       :heights heights :colors colors :waters waters
                        :props props :buildings buildings :peds peds
                        :furniture furniture :parts building-parts
                        :bridges bridges :flora flora :landmarks landmarks
                        :rotors landmark-rotors :smoke smoke
                        :pickups pickups :traffic traffic}
-                  #js [(.-buffer heights) (.-buffer colors) (.-buffer rivers)
+                  #js [(.-buffer heights) (.-buffer colors) (.-buffer waters)
                        (.-buffer props) (.-buffer buildings) (.-buffer peds)
                        (.-buffer furniture) (.-buffer building-parts)
                        (.-buffer bridges) (.-buffer flora)

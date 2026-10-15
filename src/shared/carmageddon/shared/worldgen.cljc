@@ -77,6 +77,7 @@
 ;; and five and a half above the bed. The channel was cut and never filled,
 ;; so a river was a dark ditch that the map insisted was water.
 (def water-level 0.5)
+(def no-water -1.0e4)      ; a vertex the river does not reach
 (def ^:private river-half  14.0)   ; metres of channel either side of the line
 (def ^:private river-bank  12.0)   ; and how far the banks slope back up
 (def ^:private river-wet   0.44)   ; wetness below which a region has no rivers
@@ -133,6 +134,23 @@
             (* m (- 1.0 (smootherstep-clamped
                          (/ (- metres river-half) river-bank))))))))))
 
+(defn- base-height* [seed x z rv]
+  (- (* terrain-amp (- (noise/fbm2d seed (/ x terrain-scale) (/ z terrain-scale)
+                                    terrain-octaves terrain-gain 2.0)
+                       0.5))
+     (* river-depth rv)))
+
+(defn water-at
+  "Where the water surface is at (x, z), or nil where there is none: the land
+  as it was before the river cut it, less the part of the cut that is full.
+
+  From the uncut land rather than from the ground under the point, because the
+  ground is not always the riverbed -- a road built up along a bank raises it
+  -- and water worked out from the ground would stand on the road."
+  [seed x z]
+  (when (> (river seed x z) water-level)
+    (- (base-height* seed x z 0.0) (* river-depth water-level))))
+
 (defn base-height
   "Terrain before roads are cut into it, with river channels carved out of it.
 
@@ -145,11 +163,7 @@
   otherwise evaluate the field twice per vertex, and the river field is the
   most expensive thing in the generator."
   ([seed x z] (base-height seed x z (river seed x z)))
-  ([seed x z rv]
-   (- (* terrain-amp (- (noise/fbm2d seed (/ x terrain-scale) (/ z terrain-scale)
-                                     terrain-octaves terrain-gain 2.0)
-                        0.5))
-      (* river-depth rv))))
+  ([seed x z rv] (base-height* seed x z rv)))
 
 ;; --- how built-up a place is ------------------------------------------------
 
@@ -454,8 +468,16 @@
               0.0)]
     (let [lift-a (node-lift seed gx gz along-x?)
           lift-b (node-lift seed hx hz along-x?)
-          ya (+ (base-height seed (nth a 0) (nth a 1)) lift-a)
-          yb (+ (base-height seed (nth b 0) (nth b 1)) lift-b)]
+          ;; The land a road is built to is the land before the river cut it.
+          ;; Taking the node's height off the carved terrain put any junction
+          ;; that happened to land in a channel on the riverbed, and every
+          ;; street out of it ran down the bank and under the water -- three
+          ;; hundred of them in a few kilometres, and a hundred and fifty decks
+          ;; with them. At bank height the street over the channel clears it,
+          ;; `spans-a-gap?` sees the gap, and it gets a deck. Identical to the
+          ;; carved height anywhere dry, which is nearly everywhere.
+          ya (+ (base-height seed (nth a 0) (nth a 1) 0.0) lift-a)
+          yb (+ (base-height seed (nth b 0) (nth b 1) 0.0) lift-b)]
       {:points   (if (zero? bow) [a b] (bezier a b bow bend-samples))
        ;; Its own identity in the lattice. Recovering this from the polyline
        ;; does not work: a node is displaced by up to 13 m, so an endpoint can
@@ -1008,7 +1030,100 @@
 (def ^:private pier-min 2.0)        ; below this a pier is a stub, not worth it
 
 (def ^:private bridge-tint
-  {:deck 0x3c3c40 :rail 0x9aa0a6 :pier 0x8c8880})
+  {:deck 0x3c3c40 :rail 0x9aa0a6 :pier 0x8c8880 :girder 0x6a6a6e})
+
+;; The steel of an arch bridge, picked per bridge. A river town has a red
+;; bridge and a green one, which is how anybody gives directions in one.
+(def ^:private arch-paints [0xb8452f 0x3f6b5a 0xd8d4c8 0x2f4f7a 0x6b5a8a])
+
+(def ^:private girder-depth 1.1)    ; edge beams under the deck
+(def ^:private arch-rise-max 14.0)
+(def ^:private arch-segments 12)
+(def ^:private hanger-every 6.0)    ; metres between hangers
+(def ^:private brace-clear 6.0)     ; no cross brace lower than a lorry
+
+(def ^:private arch-min 18.0)      ; m of water below which a bridge is a beam
+
+(defn- water-span
+  "The stretch of a straight street from a to b that is over water, as
+  [t0 t1] fractions along it with a little bank either side -- or nil where it
+  crosses too little water to be worth an arch.
+
+  An arch springs from the banks. Hung from one junction to the next instead,
+  it stood over the houses either side of the river as well as over the river,
+  and went through the ones close to the road."
+  [seed [ax az] [bx bz]]
+  (let [n 25
+        wet (filterv (fn [i]
+                       (let [t (/ (double i) n)]
+                         (> (river seed (+ ax (* t (- bx ax))) (+ az (* t (- bz az))))
+                            water-level)))
+                     (range (inc n)))]
+    (when (seq wet)
+      (let [t0 (max 0.08 (- (/ (double (first wet)) n) 0.06))
+            t1 (min 0.92 (+ (/ (double (peek wet)) n) 0.06))]
+        (when (> (* (- t1 t0) (hypot (- bx ax) (- bz az))) arch-min)
+          [t0 t1])))))
+
+(defn- straight?
+  "Is a polyline close enough to its chord to hang an arch over? A country
+  road bows, and an arch drawn along the chord of a bowed deck would stand
+  beside the road rather than over it."
+  [points]
+  (let [[ax az] (first points) [bx bz] (peek points)
+        dx (- bx ax) dz (- bz az)
+        len (max 1e-6 (hypot dx dz))]
+    (every? (fn [[px pz]]
+              (< (abs (/ (- (* dx (- pz az)) (* dz (- px ax))) len)) 1.5))
+            points)))
+
+(defn- arch-parts!
+  "A tied steel arch over a river crossing: two ribs along the deck edges, the
+  hangers dropping from them to the deck, and cross braces over the top where
+  they clear a lorry.
+
+  Not solid. The ribs and hangers stand outside the parapets, where nothing
+  driving on the deck can reach them, and a car that comes off the side has
+  bigger problems than the steelwork."
+  [emit tint [ax az] [bx bz] ya yb off [t0 t1]]
+  (let [dx (- bx ax) dz (- bz az)
+        horiz (max 0.01 (hypot dx dz))
+        ux (/ dx horiz) uz (/ dz horiz)
+        rx (- uz) rz ux
+        len (* horiz (- t1 t0))
+        rise (min arch-rise-max (max 7.0 (* 0.22 len)))
+        at (fn [t side h]
+             (let [tt (+ t0 (* t (- t1 t0)))]
+               [(+ ax (* dx tt) (* rx off side))
+                (+ ya (* (- yb ya) tt) h)
+                (+ az (* dz tt) (* rz off side))]))
+        height (fn [t] (* rise 4.0 t (- 1.0 t)))
+        beam (fn [[x1 y1 z1] [x2 y2 z2] w h]
+               (let [ddx (- x2 x1) ddy (- y2 y1) ddz (- z2 z1)
+                     hz (max 0.01 (hypot ddx ddz))]
+                 (emit (* 0.5 (+ x1 x2)) (* 0.5 (+ y1 y2)) (* 0.5 (+ z1 z2))
+                       (#?(:clj Math/atan2 :cljs js/Math.atan2) ddx ddz)
+                       (#?(:clj Math/atan2 :cljs js/Math.atan2) ddy hz)
+                       w h (hypot hz ddy) :box tint 0.0)))]
+    (doseq [side [1.0 -1.0]]
+      ;; The rib, as a chain of straight pieces along the parabola.
+      (dotimes [i arch-segments]
+        (let [ta (/ (double i) arch-segments)
+              tb (/ (double (inc i)) arch-segments)]
+          (beam (at ta side (height ta)) (at tb side (height tb)) 0.7 0.9)))
+      ;; Hangers, deck to rib.
+      (let [n (max 2 (long (floor (/ len hanger-every))))]
+        (dotimes [i (dec n)]
+          (let [t (/ (double (inc i)) n)
+                h (height t)
+                [x y z] (at t side 0.0)]
+            (emit x (+ y (* 0.5 h)) z 0.0 0.0 0.18 h 0.18 :box tint 0.0)))))
+    ;; Braces across the top, only where they are well over the traffic.
+    (doseq [t [0.3 0.5 0.7]
+            :when (> (height t) brace-clear)]
+      (let [[x y z] (at t 0.0 (height t))]
+        (emit x y z (#?(:clj Math/atan2 :cljs js/Math.atan2) ux uz) 0.0
+              (* 2.0 off) 0.5 0.6 :box tint 0.0)))))
 
 (defn chunk-bridges
   "Deck, parapets and piers for every bridge this chunk owns, as
@@ -1037,10 +1152,15 @@
                (conj! out sx) (conj! out sy) (conj! out sz)
                (conj! out (double (prim-index prim)))
                (conj! out (double tint)) (conj! out (double solid)))]
-    (doseq [{:keys [points half ya yb]} (filter :bridge? owned)]
+    (doseq [{:keys [points half ya yb lift-a lift-b gx gz along-x?]} (filter :bridge? owned)]
       (let [n (count points)
             chord (fn [t] (+ ya (* t (- yb ya))))
-            width (+ (* 2.0 half) (* 2.0 deck-margin))]
+            width (+ (* 2.0 half) (* 2.0 deck-margin))
+            ;; A river crossing on the level gets an arch. An expressway
+            ;; already has its height and keeps its viaduct.
+            arch (when (and (zero? lift-a) (zero? lift-b) (straight? points))
+                   (water-span seed (first points) (peek points)))
+            arch? (some? arch)]
         (dotimes [i (dec n)]
           (let [[x1 z1] (nth points i)
                 [x2 z2] (nth points (inc i))
@@ -1066,6 +1186,14 @@
                 off (- (* 0.5 width) 0.15)]
             (emit mx (- my sink) mz yaw pitch
                   width deck-thickness span :box (:deck bridge-tint) 1.0)
+            ;; Edge girders under the deck. A slab half a metre thick reads
+            ;; as a plank laid across the gap; the beams are what make it
+            ;; something that could carry a lorry.
+            (let [gs (/ (+ deck-thickness (* 0.5 girder-depth)) (max 0.2 (js-cos pitch)))]
+              (doseq [sgn [1.0 -1.0]]
+                (emit (+ mx (* rx (- (* 0.5 width) 0.6) sgn)) (- my gs)
+                      (+ mz (* rz (- (* 0.5 width) 0.6) sgn))
+                      yaw pitch 0.8 girder-depth span :box (:girder bridge-tint) 0.0)))
             (let [panels (max 1 (long (floor (/ span rail-panel))))
                   plen   (/ span panels)
                   ;; Along the span, in world terms. The deck is pitched, so
@@ -1082,21 +1210,42 @@
                     (emit (+ cxp (* rx off sgn)) (+ cyp (* 0.5 rail-height)) (+ czp (* rz off sgn))
                           yaw pitch 0.3 rail-height (* 0.92 plen)
                           :box (:rail bridge-tint) 2.0)))))))
-        ;; Piers, spaced along the whole span rather than per segment.
+        ;; Piers, spaced along the whole span rather than per segment: a cap
+        ;; beam across under the deck on two columns, which is what a pier
+        ;; under a road this wide actually is. One fat cylinder in the middle
+        ;; read as a deck balanced on a pole.
+        ;;
+        ;; An arch carries its own deck, so in the river it has none -- the
+        ;; whole point of an arch is the clear water under it.
         (let [[ax az] (first points)
               [bx bz] (peek points)
               span (hypot (- bx ax) (- bz az))
-              piers (long (floor (/ span pier-spacing)))]
+              piers (long (floor (/ span pier-spacing)))
+              yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) (- bx ax) (- bz az))
+              rx (/ (- (- bz az)) (max 0.01 span)) rz (/ (- bx ax) (max 0.01 span))
+              legs (max 1.5 (- (* 0.5 width) 2.0))]
           (dotimes [i piers]
             (let [t (/ (+ i 0.5) (double piers))
                   px (+ ax (* t (- bx ax)))
                   pz (+ az (* t (- bz az)))
-                  top (- (chord t) deck-thickness)
+                  top (- (chord t) deck-thickness girder-depth)
                   ground (base-height seed px pz)
                   h (- top ground)]
-              (when (> h pier-min)
-                (emit px (+ ground (* 0.5 h)) pz 0.0 0.0
-                      2.0 h 2.0 :cylinder (:pier bridge-tint) 0.0)))))))
+              (when (and (> h pier-min)
+                         (not (and arch? (> (river seed px pz) 0.2))))
+                (emit px (- top 0.5) pz yaw 0.0 (- width 1.0) 1.0 1.6
+                      :box (:pier bridge-tint) 0.0)
+                (doseq [sgn [1.0 -1.0]]
+                  (emit (+ px (* rx legs sgn)) (+ ground (* 0.5 (- h 1.0)))
+                        (+ pz (* rz legs sgn)) 0.0 0.0
+                        1.5 (- h 1.0) 1.5 :cylinder (:pier bridge-tint) 0.0))))))
+        (when arch?
+          (arch-parts! emit
+                       (nth arch-paints (mod (prng/hash-coords (+ seed 4243) gx
+                                                               (+ (* 2 gz) (if along-x? 1 0)))
+                                             (count arch-paints)))
+                       (first points) (peek points) ya yb
+                       (+ (* 0.5 width) 0.35) arch))))
     (let [v (persistent! out)
           a (farray (count v))]
       (dotimes [i (count v)] (fput! a i (nth v i)))
@@ -4088,9 +4237,9 @@
                       (dotimes [c 4] (dput! rq (+ o c) (aget scratch c)))))))
         heights (farray (* n n))
         colors  (farray (* n n 3))
-        ;; How much river is at each vertex, for the water surface. Already
-        ;; computed for the carve and the tint; four kilobytes to keep.
-        rivers  (farray (* n n))]
+        ;; The water surface at each vertex, or `no-water` where the river does
+        ;; not reach. Worked out only where it might, which is a strip.
+        waters  (farray (* n n))]
     ;; The ground comes first, and everything else is then placed on it. That
     ;; ordering is the point: the heightfield is what the collider is built from
     ;; and what the mesh is drawn from, so a lamp post standing on it stands
@@ -4192,7 +4341,9 @@
               rb   (+ road-colour-b (* dirt-road (- track-colour-b road-colour-b)))
               o    (* idx 3)]
           (fput! heights idx y)
-          (fput! rivers idx rv)
+          (fput! waters idx (if (> rv (- water-level 0.3))
+                              (- (base-height* seed x z 0.0) (* river-depth water-level))
+                              no-water))
           (fput! colors (+ o 0) (+ tr (* road (- rr tr))))
           (fput! colors (+ o 1) (+ tg (* road (- rg tg))))
           (fput! colors (+ o 2) (+ tb (* road (- rb tb)))))))
@@ -4210,7 +4361,7 @@
      :origin [x0 z0]
      :heights heights
      :colors colors
-     :rivers rivers
+     :waters waters
      :props props
      :buildings buildings
      :building-parts parts
