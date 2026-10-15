@@ -707,6 +707,40 @@
   (testing "a shallow crossing is left as it is"
     (is (nil? (w/interchange seed 1 0)) "not an expressway line")))
 
+(deftest no-street-runs-down-a-river
+  (testing "a lane whose line happened to follow a channel became a bridge
+            lying the length of the river"
+    #?(:clj
+       (let [down? @#'w/down-a-river?]
+         (doseq [sd [1234 42]
+                 {:keys [points lift-a lift-b]} (w/streets-in-bounds sd -2000.0 -2000.0 2000.0 2000.0)
+                 :when (and (zero? lift-a) (zero? lift-b))]
+           (is (not (down? sd (first points) (peek points)))
+               (str "seed " sd ": a street down a river from " (first points))))))))
+
+(deftest a-bridge-leaves-its-junctions-open
+  (testing "a deck's parapets ran right across the junction at its end, and a
+            junction in a river was four concrete walls meeting in the middle"
+    (let [sd 10
+          ;; A node in a river where bridges arrive from both axes.
+          [nx nz] (w/node sd -8 8)
+          [cx cz] (w/chunk-of nx nz)
+          rail 0x9aa0a6
+          panels (for [ox [-1 0 1] oz [-1 0 1]
+                       :let [a (w/chunk-bridges sd (+ cx ox) (+ cz oz))
+                             st w/part-stride]
+                       i (range (/ (alen* a) st))
+                       :when (== rail (aget* a (+ 9 (* i st))))]
+                   [(aget* a (* i st)) (aget* a (+ 2 (* i st)))])]
+      (is (seq panels))
+      (is (> (w/river sd nx nz) 0.05) "the test needs its junction in the river")
+      ;; The square the crossing decks share, at the width of the widest.
+      (let [half (+ 1.1 (reduce max (map #(:half (w/road-profile (:class %)))
+                                         (w/node-arms sd -8 8))))]
+        (doseq [[x z] panels]
+          (is (not (and (< (abs (- x nx)) half) (< (abs (- z nz)) half)))
+              (str "a parapet in the junction at " [x z])))))))
+
 (deftest building-parts-are-well-formed
   (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
         {:keys [buildings parts]} (w/chunk-structures seed cx cz (w/road-field seed cx cz))

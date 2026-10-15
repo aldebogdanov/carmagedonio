@@ -327,11 +327,47 @@
   [pos span]
   (long (floor (/ (double pos) span))))
 
+(defn- river-across
+  "Which way is across the river at (x, z): the unit gradient of the field the
+  channel is the contour of. Along the channel is at right angles to it."
+  [seed x z]
+  (let [f (fn [px pz] (noise/fbm2d (+ seed 4409) (/ px river-scale) (/ pz river-scale) 3))
+        n (f x z)
+        gx (- (f (+ x river-probe) z) n)
+        gz (- (f x (+ z river-probe)) n)
+        g (max 1e-12 (hypot gx gz))]
+    [(/ gx g) (/ gz g)]))
+
+(defn- down-a-river?
+  "Does a street between these two nodes run down a river rather than across
+  it?
+
+  The lattice is laid without a thought for the water, so now and then a
+  country lane's line happens to follow a channel, and since a street over a
+  gap is a bridge, the whole lane became a bridge lying along the middle of
+  the river from one end to the other. Its middle is in the water, so is most
+  of the rest of it, and it points the way the river does, give or take
+  thirty degrees. A street that crosses a river has water under its middle
+  too -- the direction is what tells them apart."
+  [seed [ax az] [bx bz]]
+  (let [mx (* 0.5 (+ ax bx)) mz (* 0.5 (+ az bz))]
+    (and (> (river seed mx mz) 0.35)
+         (let [wet (count (filter (fn [t] (> (river seed (+ ax (* t (- bx ax)))
+                                                     (+ az (* t (- bz az))))
+                                             0.35))
+                                  [0.15 0.3 0.7 0.85]))
+               [gx gz] (river-across seed mx mz)
+               dx (- bx ax) dz (- bz az)
+               len (max 1e-6 (hypot dx dz))]
+           (and (>= wet 2)
+                (< (abs (/ (+ (* dx gx) (* dz gz)) len)) 0.5))))))
+
 (defn- edge-exists?
   "Does the street from (gx,gz) to its +X or +Z neighbour exist?
 
   Arterials always do -- that single rule is what makes the network connected
-  everywhere, forever, with no global pass.
+  everywhere, forever, with no global pass -- except where one would run
+  down the middle of a river, which no street does; see `down-a-river?`.
 
   Below that the coin is flipped once per *run* rather than once per edge, and
   that is the whole of road continuity. A run is the entire stretch of one line
@@ -348,9 +384,23 @@
   same reason they carried on into this one -- nothing about a run knows where
   the chunk borders are."
   [seed gx gz along-x?]
-  (let [cls (edge-class gx gz along-x?)]
+  (let [cls (edge-class gx gz along-x?)
+        ;; Asked of the nominal lattice position first: this is called for
+        ;; every street anything looks at, and nearly all of them are in dry
+        ;; country, which the coarse wetness says without placing a node.
+        down? (fn []
+                (and (not (river-free? seed
+                                       (* street-spacing (+ gx (if along-x? 0.5 0.0)))
+                                       (* street-spacing (+ gz (if along-x? 0.0 0.5)))))
+                     (down-a-river? seed (node seed gx gz)
+                                    (if along-x? (node seed (inc gx) gz)
+                                        (node seed gx (inc gz))))))]
     (if (= :arterial cls)
-      true
+      ;; A main road too, unless it is an expressway up on its viaduct --
+      ;; which can follow a river for as long as it likes. A gap of a block
+      ;; in one main road leaves every other one, so the network still joins.
+      (or (not (down?))
+          (pos? (node-lift seed gx gz along-x?)))
       (let [;; The line this edge belongs to, and how far along it the edge is.
             line (if along-x? gz gx)
             pos  (if along-x? gx gz)
@@ -377,7 +427,10 @@
             r    (prng/make (prng/hash-coords (+ seed 4409)
                                               (+ (* 2 line) (if along-x? 0 1))
                                               run))]
-        (< (prng/next-double! r) p)))))
+        ;; The coin first, always, so dropping a street that would have run
+        ;; down a river does not move any other street's draw.
+        (and (< (prng/next-double! r) p)
+             (not (down?)))))))
 
 (def ^:private bend-samples 5)
 
@@ -1134,8 +1187,8 @@
   line between them: the slab, the girders under its edges and the parapet
   panels along them. `extra` lengthens the slab past both ends, which a curve
   built of straight pieces needs so that its outside edge has no gaps.
-  `keep?` is asked of each parapet panel's centre and side (+1 or -1, to the
-  right of the direction of travel) whether to build it."
+  `keep?` is asked of each parapet panel's centre, side (+1 or -1, to the
+  right of the direction of travel) and length whether to build it."
   [emit x1 y1 z1 x2 y2 z2 width extra keep? deck-tint]
   (let [mx (* 0.5 (+ x1 x2)) mz (* 0.5 (+ z1 z2))
         my (* 0.5 (+ y1 y2))
@@ -1178,7 +1231,7 @@
               cyp (+ my (* ay plen u))]
           (doseq [sgn [1.0 -1.0]
                   :let [px (+ cxp (* rx off sgn)) pz (+ czp (* rz off sgn))]
-                  :when (keep? px cyp pz sgn)]
+                  :when (keep? px cyp pz sgn plen)]
             (emit px (+ cyp (* 0.5 rail-height)) pz
                   yaw pitch 0.3 rail-height (* 0.92 plen)
                   :box (:rail bridge-tint) 2.0)))))))
@@ -1384,7 +1437,7 @@
       (let [ya (nth ys i) yb (nth ys (inc i))
             slip (get slips i)]
         (deck-span! emit ax ya az bx yb bz width (if slip 0.0 0.6)
-                    (fn [px _ pz _]
+                    (fn [px _ pz _ _]
                       ;; The side of a slip road towards its deck is open:
                       ;; that is the parapet nearer the deck's line than the
                       ;; middle of the road is.
@@ -1401,6 +1454,73 @@
           (when (> h pier-min)
             (emit mx (+ ground (* 0.5 h)) mz 0.0 0.0 1.4 h 1.4
                   :cylinder (:pier bridge-tint) 0.0)))))))
+
+(declare node-arms)
+
+;; --- where a bridge meets a junction -----------------------------------------
+;;
+;; A deck's parapets used to run the whole length of its street, node to node.
+;; Where the street passes over the junction at its end -- an expressway over
+;; the grid -- that is right. Where it meets the junction on the level, the
+;; parapet ran straight across the cross street, and a junction in a river,
+;; where every arm is a bridge, was four concrete walls meeting in the middle.
+
+(defn- arm-origin
+  "The lattice edge an arm of node (gx, gz) is, as the [gx gz] it is stored
+  under -- edges are owned by their lower node."
+  [gx gz {:keys [to along-x?]}]
+  (let [[tx tz] to]
+    (if along-x? [(min gx tx) gz] [gx (min gz tz)])))
+
+(defn- level-arms
+  "The arms crossing a street that ends at node (gx, gz) along `along-x?`
+  with lift `lift`, and meet it at its own level -- the streets its parapets
+  have to stop short of."
+  [seed gx gz along-x? lift]
+  (filterv (fn [a] (and (not= along-x? (:along-x? a))
+                        (< (abs (- lift (:lift a))) 1.0)))
+           (node-arms seed gx gz)))
+
+(defn- arm-deck-half [{:keys [class]}] (+ (:half (road-profile class)) deck-margin))
+
+(defn- junction-clear
+  "How far back from node (gx, gz) a bridge arriving along `along-x?` stops
+  its parapets: the far edge of the widest street meeting it there on the
+  level, or nothing at all where it meets none."
+  [seed gx gz along-x? lift]
+  (let [la (level-arms seed gx gz along-x? lift)]
+    (if (seq la)
+      (+ 0.4 (reduce max (map arm-deck-half la)))
+      0.0)))
+
+(defn- junction-pads!
+  "A slab over every junction in the chunk where bridges cross on the level.
+
+  Where they do, both decks run to the middle of the junction and lie in the
+  same plane there, and two coplanar slabs flicker. The pad sits a few
+  centimetres proud of both and covers the square they share."
+  [emit seed x0 z0 x1 z1]
+  (when-not (river-free? seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
+    (doseq [gx (range (dec (grid-floor x0 street-spacing)) (+ 2 (grid-floor x1 street-spacing)))
+            gz (range (dec (grid-floor z0 street-spacing)) (+ 2 (grid-floor z1 street-spacing)))
+            :let [[nx nz] (node seed gx gz)]
+            :when (and (<= x0 nx) (< nx x1) (<= z0 nz) (< nz z1)
+                       (> (river seed nx nz) 0.05))]
+      (let [arms (node-arms seed gx gz)
+            bridged (filterv (fn [a]
+                               (let [[ogx ogz] (arm-origin gx gz a)]
+                                 (:bridge? (street seed ogx ogz (:along-x? a)))))
+                             arms)
+            xs (filterv :along-x? bridged)
+            zs (filterv (complement :along-x?) bridged)]
+        (when (and (seq xs) (seq zs)
+                   (< (abs (- (:lift (first xs)) (:lift (first zs)))) 1.0))
+          (let [y (+ (base-height seed nx nz 0.0) (:lift (first xs)))]
+            (emit nx (+ y 0.03 (* -0.5 deck-thickness)) nz 0.0 0.0
+                  (* 2.0 (reduce max (map arm-deck-half zs)))
+                  deck-thickness
+                  (* 2.0 (reduce max (map arm-deck-half xs)))
+                  :box (:deck bridge-tint) 1.0)))))))
 
 (defn chunk-bridges
   "Deck, parapets and piers for every bridge this chunk owns, as
@@ -1434,6 +1554,7 @@
         ics (interchanges-near seed x0 z0 x1 z1)
         seams (into [] (mapcat :seams) ics)]
     (ramp-parts! emit seed ics x0 z0 x1 z1)
+    (junction-pads! emit seed x0 z0 x1 z1)
     (doseq [{:keys [points half ya yb lift-a lift-b gx gz along-x?]} (filter :bridge? owned)]
       (let [n (count points)
             chord (fn [t] (+ ya (* t (- yb ya))))
@@ -1442,15 +1563,38 @@
             ;; already has its height and keeps its viaduct.
             arch (when (and (zero? lift-a) (zero? lift-b) (straight? points))
                    (water-span seed (first points) (peek points)))
-            arch? (some? arch)]
+            arch? (some? arch)
+            ;; The far end's node: edges run from the lower node outwards.
+            [hx hz] (if along-x? [(inc gx) gz] [gx (inc gz)])
+            [ax az] (first points) [bx bz] (peek points)
+            clear-a (junction-clear seed gx gz along-x? lift-a)
+            clear-b (junction-clear seed hx hz along-x? lift-b)
+            ;; Which way the street leaves each of its ends, to measure along.
+            [a1x a1z] (nth points 1)
+            [b1x b1z] (nth points (- n 2))
+            la (max 1e-6 (hypot (- a1x ax) (- a1z az)))
+            lb (max 1e-6 (hypot (- b1x bx) (- b1z bz)))
+            ;; How far along the street from an end a panel's nearer end is.
+            ;; Straight-line distance from the node let a corner panel, well
+            ;; out to the side, reach two metres into the cross street.
+            from (fn [px pz ex ez ux uz plen]
+                   (- (+ (* (- px ex) ux) (* (- pz ez) uz)) (* 0.5 plen)))]
         (dotimes [i (dec n)]
           (let [[x1 z1] (nth points i)
                 [x2 z2] (nth points (inc i))
                 t1 (/ (double i) (dec n))
                 t2 (/ (double (inc i)) (dec n))]
             (deck-span! emit x1 (chord t1) z1 x2 (chord t2) z2 width 0.0
-                        ;; No parapet where a slip road joins.
-                        (fn [px py pz _] (not (in-seam? seams px py pz)))
+                        ;; No parapet where a slip road joins, nor across a
+                        ;; street that meets this one on the level.
+                        (fn [px py pz _ plen]
+                          (and (not (in-seam? seams px py pz))
+                               (or (zero? clear-a)
+                                   (> (from px pz ax az (/ (- a1x ax) la) (/ (- a1z az) la) plen)
+                                      clear-a))
+                               (or (zero? clear-b)
+                                   (> (from px pz bx bz (/ (- b1x bx) lb) (/ (- b1z bz) lb) plen)
+                                      clear-b))))
                         (:deck bridge-tint))))
         ;; Piers, spaced along the whole span rather than per segment: a cap
         ;; beam across under the deck on two columns, which is what a pier
