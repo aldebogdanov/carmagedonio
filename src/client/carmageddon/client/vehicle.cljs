@@ -217,6 +217,14 @@
     (aset damage dmg-total (min 1.0 (+ (aget damage dmg-total) amount)))
     (aset damage p (min 1.0 (+ (aget damage p) (* 1.5 amount))))))
 
+(defn flood!
+  "Water in the engine: `amount` of damage straight onto the total and every
+  panel alike. Not through `add-damage!`, which armour and a heavy build both
+  divide -- a river does not care how thick the plating is."
+  [{:keys [^js damage]} amount]
+  (dotimes [i 5]
+    (aset damage i (min 1.0 (+ (aget damage i) amount)))))
+
 (defn repair!
   "Undo `amount` of every kind of damage. Panels come back faster than the
   total, so a repair visibly un-bends the car before it fully restores it."

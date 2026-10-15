@@ -98,14 +98,16 @@
                g)))))
 
 (defn wrecked!
-  "The player's car is finished. Ends the run.
+  "The player's car is finished. Ends the run, as `:wreck` or -- for a car
+  that went into a river -- `:drowned`.
 
   A car at 100% damage used to keep driving, which made the damage bar an
   instrument that measured nothing: it filled up and then the game carried on
   exactly as before."
-  [game]
-  (when (= :running (:state @game))
-    (swap! game assoc :state :lost :ending :wreck)))
+  ([game] (wrecked! game :wreck))
+  ([game how]
+   (when (= :running (:state @game))
+     (swap! game assoc :state :lost :ending how))))
 
 (defn tick!
   "Advance the clock by one simulation tick. Runs off the fixed timestep rather

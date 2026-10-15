@@ -303,6 +303,7 @@
       (text! ctx (case ending
                    :target "TARGET REACHED"
                    :wreck  "WRECKED"
+                   :drowned "DROWNED"
                    "OUT OF TIME")
              12 23 (str "700 17px " mono)
              (if (= :won state) good bad) "left")

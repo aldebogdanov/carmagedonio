@@ -34,7 +34,8 @@
             [carmageddon.client.weather :as weather]
             [carmageddon.shared.constants :as k]
             [carmageddon.shared.prng :as prng]
-            [carmageddon.shared.wire :as wire]))
+            [carmageddon.shared.wire :as wire]
+            [carmageddon.shared.worldgen :as worldgen]))
 
 (defonce app (atom nil))
 
@@ -66,6 +67,21 @@
 (def ^:private stranded-up 0.34)
 (def ^:private stranded-speed 1.6)   ; m/s
 (def ^:private stranded-secs 4.0)
+
+;; Water. A river was a channel with nothing in it and then a surface you
+;; could drive along the bottom of for as long as you liked. A car that goes
+;; under now has a moment to come back out, and then the engine floods.
+(def ^:private drown-every 4)       ; ticks between checks
+(def ^:private drown-depth 0.5)     ; m the chassis has to be under
+(def ^:private drown-grace 1.2)     ; s before the water gets in
+(def ^:private drown-rate 0.6)      ; damage a second after that
+
+(defn- under-water?
+  "Is a car at [x y z] under the river? Its explosion, or the lack of one,
+  hangs on this as well as its life."
+  [seed [x y z]]
+  (when-let [w (worldgen/water-at seed x z)]
+    (< y (- w drown-depth))))
 
 ;; What a gas cylinder and a tanker are worth, as fire.
 (def ^:private barrel-fire {:r 4.2 :life 12.0 :seeds 0 :blast 9.0 :push 2400.0})
@@ -197,14 +213,16 @@
                                   birds-state peds-state overlay minimap game
                                   bridges landmarks smoke-state jobs-state rvs
                                   cock fire-state powerups-state weather-state
-                                  remotes events world-now solo-seed]}]
+                                  remotes events world-now solo-seed seed]}]
   ;; Outbound network rate is deliberately independent of both sim and render
   ;; rate. In single player the loopback swallows these; in M6 the same call
   ;; site emits the binary snapshot.
   (let [snap-every (/ k/tick-hz k/snapshot-hz)
         stats      (atom {:fps 0 :tick 0})
         ;; How long the car has been somewhere it cannot drive out of.
-        stranded   (volatile! 0.0)]
+        stranded   (volatile! 0.0)
+        ;; And how long each car has been under water, player first.
+        under      (js/Float32Array. 16)]
     (clock/start!
      {:on-tick
       (fn [tick _dt]
@@ -217,14 +235,31 @@
           ;; A car at 100% damage used to keep driving, which made the damage
           ;; bar an instrument that measured nothing. It ends the run now, and
           ;; it goes up on the way out.
+          ;; Every car in a river, every few ticks. Only the player and the
+          ;; rivals: traffic keeps to its roads, and no road goes under water.
+          (when (zero? (mod tick drown-every))
+            (let [vs (sim/vehicles sim)
+                  dt* (* drown-every k/dt)]
+              (dotimes [i (min (count vs) (.-length under))]
+                (let [v (nth vs i)]
+                  (if (under-water? seed (vehicle/chassis-position v))
+                    (do (when (and (zero? i) (zero? (aget under 0)))
+                          (cockpit/flash! cock "UNDER WATER"))
+                        (aset under i (+ (aget under i) dt*))
+                        (when (> (aget under i) drown-grace)
+                          (vehicle/flood! v (* drown-rate dt*))))
+                    (aset under i 0.0))))))
           (when (and (game/running? game)
                      (>= (vehicle/damage (sim/player-vehicle sim)) 1.0))
-            (let [{:keys [r life seeds blast push]} car-fire]
-              (fire/ignite! fire-state (sim/player-x sim) (sim/player-y sim)
-                            (sim/player-z sim) r life :player seeds)
-              (sim/blast! sim [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
-                          blast push))
-            (game/wrecked! game))
+            (let [{:keys [r life seeds blast push]} car-fire
+                  at [(sim/player-x sim) (sim/player-y sim) (sim/player-z sim)]
+                  drowned? (under-water? seed at)]
+              ;; Nothing burns at the bottom of a river.
+              (when-not drowned?
+                (let [[x y z] at]
+                  (fire/ignite! fire-state x y z r life :player seeds))
+                (sim/blast! sim at blast push))
+              (game/wrecked! game (if drowned? :drowned :wreck))))
           ;; Work. Ticked on the fixed step like the clock it pays into, and
           ;; scored through `game/job-done!` so a delivery reaches the score by
           ;; the same funnel a pedestrian does.
@@ -382,9 +417,12 @@
             ;; that wrecked itself leaves a fire that pays nobody.
             (let [{:keys [r life seeds blast push]} car-fire
                   [x y z] at]
-              (fire/ignite! fire-state x y z r life (when (= :player by) :player)
-                            seeds)
-              (sim/blast! sim [x y z] blast push))
+              ;; One that drowned goes quietly. It still counts: a rival
+              ;; shoved off a bank is as wrecked as one that was rammed.
+              (when-not (under-water? seed at)
+                (fire/ignite! fire-state x y z r life (when (= :player by) :player)
+                              seeds)
+                (sim/blast! sim [x y z] blast push)))
             (when (= :player by) (game/opponent-wrecked! game)))
           ;; Outbound snapshot rate is deliberately independent of both sim and
           ;; render rate.
@@ -800,6 +838,7 @@
                                                  :rvs rvs
                                                  :remotes remotes
                                                  :world-now (world-clock solo? seed s)
+                                                 :seed seed
                                                  :solo-seed (when solo? seed)})]
                     (reset! app {:sim s :rs rs :transport transport :chunks mgr
                                  :props ps :buildings bs :furniture fu :bridges br :flora fl
