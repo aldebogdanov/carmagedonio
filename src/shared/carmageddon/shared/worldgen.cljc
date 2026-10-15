@@ -72,10 +72,28 @@
 
 (def river-scale 1500.0)   ; metres per meander
 (def river-depth  11.0)    ; how far a channel is cut below the land
+;; How full a channel is, as the river amount the surface stands at: water
+;; lies wherever `river` is above this, five and a half metres below the land
+;; and five and a half above the bed. The channel was cut and never filled,
+;; so a river was a dark ditch that the map insisted was water.
+(def water-level 0.5)
 (def ^:private river-half  14.0)   ; metres of channel either side of the line
 (def ^:private river-bank  12.0)   ; and how far the banks slope back up
 (def ^:private river-wet   0.44)   ; wetness below which a region has no rivers
 (def ^:private river-probe  6.0)   ; finite-difference step, metres
+
+(defn- river-country
+  "The coarse wetness that decides whether rivers run here at all. Six
+  kilometres to a wave, so it is as good as constant across a block -- which
+  is what lets a caller with many points in one place ask it once."
+  [seed x z]
+  (noise/fbm2d (+ seed 9911) (/ x (* 4.0 river-scale)) (/ z (* 4.0 river-scale)) 2))
+
+(defn- river-free?
+  "Can there be no river anywhere near (x, z)? Cheap and conservative: true
+  only well inside the dry country, where `river` is zero by construction."
+  [seed x z]
+  (< (river-country seed x z) (- river-wet 0.03)))
 
 (defn river
   "How much river is at a point, in [0,1]: 1 in the channel, 0 on dry land.
@@ -96,8 +114,7 @@
   two octaves against the channel's three and is checked first, because most of
   the world is dry and never pays for the rest."
   [seed x z]
-  (let [wet (noise/fbm2d (+ seed 9911) (/ x (* 4.0 river-scale))
-                         (/ z (* 4.0 river-scale)) 2)]
+  (let [wet (river-country seed x z)]
     (if (< wet river-wet)
       0.0
       (let [f (fn [px pz] (noise/fbm2d (+ seed 4409) (/ px river-scale)
@@ -867,14 +884,21 @@
   geometry. A map can ask this about a hundred chunks at once, which is the
   whole point, because the thing a player wants to know about the chunk two
   kilometres away is exactly this and nothing else. Generating that chunk to
-  find out would cost six milliseconds; this costs four field samples."
+  find out would cost six milliseconds; this costs four field samples.
+
+  Never `:water`, although it used to be: a chunk whose centre happened to
+  fall in a river was called water whole. A river is forty metres wide and a
+  chunk two hundred and fifty-six, so a 'water' chunk was four-fifths
+  whatever else was there -- downtown, usually, standing in the channel -- and
+  the map was a scatter of blue squares nobody could find a river under. Water
+  is the river field's to say, at the resolution it actually has; see
+  `water-level` and the map's own river layer."
   [seed cx cz]
   (let [x (* (+ cx 0.5) k/chunk-size)
         z (* (+ cz 0.5) k/chunk-size)
         u (urbanness seed x z)
         ind (industrialness seed x z)]
     (cond
-      (> (river seed x z) 0.55) :water
       (and (> ind 0.68) (< 0.22 u 0.74)) :industry
       (> u 0.82) :downtown
       (> u 0.58) :city
@@ -1631,6 +1655,9 @@
           ;; Once per block, so a block is all one region's houses rather than
           ;; changing style halfway down a terrace.
           reg  (region seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
+          ;; Asked once for the block, so the dry four-fifths of the world
+          ;; does not pay five river samples a plot to learn it is dry.
+          dry? (river-free? seed (* 0.5 (+ x0 x1)) (* 0.5 (+ z0 z1)))
           fr   (frontage-for u ind)
           dz   (min lot-depth (* 0.42 (- z1 z0)))
           dx   (min lot-depth (* 0.42 (- x1 x0)))
@@ -1655,13 +1682,27 @@
       (into []
             (comp cat
                   (filter (fn [{:keys [hx hz]}] (and (> hx 2.0) (> hz 2.0))))
-                  (map (fn [{:keys [x z corner? front] :as lot}]
-                         (assoc lot :zone (regional-zone
-                                           reg
-                                           (pick-zone r
-                                                      (urbanness seed x z)
-                                                      (industrialness seed x z)
-                                                      front corner?))))))
+                  (map (fn [{:keys [x z hx hz corner? front] :as lot}]
+                         ;; Drawn whatever happens next, so a plot in the river
+                         ;; does not move every other plot's draw along.
+                         (let [zone (regional-zone
+                                     reg
+                                     (pick-zone r
+                                                (urbanness seed x z)
+                                                (industrialness seed x z)
+                                                front corner?))]
+                           ;; Nothing is built in a river. Downtown stood in the
+                           ;; channel -- thirty buildings to a chunk, where one
+                           ;; ran through the city -- so a river through town
+                           ;; was invisible from the street and a blue line
+                           ;; on the map over solid blocks.
+                           (assoc lot :zone
+                                  (if (and (not dry?)
+                                           (some (fn [[px pz]] (> (river seed px pz) 0.12))
+                                                 [[x z] [(- x hx) (- z hz)] [(+ x hx) (- z hz)]
+                                                  [(- x hx) (+ z hz)] [(+ x hx) (+ z hz)]]))
+                                    :open
+                                    zone))))))
             [(strip :north x0 x1 z0 (+ z0 dz) true)
              (strip :south x0 x1 (- z1 dz) z1 true)
              (strip :west iz0 iz1 x0 (+ x0 dx) false)
@@ -4046,7 +4087,10 @@
                       (region-blend! scratch (warmth seed px pz) (damp seed px pz))
                       (dotimes [c 4] (dput! rq (+ o c) (aget scratch c)))))))
         heights (farray (* n n))
-        colors  (farray (* n n 3))]
+        colors  (farray (* n n 3))
+        ;; How much river is at each vertex, for the water surface. Already
+        ;; computed for the carve and the tint; four kilobytes to keep.
+        rivers  (farray (* n n))]
     ;; The ground comes first, and everything else is then placed on it. That
     ;; ordering is the point: the heightfield is what the collider is built from
     ;; and what the mesh is drawn from, so a lamp post standing on it stands
@@ -4148,6 +4192,7 @@
               rb   (+ road-colour-b (* dirt-road (- track-colour-b road-colour-b)))
               o    (* idx 3)]
           (fput! heights idx y)
+          (fput! rivers idx rv)
           (fput! colors (+ o 0) (+ tr (* road (- rr tr))))
           (fput! colors (+ o 1) (+ tg (* road (- rg tg))))
           (fput! colors (+ o 2) (+ tb (* road (- rb tb)))))))
@@ -4165,6 +4210,7 @@
      :origin [x0 z0]
      :heights heights
      :colors colors
+     :rivers rivers
      :props props
      :buildings buildings
      :building-parts parts

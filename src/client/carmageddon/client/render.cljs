@@ -17,6 +17,7 @@
             [carmageddon.client.sim :as sim]
             [carmageddon.client.textures :as textures]
             [carmageddon.shared.prng :as prng]
+            [carmageddon.shared.worldgen :as worldgen]
             [carmageddon.client.vehicle :as vehicle]
             [carmageddon.shared.constants :as k]))
 
@@ -159,15 +160,76 @@
       (.computeVertexNormals g)
       g)))
 
+(defn- water-geometry
+  "The surface of whatever river runs through a chunk, or nil if none does.
+
+  The same grid as the ground, lifted to the water line: at each vertex the
+  surface stands `river-depth * (rv - water-level)` above the ground, which is
+  exactly the height the land was before the channel was cut, less the part
+  of the cut that is under water. Away from the channel that is below the
+  ground, so the depth test hides it and the shoreline falls out of the
+  intersection of two surfaces rather than being worked out anywhere.
+
+  Only the triangles that come near the water line are kept, so a chunk with a
+  river in one corner carries a strip, not a sheet."
+  [{:keys [verts size heights rivers]}]
+  (when rivers
+    (let [n verts
+          cells (dec n)
+          step (/ size cells)
+          shore (- worldgen/water-level 0.12)
+          wet? (fn [k] (> (aget rivers k) shore))]
+      (when (some wet? (range (* n n)))
+        (let [pos (js/Float32Array. (* n n 3))
+              tris (array)]
+          (dotimes [i n]
+            (dotimes [j n]
+              (let [k (+ (* i n) j) o (* 3 k)]
+                (aset pos o (* i step))
+                (aset pos (+ o 1) (+ (aget heights k)
+                                     (* worldgen/river-depth
+                                        (- (aget rivers k) worldgen/water-level))))
+                (aset pos (+ o 2) (* j step)))))
+          (dotimes [i cells]
+            (dotimes [j cells]
+              (let [a (+ (* i n) j) b (+ (* (inc i) n) j)
+                    c (+ (* (inc i) n) (inc j)) d (+ (* i n) (inc j))]
+                ;; Same winding as the ground, and for the same reason.
+                (when (or (wet? a) (wet? b) (wet? c) (wet? d))
+                  (.push tris a c b a d c)))))
+          (doto (three/BufferGeometry.)
+            (.setAttribute "position" (three/BufferAttribute. pos 3))
+            (.setIndex tris)
+            (.computeVertexNormals)))))))
+
+(defn- water-mat
+  "One material for every river. Standard, so it takes the sky as a reflection
+  -- still water is mostly a mirror, and a blue that reflects nothing reads as
+  paint."
+  []
+  ;; Darker and rougher than a mirror on purpose. At 0.08 roughness it took
+  ;; the whole sky at a grazing angle -- which is right for a lake at sunset
+  ;; and, seen from a car a metre off the ground, read as a river of ice.
+  (three/MeshStandardMaterial. #js {:color 0x1f4a63 :roughness 0.32 :metalness 0.0
+                                    :transparent true :opacity 0.9
+                                    :envMapIntensity 0.55}))
+
 (defn add-chunk!
   "Chunk-manager callback. Returns the mesh, which comes back to `remove-chunk!`.
 
   Every chunk shares one material. Building a fresh one per chunk leaks: three
   materials hold GPU resources that only `dispose` frees, and chunks are created
   and destroyed continuously as the player drives."
-  [{:keys [^js scene chunk-material]} data]
+  [{:keys [^js scene chunk-material water-material]} data]
   (let [[x0 z0] (:origin data)
         ^js m (three/Mesh. (chunk-geometry data) chunk-material)]
+    ;; The river rides on the ground mesh as a child, so it is placed, removed
+    ;; and disposed of with it.
+    (when-let [wg (water-geometry data)]
+      (let [^js w (three/Mesh. wg water-material)]
+        (set! (.-receiveShadow w) true)
+        (set! (.-name w) "water")
+        (.add m w)))
     ;; Named so the weather can find the shared material and make it wet. Every
     ;; chunk shares one, so finding any of them finds all of them.
     (set! (.-name m) "ground")
@@ -185,6 +247,7 @@
   steadily as the player drives."
   [{:keys [^js scene]} ^js m]
   (.remove scene m)
+  (doseq [^js c (.-children m)] (.dispose (.-geometry c)))
   (.dispose (.-geometry m)))
 
 (def ^:private sky-w 1024)
@@ -704,6 +767,7 @@
      :sun-at         (:sun hour)
      :textures       tex
      :chunk-material (mat (:ground tex) true)
+     :water-material (water-mat)
      :scene        scene
      :camera       cam
      :camera-state (camera/create! cam)

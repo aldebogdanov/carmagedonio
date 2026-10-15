@@ -49,6 +49,7 @@
      :verts (unchecked-get r "verts") :size (unchecked-get r "size")
      :origin [(unchecked-get r "x0") (unchecked-get r "z0")]
      :heights (unchecked-get r "heights") :colors (unchecked-get r "colors")
+     :rivers (unchecked-get r "rivers")
      :props (unchecked-get r "props")
      :buildings (unchecked-get r "buildings")
      :building-parts (unchecked-get r "parts")

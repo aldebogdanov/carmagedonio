@@ -609,6 +609,52 @@
         (is (empty? (remove (own reg) (filter regional zs)))
             (str reg " built another region's houses: " zs))))))
 
+(deftest nothing-is-built-in-a-river
+  (testing "downtown stood in the channel -- thirty buildings to a chunk where
+            a river ran through it -- so the river was invisible from the
+            street, and the map's blue was solid blocks"
+    (let [wet-towns (for [cx (range -16 17) cz (range -16 17)
+                          :let [x (* (+ cx 0.5) k/chunk-size) z (* (+ cz 0.5) k/chunk-size)]
+                          :when (and (> (w/urbanness seed x z) 0.5)
+                                     (some (fn [[ox oz]] (> (w/river seed (+ x ox) (+ z oz)) 0.9))
+                                           (for [ox (range -112 113 32) oz (range -112 113 32)]
+                                             [ox oz])))]
+                      [cx cz])
+          [cx cz] (first wet-towns)]
+      (is cx "no town with a river through it to test against")
+      (when cx
+        (let [b (w/chunk-buildings seed cx cz (w/road-field seed cx cz))
+              n (/ (alen* b) w/building-stride)]
+          (is (pos? n))
+          (doseq [i (range n)
+                  :let [o (* i w/building-stride)
+                        x (aget* b o) z (aget* b (+ o 2))]]
+            (is (< (w/river seed x z) w/water-level)
+                (str "a building in the river at " [x z]))))))))
+
+(deftest a-chunk-is-never-all-water
+  (testing "a river is forty metres across and a chunk 256; a chunk is called
+            what most of it is, and the water is drawn where the water is"
+    (is (not-any? #{:water}
+                  (for [cx (range -20 21) cz (range -20 21)] (w/area-kind seed cx cz))))))
+
+(deftest the-ground-says-where-the-river-is
+  (let [[cx cz] (first (for [cx (range -16 17) cz (range -16 17)
+                             :let [x (* (+ cx 0.5) k/chunk-size) z (* (+ cz 0.5) k/chunk-size)]
+                             :when (> (w/river seed x z) 0.9)]
+                         [cx cz]))
+        {:keys [rivers verts origin size]} (w/chunk-data seed cx cz)
+        [x0 z0] origin
+        step (/ size (dec verts))]
+    (is (= (* verts verts) (alen* rivers)))
+    (testing "one value per vertex, the same one the channel was cut with"
+      (doseq [i [0 7 16 32] j [0 9 16 32]]
+        (is (< (abs (- (aget* rivers (+ (* i verts) j))
+                       (w/river seed (+ x0 (* i step)) (+ z0 (* j step)))))
+               1e-5))))
+    (is (some #(> % w/water-level) (map #(aget* rivers %) (range (alen* rivers))))
+        "a chunk with a river through its middle has water in it")))
+
 (deftest building-parts-are-well-formed
   (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
         {:keys [buildings parts]} (w/chunk-structures seed cx cz (w/road-field seed cx cz))

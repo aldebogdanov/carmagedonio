@@ -179,6 +179,8 @@
        :blip-zoom (volatile! 0)
        ;; [cx cz] -> kind. Never invalidated: a seed's world does not change.
        :cache (js/Map.)
+       ;; Where the water is, per chunk, at sixteen metres. See `draw-rivers!`.
+       :river-cache (js/Map.)
        ;; Landmarks are cached the same way and for the same reason: one per
        ;; district, worked out from the seed, never changing.
        :landmark-cache (js/Map.)
@@ -377,6 +379,58 @@
         v)
       hit)))
 
+;; --- rivers -------------------------------------------------------------------
+;;
+;; A river is forty metres wide and a map cell is a chunk, two hundred and
+;; fifty-six. Drawn as cells, a river was whichever chunks happened to have one
+;; through their exact centre: a scatter of blue squares, most of each one
+;; downtown, with nothing to show the river ran between them. It is drawn at
+;; its own resolution now, over the cells, from the same field the channel is
+;; cut from -- so the blue on the map is where the water is.
+
+(def ^:private river-step 16.0)
+(def ^:private river-n (long (/ k/chunk-size river-step)))
+
+(defn- river-mask
+  "Which 16 m squares of chunk (cx, cz) are under water, as a byte per square,
+  or nil for a dry chunk. Computed once per chunk, ever."
+  [{:keys [seed ^js river-cache]} cx cz]
+  (let [key (cache-key cx cz)]
+    (if (.has river-cache key)
+      (.get river-cache key)
+      (let [x0 (* cx k/chunk-size) z0 (* cz k/chunk-size)
+            a (js/Uint8Array. (* river-n river-n))
+            wet (volatile! false)]
+        (dotimes [i river-n]
+          (dotimes [j river-n]
+            (when (> (worldgen/river seed (+ x0 (* (+ i 0.5) river-step))
+                                     (+ z0 (* (+ j 0.5) river-step)))
+                     worldgen/water-level)
+              (vreset! wet true)
+              (aset a (+ (* i river-n) j) 1))))
+        (let [v (when @wet a)]
+          (.set river-cache key v)
+          v)))))
+
+(defn- draw-rivers! [{:keys [^js ctx] :as ms} px pz per-m size]
+  (let [half (* 0.5 (/ size per-m))
+        x0 (- px half) z0 (- pz half)
+        [c0x c0z] (worldgen/chunk-of x0 z0)
+        [c1x c1z] (worldgen/chunk-of (+ px half) (+ pz half))
+        sq (inc (* river-step per-m))]
+    (set! (.-fillStyle ctx) (:water colours))
+    (doseq [cx (range c0x (inc c1x))
+            cz (range c0z (inc c1z))
+            :let [^js m (river-mask ms cx cz)]
+            :when m]
+      (dotimes [i river-n]
+        (dotimes [j river-n]
+          (when (pos? (aget m (+ (* i river-n) j)))
+            (.fillRect ctx
+                       (* (- (+ (* cx k/chunk-size) (* i river-step)) x0) per-m)
+                       (* (- (+ (* cz k/chunk-size) (* j river-step)) z0) per-m)
+                       sq sq)))))))
+
 (defn- landmark-at [{:keys [seed ^js landmark-cache]} dx dz]
   (let [k (cache-key dx dz)
         hit (.get landmark-cache k)]
@@ -441,10 +495,14 @@
   [ms x z]
   (let [[cx cz] (worldgen/chunk-of x z)
         kind (kind-at ms cx cz)
-        reg  (worldgen/region (:seed ms) x z)]
-    (if (and (rural kind) (not= :heartland reg))
-      (str (worldgen/region-labels reg) " \u00b7 " (worldgen/area-labels kind))
-      (worldgen/area-labels kind))))
+        reg  (worldgen/region (:seed ms) x z)
+        base (if (and (rural kind) (not= :heartland reg))
+               (str (worldgen/region-labels reg) " \u00b7 " (worldgen/area-labels kind))
+               (worldgen/area-labels kind))]
+    ;; Water is said where the car actually is, not for the whole chunk.
+    (if (> (worldgen/river (:seed ms) x z) worldgen/water-level)
+      (str base " \u00b7 river")
+      base)))
 
 ;; The map is anchored on the *car*, not on the chunk it happens to be in. That
 ;; is the whole difference between a map that scrolls and one that jumps: with
@@ -808,6 +866,8 @@
           span (span-of ms)
           per-m (/ size (* span k/chunk-size))]
       (draw-cells! ms x z per-m size)
+      ;; Over the cells and under the streets: a bridge is drawn crossing it.
+      (draw-rivers! ms x z per-m size)
       (if (< span plan-below)
         (draw-plan! ms x z per-m size)
         (draw-roads! ms x z per-m size))
