@@ -1030,7 +1030,11 @@
 (def ^:private pier-min 2.0)        ; below this a pier is a stub, not worth it
 
 (def ^:private bridge-tint
-  {:deck 0x3c3c40 :rail 0x9aa0a6 :pier 0x8c8880 :girder 0x6a6a6e})
+  {:deck 0x3c3c40 :rail 0x9aa0a6 :pier 0x8c8880 :girder 0x6a6a6e
+   ;; Indistinguishable on screen, and distinct in the data: a ramp's deck
+   ;; does not lie on any street's chord, and anything checking that decks
+   ;; do has to be able to tell the two apart.
+   :ramp 0x3d3d41})
 
 ;; The steel of an arch bridge, picked per bridge. A river town has a red
 ;; bridge and a green one, which is how anybody gives directions in one.
@@ -1125,6 +1129,279 @@
         (emit x y z (#?(:clj Math/atan2 :cljs js/Math.atan2) ux uz) 0.0
               (* 2.0 off) 0.5 0.6 :box tint 0.0)))))
 
+(defn- deck-span!
+  "One straight piece of deck from (x1 y1 z1) to (x2 y2 z2), its top on the
+  line between them: the slab, the girders under its edges and the parapet
+  panels along them. `extra` lengthens the slab past both ends, which a curve
+  built of straight pieces needs so that its outside edge has no gaps.
+  `keep?` is asked of each parapet panel's centre and side (+1 or -1, to the
+  right of the direction of travel) whether to build it."
+  [emit x1 y1 z1 x2 y2 z2 width extra keep? deck-tint]
+  (let [mx (* 0.5 (+ x1 x2)) mz (* 0.5 (+ z1 z2))
+        my (* 0.5 (+ y1 y2))
+        dx (- x2 x1) dz (- z2 z1) dy (- y2 y1)
+        horiz (max 0.01 (hypot dx dz))
+        ;; The deck is pitched to lie along the chord. A flat slab at
+        ;; the average height instead leaves its near end floating over
+        ;; the road by half the fall of the span, and the car drives
+        ;; under the leading edge and straight into the river.
+        span (hypot horiz dy)
+        pitch (#?(:clj Math/atan2 :cljs js/Math.atan2) dy horiz)
+        ;; Local +Z runs along the span, so a unit box scaled in Z is a
+        ;; deck. Dropping the centre by half a thickness measured
+        ;; vertically leaves the top face on the chord itself.
+        yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) dx dz)
+        sink (/ (* 0.5 deck-thickness) (max 0.2 (js-cos pitch)))
+        rx (/ (- dz) horiz) rz (/ dx horiz)
+        off (- (* 0.5 width) 0.15)]
+    (emit mx (- my sink) mz yaw pitch
+          width deck-thickness (+ span extra) :box deck-tint 1.0)
+    ;; Edge girders under the deck. A slab half a metre thick reads
+    ;; as a plank laid across the gap; the beams are what make it
+    ;; something that could carry a lorry.
+    (let [gs (/ (+ deck-thickness (* 0.5 girder-depth)) (max 0.2 (js-cos pitch)))]
+      (doseq [sgn [1.0 -1.0]]
+        (emit (+ mx (* rx (- (* 0.5 width) 0.6) sgn)) (- my gs)
+              (+ mz (* rz (- (* 0.5 width) 0.6) sgn))
+              yaw pitch 0.8 girder-depth (+ span extra) :box (:girder bridge-tint) 0.0)))
+    (let [panels (max 1 (long (floor (/ span rail-panel))))
+          plen   (/ span panels)
+          ;; Along the span, in world terms. The deck is pitched, so
+          ;; the panels have to step up it rather than around it.
+          ax (/ dx horiz) az (/ dz horiz)
+          ay (/ dy span)
+          step (/ (* plen horiz) span)]
+      (dotimes [p panels]
+        (let [u (- (+ p 0.5) (* 0.5 panels))       ; panels either side of centre
+              cxp (+ mx (* ax step u))
+              czp (+ mz (* az step u))
+              cyp (+ my (* ay plen u))]
+          (doseq [sgn [1.0 -1.0]
+                  :let [px (+ cxp (* rx off sgn)) pz (+ czp (* rz off sgn))]
+                  :when (keep? px cyp pz sgn)]
+            (emit px (+ cyp (* 0.5 rail-height)) pz
+                  yaw pitch 0.3 rail-height (* 0.92 plen)
+                  :box (:rail bridge-tint) 2.0)))))))
+
+;; --- interchanges -----------------------------------------------------------
+;;
+;; Two expressways crossing were two decks stacked six metres apart with no
+;; way from one to the other: the one place in a city built for changing roads,
+;; and you could not. Where both are well up, the crossing gets a ramp in each
+;; quarter -- a slip road peeling off the lower deck, a curve round the corner,
+;; and a slip road onto the upper one -- so either expressway reaches the other
+;; in every direction. Two-way, because nothing in this game keeps to a lane.
+;;
+;; Every expressway is an arterial and arterial nodes never wobble, so both
+;; lines are dead straight through the crossing and the whole interchange can
+;; be laid out square to them.
+
+(def ^:private ramp-reach 52.0)     ; m along each expressway to the curve
+(def ^:private ramp-slip 30.0)      ; and the slip road beyond it
+(def ramp-half 4.0)                 ; carriageway, public for the map
+(def ^:private ramp-curve 14)       ; straight pieces in a quarter turn
+(def ^:private ramp-min-lift 4.0)   ; below this the decks are not stacked
+
+(defn- expressway-height
+  "Where the top of the expressway deck on lattice line `line` is, at
+  coordinate `at` along it -- x for a line along X, z otherwise. The chord
+  between the two nodes either side, exactly as `street` draws it."
+  [seed along-x? line at]
+  (let [nd (fn [g] (if along-x? (node seed g line) (node seed line g)))
+        pos (fn [g] (let [[x z] (nd g)] (if along-x? x z)))
+        ht (fn [g] (let [[x z] (nd g)]
+                     (+ (base-height seed x z 0.0)
+                        (if along-x?
+                          (node-lift seed g line true)
+                          (node-lift seed line g false)))))
+        g0 (long (floor (/ at street-spacing)))
+        g (or (first (filter (fn [g] (and (<= (pos g) at) (< at (pos (inc g)))))
+                             [g0 (dec g0) (inc g0)]))
+              g0)
+        a (pos g) b (pos (inc g))
+        t (/ (- at a) (max 1e-6 (- b a)))]
+    (+ (ht g) (* t (- (ht (inc g)) (ht g))))))
+
+(declare interchange*)
+
+;; Laid out once per crossing. Every chunk near one asks twice -- for its plots
+;; and for its decks -- and a crossing is a pure function of the seed, so the
+;; answer never changes; there are a handful of them in reach at any time.
+(def ^:private interchange-cache (atom {}))
+
+(defn interchange
+  "The interchange where expressway lines gx and gz cross, or nil. Memoised;
+  see `interchange*`."
+  [seed gx gz]
+  (let [k [seed gx gz]
+        c @interchange-cache]
+    (if (contains? c k)
+      (get c k)
+      (let [v (interchange* seed gx gz)]
+        ;; Bounded, so a long drive does not hold every crossing it passed.
+        (swap! interchange-cache #(assoc (if (> (count %) 64) {} %) k v))
+        v))))
+
+(defn- interchange*
+  "The interchange where expressway lines gx and gz cross, or nil: there is
+  none unless both are expressway lines and both decks are well off the
+  ground and properly apart.
+
+  `:ramps` are four polylines, each `{:points [[x z] ...] :ys [...] :slips
+  {segment [axis coord]}}` -- the slips being the stretches alongside a deck,
+  with the line of that deck, whose inner parapet is left off so a car can
+  cross from one to the other.
+  `:seams` are the matching stretches of the expressways' own parapets to
+  leave off: `[x0 x1 z0 z1 y0 y1]` boxes."
+  [seed gx gz]
+  (when (and (zero? (mod gx expressway-every)) (zero? (mod gz expressway-every)))
+    (let [lx (node-lift seed gx gz true)
+          lz (node-lift seed gx gz false)]
+      (when (and (> lx ramp-min-lift) (> (- lz lx) 3.0))
+        (let [[nx nz] (node seed gx gz)
+              deck-half (+ (:half (road-profile :arterial)) deck-margin)
+              w (+ deck-half ramp-half deck-margin -0.1)
+              L ramp-reach T ramp-slip R (- L w)
+              hx (fn [x] (expressway-height seed true gz x))
+              hz (fn [z] (expressway-height seed false gx z))]
+          {:node [nx nz] :gx gx :gz gz
+           :ramps
+           (vec (for [sx [1.0 -1.0] sz [1.0 -1.0]]
+                  (let [cx (+ nx (* sx L)) cz (+ nz (* sz L))
+                        ;; Off the lower deck, along it.
+                        slip-x (for [d [(+ L T) (+ L (* 0.5 T)) L]]
+                                 [(+ nx (* sx d)) (+ nz (* sz w))])
+                        hp (hx (+ nx (* sx L)))
+                        hq (hz (+ nz (* sz L)))
+                        ;; The quarter turn: the unit vector from the centre
+                        ;; swings from (0, -sz) to (-sx, 0).
+                        curve (for [i (range 1 (inc ramp-curve))
+                                    :let [f (/ (double i) ramp-curve)
+                                          a (* 1.5707963267948966 f)]]
+                                [(+ cx (* R (- sx) (js-sin a)))
+                                 (+ cz (* R (- sz) (js-cos a)))
+                                 ;; Mostly a steady climb, eased only a
+                                 ;; little at the ends. Fully eased, the
+                                 ;; middle of the curve came out at 18%.
+                                 (+ hp (* (- hq hp) (+ (* 0.4 f) (* 0.6 (smoothstep f)))))])
+                        slip-z (for [d [(+ L (* 0.5 T)) (+ L T)]]
+                                 [(+ nx (* sx w)) (+ nz (* sz d))])
+                        pts (vec (concat slip-x (map (fn [[x z _]] [x z]) curve) slip-z))
+                        ys (vec (concat (map (fn [[x _]] (hx x)) slip-x)
+                                        (map (fn [[_ _ y]] y) curve)
+                                        (map (fn [[_ z]] (hz z)) slip-z)))
+                        nseg (dec (count pts))]
+                    {:points pts
+                     ;; A hair under the deck it runs beside, so the two top
+                     ;; faces never fight over the same plane.
+                     :ys (mapv #(- % 0.02) ys)
+                     ;; The pieces alongside a deck, and the line of the deck
+                     ;; each runs beside.
+                     :slips {0 [:z nz] 1 [:z nz]
+                             (- nseg 2) [:x nx] (dec nseg) [:x nx]}})))
+           :seams
+           (vec (for [sx [1.0 -1.0] sz [1.0 -1.0]
+                      :let [xa (+ nx (* sx (- L 4.0))) xb (+ nx (* sx (+ L T 2.0)))
+                            za (+ nz (* sz (- L 4.0))) zb (+ nz (* sz (+ L T 2.0)))
+                            ylo (- (min (hx xa) (hx xb)) 3.0)
+                            yhi (+ (max (hz za) (hz zb)) 3.0)]
+                      box [[(min xa xb) (max xa xb)
+                            (min nz (+ nz (* sz (+ deck-half 1.5))))
+                            (max nz (+ nz (* sz (+ deck-half 1.5))))
+                            ylo (+ (max (hx xa) (hx xb)) 3.0)]
+                           [(min nx (+ nx (* sx (+ deck-half 1.5))))
+                            (max nx (+ nx (* sx (+ deck-half 1.5))))
+                            (min za zb) (max za zb)
+                            (- (min (hz za) (hz zb)) 3.0) yhi]]]
+                  box))})))))
+
+(def ^:private interchange-reach (+ ramp-reach ramp-slip 12.0))
+
+(defn near-interchange?
+  "Is (x, z) close enough to an expressway crossing that its interchange, if
+  it has one, needs the ground? Cheap: asks only whether the decks qualify,
+  without laying out a single ramp."
+  [seed x z]
+  (let [span (* expressway-every street-spacing)
+        i (* expressway-every (long (floor (+ 0.5 (/ x span)))))
+        j (* expressway-every (long (floor (+ 0.5 (/ z span)))))
+        [nx nz] (node seed i j)
+        lx (node-lift seed i j true)
+        lz (node-lift seed i j false)]
+    (and (> lx ramp-min-lift) (> (- lz lx) 3.0)
+         (< (abs (- x nx)) (+ interchange-reach 40.0))
+         (< (abs (- z nz)) (+ interchange-reach 40.0)))))
+
+(defn interchanges-near
+  "Every interchange whose ramps could reach the box [x0,x1] x [z0,z1]."
+  [seed x0 z0 x1 z1]
+  (let [span (* expressway-every street-spacing)
+        pad (+ interchange-reach 20.0)
+        lo (fn [v] (long (floor (/ (- v pad) span))))
+        hi (fn [v] (long (floor (/ (+ v pad) span))))]
+    (vec (for [i (range (lo x0) (inc (hi x1)))
+               j (range (lo z0) (inc (hi z1)))
+               :let [ic (interchange seed (* i expressway-every) (* j expressway-every))]
+               :when ic
+               :let [[nx nz] (:node ic)]
+               :when (and (< (- x0 pad) nx (+ x1 pad)) (< (- z0 pad) nz (+ z1 pad)))]
+           ic))))
+
+(defn- in-seam? [seams x y z]
+  (some (fn [[x0 x1 z0 z1 y0 y1]]
+          (and (<= x0 x x1) (<= z0 z z1) (<= y0 y y1)))
+        seams))
+
+(defn- seg-dist
+  "Distance from (px, pz) to the segment a-b."
+  [px pz [ax az] [bx bz]]
+  (let [dx (- bx ax) dz (- bz az)
+        l2 (max 1e-9 (+ (* dx dx) (* dz dz)))
+        t (max 0.0 (min 1.0 (/ (+ (* (- px ax) dx) (* (- pz az) dz)) l2)))]
+    (hypot (- px (+ ax (* t dx))) (- pz (+ az (* t dz))))))
+
+(defn under-ramp?
+  "Is (x, z) within `clear` metres of any ramp in `ics`?"
+  [ics x z clear]
+  (some (fn [{:keys [ramps]}]
+          (some (fn [{:keys [points]}]
+                  (some (fn [[a b]] (< (seg-dist x z a b) clear))
+                        (partition 2 1 points)))
+                ramps))
+        ics))
+
+(defn- ramp-parts!
+  "The ramps of `ics` that chunk (x0..x1, z0..z1) owns -- by each piece's
+  midpoint, as streets are owned -- with their piers."
+  [emit seed ics x0 z0 x1 z1]
+  (let [width (+ (* 2.0 ramp-half) (* 2.0 deck-margin))]
+    (doseq [{:keys [ramps]} ics
+            {:keys [points ys slips]} ramps
+            i (range (dec (count points)))
+            :let [[ax az] (nth points i) [bx bz] (nth points (inc i))
+                  mx (* 0.5 (+ ax bx)) mz (* 0.5 (+ az bz))]
+            :when (and (<= x0 mx) (< mx x1) (<= z0 mz) (< mz z1))]
+      (let [ya (nth ys i) yb (nth ys (inc i))
+            slip (get slips i)]
+        (deck-span! emit ax ya az bx yb bz width (if slip 0.0 0.6)
+                    (fn [px _ pz _]
+                      ;; The side of a slip road towards its deck is open:
+                      ;; that is the parapet nearer the deck's line than the
+                      ;; middle of the road is.
+                      (if-let [[axis c] slip]
+                        (if (= axis :z)
+                          (>= (abs (- pz c)) (abs (- mz c)))
+                          (>= (abs (- px c)) (abs (- mx c))))
+                        true))
+                    (:ramp bridge-tint))
+        ;; One column under the middle of each piece that has room for one.
+        (let [my (* 0.5 (+ ya yb))
+              ground (base-height seed mx mz)
+              h (- my deck-thickness girder-depth ground)]
+          (when (> h pier-min)
+            (emit mx (+ ground (* 0.5 h)) mz 0.0 0.0 1.4 h 1.4
+                  :cylinder (:pier bridge-tint) 0.0)))))))
+
 (defn chunk-bridges
   "Deck, parapets and piers for every bridge this chunk owns, as
   [x y z yaw pitch sx sy sz prim tint solid ...].
@@ -1151,7 +1428,12 @@
                (conj! out yaw) (conj! out pitch)
                (conj! out sx) (conj! out sy) (conj! out sz)
                (conj! out (double (prim-index prim)))
-               (conj! out (double tint)) (conj! out (double solid)))]
+               (conj! out (double tint)) (conj! out (double solid)))
+        x0 (* cx k/chunk-size) z0 (* cz k/chunk-size)
+        x1 (+ x0 k/chunk-size) z1 (+ z0 k/chunk-size)
+        ics (interchanges-near seed x0 z0 x1 z1)
+        seams (into [] (mapcat :seams) ics)]
+    (ramp-parts! emit seed ics x0 z0 x1 z1)
     (doseq [{:keys [points half ya yb lift-a lift-b gx gz along-x?]} (filter :bridge? owned)]
       (let [n (count points)
             chord (fn [t] (+ ya (* t (- yb ya))))
@@ -1165,51 +1447,11 @@
           (let [[x1 z1] (nth points i)
                 [x2 z2] (nth points (inc i))
                 t1 (/ (double i) (dec n))
-                t2 (/ (double (inc i)) (dec n))
-                y1 (chord t1) y2 (chord t2)
-                mx (* 0.5 (+ x1 x2)) mz (* 0.5 (+ z1 z2))
-                my (* 0.5 (+ y1 y2))
-                dx (- x2 x1) dz (- z2 z1) dy (- y2 y1)
-                horiz (max 0.01 (hypot dx dz))
-                ;; The deck is pitched to lie along the chord. A flat slab at
-                ;; the average height instead leaves its near end floating over
-                ;; the road by half the fall of the span, and the car drives
-                ;; under the leading edge and straight into the river.
-                span (hypot horiz dy)
-                pitch (#?(:clj Math/atan2 :cljs js/Math.atan2) dy horiz)
-                ;; Local +Z runs along the span, so a unit box scaled in Z is a
-                ;; deck. Dropping the centre by half a thickness measured
-                ;; vertically leaves the top face on the chord itself.
-                yaw (#?(:clj Math/atan2 :cljs js/Math.atan2) dx dz)
-                sink (/ (* 0.5 deck-thickness) (max 0.2 (js-cos pitch)))
-                rx (/ (- dz) horiz) rz (/ dx horiz)
-                off (- (* 0.5 width) 0.15)]
-            (emit mx (- my sink) mz yaw pitch
-                  width deck-thickness span :box (:deck bridge-tint) 1.0)
-            ;; Edge girders under the deck. A slab half a metre thick reads
-            ;; as a plank laid across the gap; the beams are what make it
-            ;; something that could carry a lorry.
-            (let [gs (/ (+ deck-thickness (* 0.5 girder-depth)) (max 0.2 (js-cos pitch)))]
-              (doseq [sgn [1.0 -1.0]]
-                (emit (+ mx (* rx (- (* 0.5 width) 0.6) sgn)) (- my gs)
-                      (+ mz (* rz (- (* 0.5 width) 0.6) sgn))
-                      yaw pitch 0.8 girder-depth span :box (:girder bridge-tint) 0.0)))
-            (let [panels (max 1 (long (floor (/ span rail-panel))))
-                  plen   (/ span panels)
-                  ;; Along the span, in world terms. The deck is pitched, so
-                  ;; the panels have to step up it rather than around it.
-                  ax (/ dx horiz) az (/ dz horiz)
-                  ay (/ dy span)
-                  step (/ (* plen horiz) span)]
-              (dotimes [p panels]
-                (let [u (- (+ p 0.5) (* 0.5 panels))       ; panels either side of centre
-                      cxp (+ mx (* ax step u))
-                      czp (+ mz (* az step u))
-                      cyp (+ my (* ay plen u))]
-                  (doseq [sgn [1.0 -1.0]]
-                    (emit (+ cxp (* rx off sgn)) (+ cyp (* 0.5 rail-height)) (+ czp (* rz off sgn))
-                          yaw pitch 0.3 rail-height (* 0.92 plen)
-                          :box (:rail bridge-tint) 2.0)))))))
+                t2 (/ (double (inc i)) (dec n))]
+            (deck-span! emit x1 (chord t1) z1 x2 (chord t2) z2 width 0.0
+                        ;; No parapet where a slip road joins.
+                        (fn [px py pz _] (not (in-seam? seams px py pz)))
+                        (:deck bridge-tint))))
         ;; Piers, spaced along the whole span rather than per segment: a cap
         ;; beam across under the deck on two columns, which is what a pier
         ;; under a road this wide actually is. One fat cylinder in the middle
@@ -1960,7 +2202,7 @@
                   ;; happily drop a stadium on the one wet corner of a dry one.
                   wet? (> (river seed x z) 0.35)
                   [cx cz] (chunk-of x z)]
-              (if wet?
+              (if (or wet? (near-interchange? seed x z))
                 (recur (inc i))
                 {:kind   (landmark-for-place (area-kind seed cx cz)
                                             (region seed x z) r)
@@ -3034,13 +3276,18 @@
         ;; once for the chunk rather than per cell: the answer is a property of
         ;; the district, and asking it twenty-five times would mean rerunning
         ;; the same district search twenty-five times.
-        claimed (landmark-cells seed gx0 gx1 gz0 gz1)]
+        claimed (landmark-cells seed gx0 gx1 gz0 gz1)
+        ;; And nothing where an interchange's ramps come down through it.
+        ics (interchanges-near seed x0 z0 x1 z1)]
     (vec (for [gx (range gx0 (inc gx1))
                gz (range gz0 (inc gz1))
                :when (not (contains? claimed [gx gz]))
                lot (cell-lots seed gx gz)
                :when (and (<= x0 (:x lot)) (< (:x lot) x1)
-                          (<= z0 (:z lot)) (< (:z lot) z1))]
+                          (<= z0 (:z lot)) (< (:z lot) z1)
+                          (not (and (seq ics)
+                                    (under-ramp? ics (:x lot) (:z lot)
+                                                 (+ 9.0 (* 0.9 (max (:hx lot) (:hz lot))))))))]
            lot))))
 
 ;; --- buildings --------------------------------------------------------------

@@ -670,6 +670,43 @@
       (is (> (+ ya (* t (- yb ya))) wa)
           (str "seed " sd ": a road under water at " [x z])))))
 
+(deftest stacked-expressways-are-joined
+  (testing "two expressways crossing were two decks six metres apart with no
+            way from one to the other"
+    (let [ic (w/interchange seed 0 0)
+          [nx nz] (:node ic)]
+      (is ic "the crossing at the origin has both decks well up")
+      (when ic
+        (is (= 4 (count (:ramps ic))) "a ramp in every quarter")
+        (doseq [{:keys [points ys]} (:ramps ic)
+                :let [[ax az] (first points) [bx bz] (peek points)
+                      lo (+ (w/base-height seed nx nz 0.0) (w/node-lift seed 0 0 true))
+                      hi (+ (w/base-height seed nx nz 0.0) (w/node-lift seed 0 0 false))]]
+          (testing "it starts beside the lower deck and ends beside the upper"
+            (is (< (abs (- az nz)) 20.0))
+            (is (< (abs (- bx nx)) 20.0))
+            (is (< (first ys) (- (peek ys) 4.0)))
+            (is (< (abs (- (first ys) lo)) 3.0) (str (first ys) " vs " lo))
+            (is (< (abs (- (peek ys) hi)) 3.0) (str (peek ys) " vs " hi)))
+          (testing "and it climbs steadily enough to drive"
+            (doseq [[[x1 z1] [x2 z2] y1 y2] (map vector points (rest points) ys (rest ys))]
+              (is (< (abs (- y2 y1)) (* 0.16 (Math/hypot (- x2 x1) (- z2 z1))))
+                  "steeper than 16%")))))))
+  (testing "nothing is built where a ramp comes down"
+    (let [ic (w/interchange seed 0 0)
+          [nx nz] (:node ic)
+          [c0x c0z] (w/chunk-of (- nx 120) (- nz 120))
+          [c1x c1z] (w/chunk-of (+ nx 120) (+ nz 120))]
+      (doseq [cx (range c0x (inc c1x)) cz (range c0z (inc c1z))
+              :let [b (w/chunk-buildings seed cx cz (w/road-field seed cx cz))]
+              i (range (/ (alen* b) w/building-stride))
+              :let [o (* i w/building-stride)
+                    x (aget* b o) z (aget* b (+ o 2))]]
+        (is (not (w/under-ramp? [ic] x z 9.0))
+            (str "a building under a ramp at " [x z])))))
+  (testing "a shallow crossing is left as it is"
+    (is (nil? (w/interchange seed 1 0)) "not an expressway line")))
+
 (deftest building-parts-are-well-formed
   (let [[cx cz] (densest-chunk (fn [u _] (> u 0.80)))
         {:keys [buildings parts]} (w/chunk-structures seed cx cz (w/road-field seed cx cz))

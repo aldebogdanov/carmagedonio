@@ -558,6 +558,28 @@
       (let [{:keys [x0 x1 z0 z1]} in]
         (.fillRect ctx (sx x0) (sz z0)
                    (* (- x1 x0) per-m) (* (- z1 z0) per-m))))
+    ;; The interchanges' ramps, under the streets so the expressways they
+    ;; join are drawn over their ends. Laid out once per crossing, ever.
+    (doseq [{:keys [ramps]} (let [bx (js/Math.round (/ px 512)) bz (js/Math.round (/ pz 512))
+                                  k (str "ic:" bx "," bz)]
+                              (or (.get plan-cache k)
+                                  ;; Asked of far more than the view, so the
+                                  ;; answer holds for as long as the car is
+                                  ;; anywhere in this half-kilometre.
+                                  (let [cx (* 512 bx) cz (* 512 bz)
+                                        v (worldgen/interchanges-near
+                                           seed (- cx 1300) (- cz 1300)
+                                           (+ cx 1300) (+ cz 1300))]
+                                    (.set plan-cache k v)
+                                    v)))
+            {:keys [points]} ramps]
+      (set! (.-strokeStyle ctx) road-colour)
+      (set! (.-lineWidth ctx) (max 1.0 (* 2.0 worldgen/ramp-half per-m)))
+      (set! (.-lineCap ctx) "round")
+      (.beginPath ctx)
+      (let [[ax az] (first points)] (.moveTo ctx (sx ax) (sz az)))
+      (doseq [[bx bz] (rest points)] (.lineTo ctx (sx bx) (sz bz)))
+      (.stroke ctx))
     ;; Then every street, at something like its real width, so an arterial
     ;; reads as one without being labelled.
     (doseq [^js c cells
